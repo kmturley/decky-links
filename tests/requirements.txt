@@ -1,0 +1,2 @@
+pyserial
+adafruit-circuitpython-pn532
