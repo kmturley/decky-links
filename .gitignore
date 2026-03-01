@@ -57,4 +57,6 @@ cli/*
 cli/decky
 
 # Others
-.venv
+.venv/
+wiki/
+py_modules/

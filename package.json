@@ -1,30 +1,34 @@
 {
-  "name": "decky-plugin-template",
+  "name": "decky-links",
   "version": "0.0.1",
-  "description": "A template to quickly create decky plugins from scratch, based on TypeScript and webpack",
+  "description": "Decky Links enables launching games and other URIs on SteamOS by tapping NFC cards",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
+    "deploy": "rsync -rtv --no-perms --no-owner --no-group --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r --rsh='ssh' ./ deck@steamdeck.local:~/homebrew/plugins/decky-links --exclude .git --exclude node_modules --exclude .venv",
+    "stop": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl stop plugin_loader\" && ssh deck@steamdeck.local \"echo 'ssap' | sudo -S chown -R deck:deck /home/deck/homebrew/plugins/\"",
+    "start": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl start plugin_loader\"",
     "watch": "rollup -c -w",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SteamDeckHomebrew/decky-plugin-template.git"
+    "url": "git+https://github.com/kmturley/decky-links.git"
   },
   "keywords": [
     "decky",
     "plugin",
-    "plugin-template",
     "steam-deck",
-    "deck"
+    "deck",
+    "nfc",
+    "launch"
   ],
-  "author": "You <you@you.tld>",
+  "author": "kmturley",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"
+    "url": "https://github.com/kmturley/decky-links/issues"
   },
-  "homepage": "https://github.com/SteamDeckHomebrew/decky-plugin-template#readme",
+  "homepage": "https://github.com/kmturley/decky-links#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
     "@decky/ui": "^4.11.0",

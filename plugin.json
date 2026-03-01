@@ -1,11 +1,18 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
-  "flags": ["debug", "_root"],
+  "name": "Decky Links",
+  "author": "kmturley",
+  "flags": [
+    "debug",
+    "_root"
+  ],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
+    "tags": [
+      "nfc",
+      "launch",
+      "tools"
+    ],
+    "description": "Decky Links enables launching games and other URIs on SteamOS by tapping NFC cards.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }
