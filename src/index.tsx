@@ -17,7 +17,7 @@ import {
   definePlugin,
   toaster,
 } from "@decky/api"
-import { useState, useEffect, FC } from "react";
+import { useState, useEffect, FC, useRef } from "react";
 import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag } from "react-icons/fa";
 
 // Backend calls
@@ -26,6 +26,7 @@ const setSetting = callable<[key: string, value: any], boolean>("set_setting");
 const startPairing = callable<[uri: string], boolean>("start_pairing");
 const cancelPairing = callable<[], boolean>("cancel_pairing");
 const getReaderStatus = callable<[], { connected: boolean, path: string }>("get_reader_status");
+const getTagStatus = callable<[], { uid: string | null, uri: string | null }>("get_tag_status");
 const setRunningGame = callable<[appid: number | null], void>("set_running_game");
 
 const StatusRow: FC<{ icon: any, label: string, value: string, active: boolean }> = ({ icon, label, value, active }) => (
@@ -55,25 +56,43 @@ const Content: FC = () => {
   const [tagUri, setTagUri] = useState<string | null>(null);
   const [activeAppId, setActiveAppId] = useState<string | null>(null);
 
+  // REFS for stable access in async callbacks/loops
+  const activeAppIdRef = useRef<string | null>(null);
+  const tagUidRef = useRef<string | null>(null);
+  const settingsRef = useRef<any>(null);
+
   useEffect(() => {
     let active = true;
 
     const init = async () => {
       const s = await getSettings();
-      if (active) setSettings(s);
+      if (active) {
+        setSettings(s);
+        settingsRef.current = s;
+      }
+      // Initial poll for immediate UI
       const stat = await getReaderStatus();
       if (active) setStatus(stat);
+
+      const tag = await getTagStatus();
+      if (active && tag.uid) {
+        setTagUid(tag.uid);
+        setTagUri(tag.uri);
+        tagUidRef.current = tag.uid;
+      }
     };
     init();
 
     // Listen for events
     const tagListener = addEventListener<[data: { uid: string }]>("tag_detected", (data) => {
       setTagUid(data.uid);
+      tagUidRef.current = data.uid;
       setTagUri(null); // Reset URL on new scan
     });
 
     const removeListener = addEventListener("tag_removed", () => {
       setTagUid(null);
+      tagUidRef.current = null;
       setTagUri(null);
     });
 
@@ -81,35 +100,56 @@ const Content: FC = () => {
       setStatus(data);
     });
 
-    const uriListener = addEventListener<[data: { uri: string, uid: string }]>("uri_detected", (data) => {
+    const uriListener = addEventListener<[data: { uri: string | null, uid: string }]>("uri_detected", (data) => {
+      // null means no valid URI was found on the tag (Fix #6: replaced "None" sentinel)
       setTagUri(data.uri);
+      setTagUid(data.uid.toUpperCase());
+      tagUidRef.current = data.uid.toUpperCase();
 
       toaster.toast({
-        title: data.uri === "None" ? "NFC Tag Detected" : `Tag: ${data.uid}`,
-        body: `Url: ${data.uri}`
+        title: data.uri ? `Tag: ${data.uid}` : "NFC Tag Detected",
+        body: data.uri ? `Url: ${data.uri}` : "No URI found on tag",
       });
 
-      if (data.uri !== "None") {
-        if (settings?.auto_launch) {
-          // If it's a Steam game, use the recommended RunGame API
+      if (data.uri) {
+        const currentSettings = settingsRef.current;
+        if (currentSettings?.auto_launch) {
+          const currentAppId = activeAppIdRef.current;
+
+          const uriAppId = data.uri.includes("steam://rungameid/")
+            ? data.uri.replace("steam://rungameid/", "").split("/")[0]
+            : null;
+
+          // Spec §8: Do not launch if this exact game is already running
+          if (currentAppId && uriAppId && String(currentAppId) === String(uriAppId)) {
+            console.info(`[ Decky Links ] Game ${currentAppId} is already running. Skipping redundant launch.`);
+            return;
+          }
+
           if (data.uri.startsWith("steam://rungameid/")) {
-            const appId = data.uri.replace("steam://rungameid/", "").split("/")[0];
-            console.log(`Frontend initiating launch for Steam AppID: ${appId}`);
+            const appId = uriAppId;
+            console.info(`[ Decky Links ] Initiating Steam Launch: ${appId}`);
             try {
               // @ts-ignore
               if (window.SteamClient?.Apps?.RunGame) {
                 // @ts-ignore
                 window.SteamClient.Apps.RunGame(String(appId), "", -1, 100);
+                // Fix #2: immediately notify backend so it can enforce no-stacking
+                // without waiting for the 500ms polling loop to detect the game.
+                const numId = parseInt(appId!);
+                activeAppIdRef.current = String(appId);
+                setActiveAppId(String(appId));
+                setRunningGame(numId).catch(console.error);
                 return;
               }
             } catch (e) {
-              console.error("Failed to launch via SteamClient, falling back:", e);
-              // If it fails with an exception, we let it fall through to Navigation.Navigate
+              console.error("RunGame failed, falling back:", e);
             }
           }
 
-          // Fallback for non-steam or if SteamClient is missing
-          console.log(`Frontend using navigation fallback: ${data.uri}`);
+          // Non-Steam URI fallback (heroic://, https://, etc.) — backend handles launch
+          // via xdg-open; frontend just navigates to trigger the handler if needed.
+          console.info(`[ Decky Links ] Navigation fallback: ${data.uri}`);
           Navigation.Navigate(data.uri);
         }
       }
@@ -125,26 +165,77 @@ const Content: FC = () => {
       });
     });
 
-    const gameRemovalListener = addEventListener<[data: { appid: number }]>("card_removed_during_game", () => {
-      // Logic for pausing/menu: only if we aren't busy pairing
-      Navigation.CloseSideMenus();
-      Navigation.OpenSideMenu(SideMenu.QuickAccess);
+    const gameRemovalListener = addEventListener<[data: { appid: number, uid: string, uri: string }]>("card_removed_during_game", (data) => {
+      const currentAppId = activeAppIdRef.current;
+      const currentSettings = settingsRef.current;
+
+      const uriAppId = data.uri && data.uri.includes("steam://rungameid/")
+        ? data.uri.replace("steam://rungameid/", "").split("/")[0]
+        : null;
+
+      // Only trigger if the removed tag's game matches the currently running game.
+      // activeAppIdRef is kept in sync by the polling loop — if it's set, a game is running.
+      // The window.location.pathname check was removed because SteamOS always shows a
+      // system path (e.g. /library) even while the user is actively playing a game.
+      if (currentAppId && uriAppId && String(currentAppId) === String(uriAppId)) {
+        if (currentSettings?.auto_close) {
+          console.info(`[ Decky Links ] Paired tag removed. Auto-closing game: ${currentAppId}`);
+          // @ts-ignore
+          if (window.SteamClient?.Apps?.TerminateApp) {
+            // TerminateApp requires 2 args: (appId: string, bForce: boolean)
+            // @ts-ignore
+            window.SteamClient.Apps.TerminateApp(String(currentAppId), true);
+          }
+        } else {
+          console.info(`[ Decky Links ] Paired tag removed. Pausing game: ${currentAppId}`);
+          Navigation.CloseSideMenus();
+          Navigation.OpenSideMenu(SideMenu.Main);
+        }
+      } else {
+        console.info(`[ Decky Links ] Tag removed but game not running (currentAppId=${currentAppId}, uriAppId=${uriAppId}). Ignoring.`);
+      }
     });
 
-    // idiomatic Decky polling pattern
-    const pollGame = async () => {
+    // Unified Polling Loop
+    const pollLoop = async () => {
       while (active) {
-        const app = Router.MainRunningApp;
-        const currentId = (app && app.appid !== "0") ? app.appid : null;
+        try {
+          // 1. Poll Game Status (Support both function and property signatures)
+          const appRaw = Router.MainRunningApp;
+          const app = typeof appRaw === 'function' ? (appRaw as any)() : appRaw;
+          const currentId = (app && app.appid !== "0") ? String(app.appid) : null;
 
-        if (currentId !== activeAppId) {
-          setActiveAppId(currentId);
-          await setRunningGame(currentId ? parseInt(currentId) : null);
+          if (currentId !== activeAppIdRef.current) {
+            console.info(`[ Decky Links ] Game change: ${activeAppIdRef.current} -> ${currentId}`);
+            activeAppIdRef.current = currentId;
+            setActiveAppId(currentId);
+            // Sync with backend
+            await setRunningGame(currentId ? parseInt(currentId) : null);
+          }
+
+          // 2. Poll Tag Status (if missing)
+          if (!tagUidRef.current) {
+            const t = await getTagStatus();
+            if (active && t.uid) {
+              setTagUid(t.uid);
+              tagUidRef.current = t.uid;
+              setTagUri(t.uri);
+            }
+          }
+
+          // 3. Poll Reader Status (to fix "Not Found" on slow start)
+          const reader = await getReaderStatus();
+          if (active) setStatus(reader);
+
+        } catch (e) {
+          console.error("[ Decky Links ] Polling loop error:", e);
         }
-        await sleep(1500);
+
+        // Fix #2: 500ms polling gives faster game-state detection (was 1500ms)
+        await sleep(500);
       }
     };
-    pollGame();
+    pollLoop();
 
     return () => {
       active = false;
@@ -155,11 +246,13 @@ const Content: FC = () => {
       removeEventListener("pairing_result", pairingListener);
       removeEventListener("card_removed_during_game", gameRemovalListener);
     };
-  }, [activeAppId, settings]);
+  }, []); // Run ONCE on mount
 
   const updateSetting = async (key: string, value: any) => {
     await setSetting(key, value);
-    setSettings({ ...settings, [key]: value });
+    const newSettings = { ...settings, [key]: value };
+    setSettings(newSettings);
+    settingsRef.current = newSettings;
   };
 
   const handlePairing = async () => {
@@ -171,7 +264,7 @@ const Content: FC = () => {
       const app = Router.MainRunningApp;
       if (app && app.appid && app.appid !== "0") {
         const uri = `steam://rungameid/${app.appid}`;
-        console.log(`Starting pairing for: ${uri}`);
+        console.info(`[ Decky Links ] Starting pairing for: ${uri}`);
         await startPairing(uri);
         setPairing(true);
         toaster.toast({
@@ -205,8 +298,8 @@ const Content: FC = () => {
         <StatusRow
           icon={<FaLink />}
           label="Url"
-          value={tagUri ? tagUri : "Empty"}
-          active={!!tagUri && tagUri !== "None"}
+          value={tagUri ?? "Empty"}
+          active={!!tagUri}
         />
         <StatusRow
           icon={<FaGamepad />}
@@ -240,6 +333,14 @@ const Content: FC = () => {
             description="Launch games automatically on tap"
             checked={settings.auto_launch}
             onChange={(v: boolean) => updateSetting("auto_launch", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Auto-Close"
+            description="Exit game automatically on removal"
+            checked={settings.auto_close}
+            onChange={(v: boolean) => updateSetting("auto_close", v)}
           />
         </PanelSectionRow>
       </PanelSection>

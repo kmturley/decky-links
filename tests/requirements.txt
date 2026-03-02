@@ -1,2 +1,2 @@
-pyserial
-adafruit-circuitpython-pn532
+pytest
+pytest-asyncio

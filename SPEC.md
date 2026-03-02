@@ -57,27 +57,41 @@ The system is designed to:
 
 ### 3.1 Storage Format
 
-NFC tags must contain a JSON payload stored in an NDEF text record.
+NFC tags store a URI payload in a single **NDEF URI record** (NDEF Record Type Name `U`).
 
-### 3.2 Schema v1
+> **Implementation decision**: NDEF URI records are used instead of JSON inside a text record.
+> This was a deliberate choice to maximise compatibility with standard NFC hardware, readers,
+> mobile apps, and operating systems that natively understand NDEF URI records without
+> requiring any custom parsing layer.
 
-```json
-{
-  "v": 1,
-  "uri": "steam://rungameid/400"
-}
+### 3.2 Format
+
+The tag contains a single NDEF message consisting of one URI record.
+
+Example URI stored on tag:
+
 ```
+steam://rungameid/400
+```
+
+The URI is written/read using an NDEF TLV wrapper (Type `0x03` / Length / Value / `0xFE` terminator),
+as is standard for Type 2 and Mifare Classic NFC tags.
 
 ### 3.3 Requirements
 
-* `v` (integer): schema version
-* `uri` (string): opaque URI or local path
+* `uri` (string): opaque URI or approved local path (see §4 for allowlist)
 * Must be UTF-8 encoded
-* Must fit within NTAG213 minimum capacity (~144 bytes usable)
+* Total NDEF payload must fit within NTAG213 minimum capacity (~140 bytes usable after TLV overhead)
 
-### 3.4 Future Compatibility
+### 3.4 Compatibility
 
-The system must ignore unknown fields in future schema versions.
+Because the format is standard NDEF, tags written by this plugin can be read by:
+
+* Any standard NFC reader app on Android or iOS
+* Any PC/SC compatible reader with NDEF support
+* Other Decky Links installations
+
+The system must gracefully ignore tags that contain NDEF records of unexpected types.
 
 ---
 
