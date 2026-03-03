@@ -14,6 +14,7 @@ Tests cover:
   - Dual-launch prevention (backend defers Steam URIs to frontend)
 """
 import asyncio
+import json
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 
@@ -125,6 +126,9 @@ class TestURIValidation:
     def test_https_uri_allowed(self, plugin):
         assert plugin._validate_uri("https://example.com") is True
 
+    def test_non_launch_steam_uri_blocked(self, plugin):
+        assert plugin._validate_uri("steam://open/games/details/400") is False
+
     def test_heroic_uri_blocked(self, plugin):
         assert plugin._validate_uri("heroic://launch/some-game-id") is False
 
@@ -149,6 +153,33 @@ class TestURIValidation:
 
     def test_none_blocked(self, plugin):
         assert plugin._validate_uri(None) is False   # type: ignore
+
+
+# -----------------------------------------------------------------------
+# Settings Load Validation
+# -----------------------------------------------------------------------
+
+class TestSettingsLoadValidation:
+
+    def test_invalid_settings_from_file_are_ignored(self, tmp_path):
+        from main import SettingsManager
+
+        settings_path = tmp_path / "settings.json"
+        settings_path.write_text(json.dumps({
+            "device_path": "/etc/passwd",   # invalid path prefix
+            "baudrate": "fast",             # invalid type
+            "polling_interval": "0",        # invalid type/range
+            "auto_launch": "yes",           # invalid type
+            "auto_close": False,            # valid
+        }))
+
+        settings = SettingsManager(str(settings_path))
+
+        assert settings.get("device_path").startswith("/dev/")
+        assert settings.get("baudrate") == 115200
+        assert settings.get("polling_interval") == 0.5
+        assert settings.get("auto_launch") is True
+        assert settings.get("auto_close") is False
 
 
 # -----------------------------------------------------------------------
@@ -514,6 +545,19 @@ class TestNTAGCapacity:
         success, err = plugin._write_ndef_uri(uid, uri)
         # Should not be rejected by size check (may fail auth with mock, but not size)
         assert "too long" not in (err or "").lower()
+
+    def test_write_skips_mifare_trailer_blocks(self, plugin):
+        uid = _make_uid()
+        uri = "https://" + "x" * 72  # Forces write beyond first sector data blocks
+        plugin.reader.mifare_classic_write_block.reset_mock()
+
+        success, err = plugin._write_ndef_uri(uid, uri)
+
+        assert success is True
+        written_blocks = [c.args[0] for c in plugin.reader.mifare_classic_write_block.call_args_list]
+        assert written_blocks
+        assert 7 not in written_blocks
+        assert all((b % 4) != 3 for b in written_blocks)
 
 
 # -----------------------------------------------------------------------

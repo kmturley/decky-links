@@ -92,6 +92,7 @@ as is standard for Type 2 and Mifare Classic NFC tags.
 * `uri` (string): approved URI (see §4 allowlist)
 * Must be UTF-8 encoded
 * Total NDEF payload must fit within NTAG213 minimum capacity (~140 bytes usable after TLV overhead)
+* For Mifare Classic tags, writes must avoid sector trailer blocks (key/access-bit blocks)
 
 ### 3.4 Compatibility
 
@@ -107,17 +108,19 @@ The system must gracefully ignore tags that contain NDEF records of unexpected t
 
 ## 4. Supported URI Types
 
-Protocol allowlist. Only allow specific URI schemes in v1:
+Protocol allowlist. Only allow specific URI targets in v1:
 
-* steam://
-* https://
+* `steam://run/<appid>`
+* `steam://rungameid/<gameID64>`
+* `https://...`
 
 Examples:
 
+* `steam://run/400`
 * `steam://rungameid/400`
 * `https://example.com`
 
-`steam://` launch handling is performed by the frontend/Steam client integration.
+`steam://run/*` and `steam://rungameid/*` launch handling is performed by the frontend/Steam client integration.
 `https://` launch handling is performed by backend system URI execution.
 
 ---
@@ -162,7 +165,7 @@ Examples:
 Actions:
 
 * Play scan audio
-* Parse JSON payload
+* Parse NDEF URI payload
 * Launch URI
 * Mark UID as active
 
@@ -209,7 +212,7 @@ User selects "Pair Card" while viewing a game.
 3. Retrieve URI of current game.
    * Steam title: `steam://run/<appid>`
    * Non-Steam shortcut: `steam://rungameid/<gameID64>`
-4. Overwrite tag payload with new JSON.
+4. Overwrite tag payload with a new NDEF URI record.
 5. Play confirmation sound.
 6. Exit pairing mode.
 7. Do NOT launch the game.
@@ -297,7 +300,7 @@ Audio must be lightweight and non-intrusive.
 
 ### Invalid Tag Data
 
-If JSON parsing fails:
+If NDEF URI parsing fails:
 
 * Play error sound
 * Do not attempt launch
@@ -330,7 +333,7 @@ If JSON parsing fails:
 The system requires:
 
 1. NFC polling loop
-2. NDEF read/write support
+2. NDEF URI read/write support
 3. System URI launching capability
 4. Process or game-running detection
 5. Input simulation (Steam button / Steam + B)
@@ -348,7 +351,7 @@ Key technical unknowns to validate early:
 ## 15. Suggested Initial Development Milestones
 
 1. Prototype NFC detection and UID logging.
-2. Implement NDEF JSON parsing.
+2. Implement NDEF URI parsing.
 3. Implement URI launch test.
 4. Implement game-running detection.
 5. Implement state machine controller.

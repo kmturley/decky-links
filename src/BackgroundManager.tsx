@@ -208,6 +208,7 @@ export function startBackgroundManager(): () => void {
 
   // event listeners
   const tagListener = addEventListener<[data: { uid: string }]>("tag_detected", (data) => {
+    if (!data || typeof data.uid !== "string") return;
     sharedState.tagUid = data.uid;
     sharedState.tagUri = null;
     tagUidRef.current = data.uid;
@@ -222,19 +223,24 @@ export function startBackgroundManager(): () => void {
   });
 
   const statusListener = addEventListener<[data: { connected: boolean, path: string }]>("reader_status", (data) => {
+    if (!data || typeof data.connected !== "boolean" || typeof data.path !== "string") return;
     sharedState.readerStatus = data;
     notifySubscribers();
   });
 
   const uriListener = addEventListener<[data: { uri: string | null, uid: string }]>("uri_detected", (data) => {
-    sharedState.tagUri = data.uri;
-    sharedState.tagUid = data.uid.toUpperCase();
-    tagUidRef.current = data.uid.toUpperCase();
+    if (!data || typeof data.uid !== "string") return;
+    const normalizedUid = data.uid.toUpperCase();
+    const uri = typeof data.uri === "string" ? data.uri : null;
+
+    sharedState.tagUri = uri;
+    sharedState.tagUid = normalizedUid;
+    tagUidRef.current = normalizedUid;
     notifySubscribers();
 
-    if (data.uri) {
+    if (uri) {
       const currentSettings = settingsRef.current;
-      const uriAppId = parseSteamAppIdFromUri(data.uri);
+      const uriAppId = parseSteamAppIdFromUri(uri);
 
       if (currentSettings?.auto_launch) {
         const currentAppId = activeAppIdRef.current;
@@ -244,14 +250,14 @@ export function startBackgroundManager(): () => void {
           return;
         }
 
-        if (data.uri.startsWith(STEAM_RUN_PREFIX) || data.uri.startsWith(STEAM_RUNGAMEID_PREFIX)) {
-          console.info(`[ Decky Links ] Launching Steam URI: ${data.uri}`);
-          launchSteamUri(data.uri);
+        if (uri.startsWith(STEAM_RUN_PREFIX) || uri.startsWith(STEAM_RUNGAMEID_PREFIX)) {
+          console.info(`[ Decky Links ] Launching Steam URI: ${uri}`);
+          launchSteamUri(uri);
           return;
         }
 
-        console.info(`[ Decky Links ] Navigation fallback: ${data.uri}`);
-        Navigation.Navigate(data.uri);
+        console.info(`[ Decky Links ] Navigation fallback: ${uri}`);
+        Navigation.Navigate(uri);
         return;
       }
 
@@ -265,6 +271,7 @@ export function startBackgroundManager(): () => void {
   });
 
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
+    if (!data || typeof data.success !== "boolean") return;
     sharedState.pairing = false;
     notifySubscribers();
     if (!data.success && !pairingToastsSuppressed()) {
@@ -278,6 +285,7 @@ export function startBackgroundManager(): () => void {
   });
 
   const gameRemovalListener = addEventListener<[data: { appid: number, uid: string, uri: string }]>("card_removed_during_game", (data) => {
+    if (!data || typeof data.uri !== "string") return;
     const currentAppId = activeAppIdRef.current;
     const currentSettings = settingsRef.current;
     const uriAppId = parseSteamAppIdFromUri(data.uri);

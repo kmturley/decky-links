@@ -21,7 +21,8 @@ Core goals:
 - Detects NFC tag presence/removal via PN532 (UART).
 - Reads/writes NDEF URI records on tags.
 - Supports approved URI types:
-  - `steam://`
+  - `steam://run/<appid>`
+  - `steam://rungameid/<gameID64>`
   - `https://`
 - Supports Steam and non-Steam game launching:
   - Steam titles via `steam://run/<appid>`
@@ -149,7 +150,7 @@ Notes:
 Aligned with v1 spec intent:
 
 - URI-based payloads
-- allowlisted URI schemes only (`steam://`, `https://`)
+- allowlisted launch URIs only (`steam://run/*`, `steam://rungameid/*`, `https://*`)
 - single active-card/game-safe behavior
 - no stacking launches
 - no auto-relaunch after game exit
@@ -164,8 +165,10 @@ Implementation detail:
 ## Security and Safety Constraints
 
 - URI scheme/path allowlist is enforced backend-side.
-- Current allowlist is intentionally strict: `steam://` and `https://` only.
+- Current allowlist is intentionally strict: `steam://run/*`, `steam://rungameid/*`, and `https://` only.
 - Setting updates are validated server-side before persistence.
+- Settings loaded from disk are validated before being applied.
+- Mifare Classic writes skip trailer blocks to avoid key/access-bit corruption.
 - Launch logic blocks redundant launches for currently running app IDs.
 
 ## Troubleshooting

@@ -155,7 +155,6 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     let cancelled = false;
 
     const tryFind = () => {
-      console.info("[ Decky Links ] trying to locate controller button");
       const btn = document.querySelector('[aria-label="Configure Controller"]');
       if (btn && btn.parentElement) {
         if (!cancelled) setAnchor(btn.parentElement as HTMLElement);
@@ -291,7 +290,6 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   if (show && embedded) {
     iconNode = icon;
   } else if (show && anchor) {
-    console.info("[ Decky Links ] rendering portal icon with anchor", anchor);
     iconNode = createPortal(icon, anchor);
   }
 

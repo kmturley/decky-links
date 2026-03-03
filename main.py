@@ -6,6 +6,7 @@ import json
 import traceback
 import subprocess
 from enum import Enum
+from urllib.parse import urlparse
 
 # Add vendored modules to path
 import decky
@@ -21,12 +22,20 @@ import ndef
 # Constants
 # -----------------------------------------------------------------------
 
-# URI allowlist (restricted): only Steam protocol and HTTPS links.
-ALLOWED_URI_SCHEMES = ("steam://", "https://")
+# URI allowlist (restricted).
+# Steam links are intentionally narrowed to launch endpoints only.
+ALLOWED_STEAM_URI_PREFIXES = (
+    "steam://run/",
+    "steam://rungameid/",
+)
+ALLOWED_URI_SCHEMES = ("https://",)
 
 # NTAG213 usable payload limit (Spec §3.3 – "~144 bytes usable").
 # Subtract 4 bytes overhead for the NDEF TLV wrapper and record header.
 NTAG213_MAX_PAYLOAD_BYTES = 140
+MIFARE_CLASSIC_FIRST_DATA_BLOCK = 4
+MIFARE_CLASSIC_MAX_BLOCK = 62
+MIFARE_CLASSIC_BLOCK_SIZE = 16
 
 ALLOWED_SETTING_KEYS = {
     "device_path",
@@ -73,7 +82,16 @@ class SettingsManager:
         try:
             if os.path.exists(self.path):
                 with open(self.path, "r") as f:
-                    self.settings.update(json.load(f))
+                    loaded = json.load(f)
+                    if not isinstance(loaded, dict):
+                        raise ValueError("Settings file must contain a JSON object.")
+                    for key, value in loaded.items():
+                        if key in ALLOWED_SETTING_KEYS and self._validate_setting(key, value):
+                            self.settings[key] = value
+                        elif key in ALLOWED_SETTING_KEYS:
+                            decky.logger.warning(
+                                f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+                            )
         except Exception as e:
             decky.logger.error(f"Failed to load settings: {e}")
 
@@ -91,6 +109,21 @@ class SettingsManager:
     def set(self, key, value):
         self.settings[key] = value
         self.save()
+
+    def _validate_setting(self, key, value) -> bool:
+        if key == "device_path":
+            return (
+                isinstance(value, str)
+                and len(value) <= 255
+                and value.startswith("/dev/")
+            )
+        if key == "baudrate":
+            return isinstance(value, int) and 1200 <= value <= 1_000_000
+        if key == "polling_interval":
+            return isinstance(value, (int, float)) and 0.1 <= float(value) <= 10.0
+        if key in ("auto_launch", "auto_close"):
+            return isinstance(value, bool)
+        return False
 
 
 # -----------------------------------------------------------------------
@@ -136,12 +169,15 @@ class Plugin:
     def _validate_uri(self, uri: str) -> bool:
         """
         Returns True when uri is permitted by the protocol allowlist.
-        Allowed: steam:// and https:// only.
+        Allowed: steam://run/*, steam://rungameid/*, and https:// only.
         """
-        if not uri:
+        if not isinstance(uri, str) or not uri:
             return False
-        if any(uri.startswith(scheme) for scheme in ALLOWED_URI_SCHEMES):
+        if any(uri.startswith(prefix) for prefix in ALLOWED_STEAM_URI_PREFIXES):
             return True
+        if any(uri.startswith(scheme) for scheme in ALLOWED_URI_SCHEMES):
+            parsed = urlparse(uri)
+            return parsed.scheme == "https" and bool(parsed.netloc)
         return False
 
     def _validate_setting(self, key, value) -> bool:
@@ -225,7 +261,10 @@ class Plugin:
                         pass
                     self.uart = None
 
-            await asyncio.sleep(self.settings.get("polling_interval"))
+            interval = self.settings.get("polling_interval")
+            if not isinstance(interval, (int, float)) or not (0.1 <= float(interval) <= 10.0):
+                interval = 0.5
+            await asyncio.sleep(float(interval))
 
     # --- Removal Notification (extracted for testability) ---
 
@@ -378,10 +417,12 @@ class Plugin:
                 decky.logger.info("Auth failed for block 4 – attempting raw read fallback")
 
             data = bytearray()
-            for i in range(4, 8):
+            for i in self._iter_mifare_data_blocks():
                 block = self.reader.mifare_classic_read_block(i)
                 if block:
                     data.extend(block)
+                    if 0xFE in block:
+                        break
                 else:
                     break
 
@@ -488,11 +529,21 @@ class Plugin:
             tlv = bytearray([0x03, len(message)]) + message + b"\xFE"
 
             # Pad to Mifare Classic block size (16 bytes)
-            while len(tlv) % 16 != 0:
+            while len(tlv) % MIFARE_CLASSIC_BLOCK_SIZE != 0:
                 tlv.append(0x00)
 
-            for i in range(0, len(tlv), 16):
-                block_num  = 4 + (i // 16)
+            writable_blocks = self._iter_mifare_data_blocks()
+            required_blocks = len(tlv) // MIFARE_CLASSIC_BLOCK_SIZE
+            if required_blocks > len(writable_blocks):
+                msg = (
+                    f"URI too long for writable Mifare blocks: needs {required_blocks}, "
+                    f"available {len(writable_blocks)}."
+                )
+                decky.logger.error(msg)
+                return False, msg
+
+            for i in range(0, len(tlv), MIFARE_CLASSIC_BLOCK_SIZE):
+                block_num = writable_blocks[i // MIFARE_CLASSIC_BLOCK_SIZE]
                 block_data = tlv[i:i + 16]
                 decky.logger.info(f"Writing NDEF block {block_num}: {block_data.hex()}")
                 if not self.reader.mifare_classic_write_block(block_num, block_data):
@@ -507,6 +558,15 @@ class Plugin:
             decky.logger.error(f"Error writing NDEF: {e}")
             decky.logger.error(traceback.format_exc())
             return False, str(e)
+
+    def _iter_mifare_data_blocks(self):
+        blocks = []
+        for block in range(MIFARE_CLASSIC_FIRST_DATA_BLOCK, MIFARE_CLASSIC_MAX_BLOCK + 1):
+            # Skip trailer blocks (every 4th block in Classic 1K sectors).
+            if block % 4 == 3:
+                continue
+            blocks.append(block)
+        return blocks
 
     # --- Launch ---
 
