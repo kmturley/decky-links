@@ -12,6 +12,7 @@ The system is designed to:
 * Use SteamOS-native behaviors for quitting games
 * Provide predictable, deterministic behavior
 * Be installable as a self-contained extension (v1 scope)
+* Support both native Steam titles and non-Steam shortcuts
 
 ---
 
@@ -20,8 +21,9 @@ The system is designed to:
 1. **URI-Based Launching**
 
    * NFC tags store a `uri` string.
-   * The system treats the URI as opaque.
-   * Launching is performed via system URI handling (e.g. `xdg-open`).
+   * The system validates URI protocol against an allowlist.
+   * `steam://` URIs are launched through Steam client APIs.
+   * `https://` URIs are launched through system URI handling (`xdg-open`).
 
 2. **Single Active Card Model**
 
@@ -74,12 +76,20 @@ Example URI stored on tag:
 steam://rungameid/400
 ```
 
+Non-Steam shortcuts use:
+
+```
+steam://rungameid/<gameID64>
+```
+
+where `<gameID64>` is Steam's 64-bit game identifier for the shortcut.
+
 The URI is written/read using an NDEF TLV wrapper (Type `0x03` / Length / Value / `0xFE` terminator),
 as is standard for Type 2 and Mifare Classic NFC tags.
 
 ### 3.3 Requirements
 
-* `uri` (string): opaque URI or approved local path (see §4 for allowlist)
+* `uri` (string): approved URI (see §4 allowlist)
 * Must be UTF-8 encoded
 * Total NDEF payload must fit within NTAG213 minimum capacity (~140 bytes usable after TLV overhead)
 
@@ -100,18 +110,15 @@ The system must gracefully ignore tags that contain NDEF records of unexpected t
 Protocol allowlist. Only allow specific URI schemes in v1:
 
 * steam://
-* heroic://
 * https://
-* Absolute paths inside approved directories
 
 Examples:
 
 * `steam://rungameid/400`
-* `heroic://launch/xyz`
 * `https://example.com`
-* `/home/deck/scripts/game.sh`
 
-All URIs are launched via system URI handler.
+`steam://` launch handling is performed by the frontend/Steam client integration.
+`https://` launch handling is performed by backend system URI execution.
 
 ---
 
@@ -200,6 +207,8 @@ User selects "Pair Card" while viewing a game.
 1. Enter pairing mode.
 2. Wait for NFC tag.
 3. Retrieve URI of current game.
+   * Steam title: `steam://run/<appid>`
+   * Non-Steam shortcut: `steam://rungameid/<gameID64>`
 4. Overwrite tag payload with new JSON.
 5. Play confirmation sound.
 6. Exit pairing mode.

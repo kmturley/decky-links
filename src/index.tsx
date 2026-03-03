@@ -110,7 +110,7 @@ const Content: FC = () => {
   if (!state.settings) return null;
 
   return (
-    <PanelSection title="Decky Links">
+    <PanelSection>
       <PanelSection title="Status">
         <StatusRow
           icon={<FaMicrochip />}
@@ -136,9 +136,6 @@ const Content: FC = () => {
           value={state.activeAppId ? `Playing ${state.activeAppId}` : "Not Playing"}
           active={!!state.activeAppId}
         />
-      </PanelSection>
-
-      <PanelSectionRow>
         <ButtonItem
           layout="below"
           onClick={triggerPairing}
@@ -146,16 +143,9 @@ const Content: FC = () => {
         >
           {state.pairing ? "Cancel Pairing" : "Pair Current Game"}
         </ButtonItem>
-      </PanelSectionRow>
+      </PanelSection>
 
       <PanelSection title="Settings">
-        <PanelSectionRow>
-          <TextField
-            label="Device Path"
-            value={state.settings.device_path}
-            onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
-          />
-        </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
             label="Auto-Launch"
@@ -170,6 +160,13 @@ const Content: FC = () => {
             description="Exit game automatically on removal"
             checked={state.settings.auto_close}
             onChange={(v: boolean) => triggerUpdateSetting("auto_close", v)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Device Path"
+            value={state.settings.device_path}
+            onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
           />
         </PanelSectionRow>
       </PanelSection>

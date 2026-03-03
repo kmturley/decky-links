@@ -22,11 +22,12 @@ Core goals:
 - Reads/writes NDEF URI records on tags.
 - Supports approved URI types:
   - `steam://`
-  - `heroic://`
   - `https://`
-  - absolute paths under `/home/deck/`
+- Supports Steam and non-Steam game launching:
+  - Steam titles via `steam://run/<appid>`
+  - Non-Steam shortcuts via `steam://rungameid/<gameID64>`
 - Provides pairing mode to write the current game URI to a tag.
-- Launches Steam titles through Steam client APIs when available, with fallback navigation.
+- Launches Steam URIs through Steam client APIs (`SteamClient.URL.ExecuteSteamURL` / Steam launch APIs).
 - Handles card removal while a paired game is running:
   - optional auto-close
   - otherwise opens Steam side menu flow
@@ -129,11 +130,13 @@ Notes:
 Aligned with v1 spec intent:
 
 - URI-based payloads
+- allowlisted URI schemes only (`steam://`, `https://`)
 - single active-card/game-safe behavior
 - no stacking launches
 - no auto-relaunch after game exit
 - pairing mode with explicit write flow
 - deterministic state transitions and debounced tag removal
+- non-Steam shortcut support through `rungameid` game IDs
 
 Implementation detail:
 
@@ -142,6 +145,7 @@ Implementation detail:
 ## Security and Safety Constraints
 
 - URI scheme/path allowlist is enforced backend-side.
+- Current allowlist is intentionally strict: `steam://` and `https://` only.
 - Setting updates are validated server-side before persistence.
 - Launch logic blocks redundant launches for currently running app IDs.
 

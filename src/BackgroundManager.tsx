@@ -49,6 +49,11 @@ function parseSteamAppIdFromUri(uri: string | null): string | null {
   return null;
 }
 
+function extractRungameidFromUri(uri: string | null): string | null {
+  if (!uri || !uri.startsWith(STEAM_RUNGAMEID_PREFIX)) return null;
+  return uri.replace(STEAM_RUNGAMEID_PREFIX, "").split("/")[0] || null;
+}
+
 function canSkipLaunch(currentAppId: string | null, uriAppId: string | null): boolean {
   return !!(currentAppId && uriAppId && String(currentAppId) === String(uriAppId));
 }
@@ -134,28 +139,34 @@ function launchSteamUri(uri: string): void {
   executeSteamUri(uri);
 }
 
-function terminateSteamApp(appId: string): boolean {
+function isAppStillRunning(appId: string): boolean {
+  const app = getMainRunningApp();
+  const currentId = (app && app.appid !== "0") ? String(app.appid) : null;
+  return currentId === appId;
+}
+
+async function terminateSteamApp(appId: string, launchUri?: string): Promise<boolean> {
   // @ts-ignore
   const terminate = window.SteamClient?.Apps?.TerminateApp;
   if (typeof terminate !== "function") return false;
 
-  const signedAppId = toSignedInt32String(appId);
-  const attemptArgs: Array<[unknown, boolean]> = [
-    [String(appId), true],
-    [String(signedAppId), true],
-    [Number(appId), true],
-    [Number(signedAppId), true],
-    [String(appId), false],
-    [String(signedAppId), false],
-  ];
+  const rungameid = extractRungameidFromUri(launchUri ?? null);
+  const targetId = String(rungameid ?? appId);
 
-  for (const [idArg, forceArg] of attemptArgs) {
-    try {
-      terminate.call((window as any).SteamClient.Apps, idArg, forceArg);
-      console.info(`[ Decky Links ] TerminateApp invoked with appId=${idArg} force=${forceArg}`);
+  try {
+    // Non-Steam shortcuts are reliably terminated by rungameid (gameID64).
+    (terminate as any).call((window as any).SteamClient.Apps, targetId, true);
+    console.info(`[ Decky Links ] TerminateApp invoked with args=${JSON.stringify([targetId, true])}`);
+  } catch (e) {
+    console.debug(`[ Decky Links ] TerminateApp failed for args=${JSON.stringify([targetId, true])}:`, e);
+    return false;
+  }
+
+  // Verify closure instead of assuming success from an accepted API call.
+  for (let i = 0; i < 6; i++) {
+    await sleep(500);
+    if (!isAppStillRunning(appId)) {
       return true;
-    } catch (e) {
-      console.debug(`[ Decky Links ] TerminateApp failed for appId=${idArg} force=${forceArg}:`, e);
     }
   }
 
@@ -270,9 +281,11 @@ export function startBackgroundManager(): () => void {
     if (canSkipLaunch(currentAppId, uriAppId)) {
       if (currentSettings?.auto_close) {
         console.info(`[ Decky Links ] Paired tag removed. Auto-closing game: ${currentAppId}`);
-        if (!currentAppId || !terminateSteamApp(String(currentAppId))) {
-          console.warn(`[ Decky Links ] Failed to terminate app ${currentAppId ?? "unknown"}.`);
-        }
+        void (async () => {
+          if (!currentAppId || !(await terminateSteamApp(String(currentAppId), data.uri))) {
+            console.warn(`[ Decky Links ] Failed to terminate app ${currentAppId ?? "unknown"}.`);
+          }
+        })();
       } else {
         console.info(`[ Decky Links ] Paired tag removed. Pausing game: ${currentAppId}`);
         Navigation.CloseSideMenus();
