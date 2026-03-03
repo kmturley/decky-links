@@ -119,14 +119,18 @@ class TestURIValidation:
     def test_steam_uri_allowed(self, plugin):
         assert plugin._validate_uri("steam://rungameid/400") is True
 
-    def test_heroic_uri_allowed(self, plugin):
-        assert plugin._validate_uri("heroic://launch/some-game-id") is True
+    def test_steam_run_uri_allowed(self, plugin):
+        assert plugin._validate_uri("steam://run/400") is True
 
     def test_https_uri_allowed(self, plugin):
         assert plugin._validate_uri("https://example.com") is True
 
-    def test_approved_absolute_path_allowed(self, plugin):
-        assert plugin._validate_uri("/home/deck/scripts/launch.sh") is True
+    def test_heroic_uri_blocked(self, plugin):
+        assert plugin._validate_uri("heroic://launch/some-game-id") is False
+
+    def test_absolute_command_blocked(self, plugin):
+        cmd = '"/run/media/mmcblk0p1/Emulation/tools/launchers/dolphin-emu.sh" "/run/media/mmcblk0p1/Emulation/roms/game.iso"'
+        assert plugin._validate_uri(cmd) is False
 
     def test_unapproved_absolute_path_blocked(self, plugin):
         assert plugin._validate_uri("/etc/passwd") is False
@@ -170,16 +174,29 @@ class TestNoGameStacking:
 
     @pytest.mark.asyncio
     async def test_non_steam_uri_launched_by_backend(self, plugin, mock_decky):
-        """Backend must xdg-open non-Steam URIs; Steam URIs are left to the frontend."""
+        """Backend must xdg-open https URIs; Steam URIs are left to the frontend."""
         plugin.running_game_id = None
         uid                    = _make_uid()
 
-        with patch.object(plugin, "_read_ndef_uri", return_value="heroic://launch/xyz"), \
+        with patch.object(plugin, "_read_ndef_uri", return_value="https://example.com"), \
              patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
              patch.object(plugin, "_play_sound"):
             await plugin._handle_scan(uid)
 
-        mock_launch.assert_called_once_with("heroic://launch/xyz")
+        mock_launch.assert_called_once_with("https://example.com")
+
+    @pytest.mark.asyncio
+    async def test_local_command_not_launched_when_blocked(self, plugin, mock_decky):
+        plugin.running_game_id = None
+        uid = _make_uid()
+        command = '"/run/media/mmcblk0p1/Emulation/tools/launchers/dolphin-emu.sh" "/run/media/mmcblk0p1/Emulation/roms/game.iso"'
+
+        with patch.object(plugin, "_read_ndef_uri", return_value=command), \
+             patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_scan(uid)
+
+        mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_steam_uri_not_launched_by_backend(self, plugin, mock_decky):
@@ -202,7 +219,7 @@ class TestNoGameStacking:
         }.get(k)
         uid = _make_uid()
 
-        with patch.object(plugin, "_read_ndef_uri", return_value="heroic://launch/xyz"), \
+        with patch.object(plugin, "_read_ndef_uri", return_value="https://example.com"), \
              patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
              patch.object(plugin, "_play_sound"):
             await plugin._handle_scan(uid)

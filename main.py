@@ -21,15 +21,20 @@ import ndef
 # Constants
 # -----------------------------------------------------------------------
 
-# URI allowlist (Spec §4) — only these schemes are permitted
-ALLOWED_URI_SCHEMES = ("steam://", "heroic://", "https://")
-
-# Approved base directories for absolute-path URIs (Spec §4)
-ALLOWED_PATH_PREFIXES = ("/home/deck/",)
+# URI allowlist (restricted): only Steam protocol and HTTPS links.
+ALLOWED_URI_SCHEMES = ("steam://", "https://")
 
 # NTAG213 usable payload limit (Spec §3.3 – "~144 bytes usable").
 # Subtract 4 bytes overhead for the NDEF TLV wrapper and record header.
 NTAG213_MAX_PAYLOAD_BYTES = 140
+
+ALLOWED_SETTING_KEYS = {
+    "device_path",
+    "baudrate",
+    "polling_interval",
+    "auto_launch",
+    "auto_close",
+}
 
 
 # -----------------------------------------------------------------------
@@ -130,18 +135,31 @@ class Plugin:
 
     def _validate_uri(self, uri: str) -> bool:
         """
-        Returns True when uri is permitted by the protocol allowlist (Spec §4).
-        Allowed: steam://, heroic://, https://, and absolute paths inside
-        approved directories (/home/deck/).
+        Returns True when uri is permitted by the protocol allowlist.
+        Allowed: steam:// and https:// only.
         """
         if not uri:
             return False
         if any(uri.startswith(scheme) for scheme in ALLOWED_URI_SCHEMES):
             return True
-        if uri.startswith("/") and any(
-            uri.startswith(prefix) for prefix in ALLOWED_PATH_PREFIXES
-        ):
-            return True
+        return False
+
+    def _validate_setting(self, key, value) -> bool:
+        if key not in ALLOWED_SETTING_KEYS:
+            return False
+
+        if key == "device_path":
+            return (
+                isinstance(value, str)
+                and len(value) <= 255
+                and value.startswith("/dev/")
+            )
+        if key == "baudrate":
+            return isinstance(value, int) and 1200 <= value <= 1_000_000
+        if key == "polling_interval":
+            return isinstance(value, (int, float)) and 0.1 <= float(value) <= 10.0
+        if key in ("auto_launch", "auto_close"):
+            return isinstance(value, bool)
         return False
 
     # --- NFC Loop ---
@@ -327,9 +345,8 @@ class Plugin:
             decky.logger.info(f"Steam URI: frontend will handle launch for: {uri}")
             # State advances to GAME_RUNNING when frontend calls set_running_game()
         else:
-            # Non-Steam URIs (heroic://, https://, approved paths): backend launches
-            # via xdg-open (SteamOS system handler). Frontend cannot handle these.
-            decky.logger.info(f"Backend launching non-Steam URI: {uri}")
+            # Non-Steam allowed URI (https://): backend launches via xdg-open.
+            decky.logger.info(f"Backend launching URI: {uri}")
             await self._launch_uri(uri)
 
     # --- NDEF Read ---
@@ -494,7 +511,7 @@ class Plugin:
     # --- Launch ---
 
     async def _launch_uri(self, uri):
-        """Launch a non-Steam URI via the system handler (xdg-open) — Spec §4."""
+        """Launch a URI via the system handler (xdg-open)."""
         decky.logger.info(f"Launching URI via xdg-open: {uri}")
         try:
             subprocess.Popen(["xdg-open", uri], shell=False)
@@ -519,12 +536,20 @@ class Plugin:
         return self.settings.settings
 
     async def set_setting(self, key, value):
+        if not self._validate_setting(key, value):
+            decky.logger.warning(
+                f"Rejected invalid setting update: key={key!r}, value={value!r}"
+            )
+            return False
         self.settings.set(key, value)
         if key in ("device_path", "baudrate"):
             self.reader = None  # Trigger re-init on next loop
         return True
 
     async def start_pairing(self, uri):
+        if not self._validate_uri(uri):
+            decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
+            return False
         decky.logger.info(f"UI requested pairing for URI: {uri}")
         self.is_pairing  = True
         self.pairing_uri = uri

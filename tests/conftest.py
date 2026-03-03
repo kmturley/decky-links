@@ -8,6 +8,7 @@ without any physical NFC reader or SteamOS environment.
 import sys
 import os
 import asyncio
+import types
 from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
@@ -28,13 +29,24 @@ def _make_decky_mock():
 
 
 _mock_decky      = _make_decky_mock()
-_mock_serial_mod = MagicMock()
 _mock_ndef_mod   = MagicMock()
-_mock_pn532_pkg  = MagicMock()
-_mock_pn532_uart = MagicMock()
+_mock_serial_mod = types.ModuleType("serial")
+_mock_serial_mod.Serial = MagicMock()
+_mock_serial_tools_mod = types.ModuleType("serial.tools")
+_mock_serial_list_ports_mod = types.ModuleType("serial.tools.list_ports")
+_mock_serial_list_ports_mod.comports = MagicMock(return_value=[])
+_mock_serial_tools_mod.list_ports = _mock_serial_list_ports_mod
+_mock_serial_mod.tools = _mock_serial_tools_mod
+
+_mock_pn532_pkg = types.ModuleType("adafruit_pn532")
+_mock_pn532_uart = types.ModuleType("adafruit_pn532.uart")
+_mock_pn532_uart.PN532_UART = MagicMock()
+_mock_pn532_pkg.uart = _mock_pn532_uart
 
 sys.modules.setdefault("decky",                _mock_decky)
 sys.modules.setdefault("serial",               _mock_serial_mod)
+sys.modules.setdefault("serial.tools",         _mock_serial_tools_mod)
+sys.modules.setdefault("serial.tools.list_ports", _mock_serial_list_ports_mod)
 sys.modules.setdefault("ndef",                 _mock_ndef_mod)
 sys.modules.setdefault("adafruit_pn532",       _mock_pn532_pkg)
 sys.modules.setdefault("adafruit_pn532.uart",  _mock_pn532_uart)
