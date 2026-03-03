@@ -32,6 +32,25 @@ Core goals:
   - optional auto-close
   - otherwise opens Steam side menu flow
 
+## Settings Behavior
+
+### Auto-Launch (`auto_launch`)
+
+- Enabled:
+  - Tag tap launches the linked game/URI (if no game is already running).
+- Disabled:
+  - No launch is performed.
+  - For Steam-linked tags, Decky Links opens the game details page instead.
+
+### Auto-Close (`auto_close`)
+
+- Enabled:
+  - Removing a paired tag while its game is running triggers game termination.
+  - Non-Steam shortcuts are terminated using their `rungameid`/gameID64 target.
+- Disabled:
+  - Removing a paired tag does not terminate the game.
+  - Decky Links opens the Steam side menu (pause flow).
+
 ## Architecture
 
 ### Backend (`main.py`)

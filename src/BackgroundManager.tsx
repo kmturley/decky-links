@@ -232,16 +232,12 @@ export function startBackgroundManager(): () => void {
     tagUidRef.current = data.uid.toUpperCase();
     notifySubscribers();
 
-    toaster.toast({
-      title: data.uri ? `Tag: ${data.uid}` : "NFC Tag Detected",
-      body: data.uri ? `Url: ${data.uri}` : "No URI found on tag",
-    });
-
     if (data.uri) {
       const currentSettings = settingsRef.current;
+      const uriAppId = parseSteamAppIdFromUri(data.uri);
+
       if (currentSettings?.auto_launch) {
         const currentAppId = activeAppIdRef.current;
-        const uriAppId = parseSteamAppIdFromUri(data.uri);
 
         if (canSkipLaunch(currentAppId, uriAppId)) {
           console.info(`[ Decky Links ] Game ${currentAppId} is already running. Skipping redundant launch.`);
@@ -256,6 +252,14 @@ export function startBackgroundManager(): () => void {
 
         console.info(`[ Decky Links ] Navigation fallback: ${data.uri}`);
         Navigation.Navigate(data.uri);
+        return;
+      }
+
+      // Auto-launch disabled: surface the linked game by opening details page.
+      if (uriAppId) {
+        const detailsUri = `steam://open/games/details/${uriAppId}`;
+        console.info(`[ Decky Links ] Auto-launch disabled. Opening game details: ${detailsUri}`);
+        executeSteamUri(detailsUri);
       }
     }
   });
@@ -263,11 +267,11 @@ export function startBackgroundManager(): () => void {
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
     sharedState.pairing = false;
     notifySubscribers();
-    if (!pairingToastsSuppressed()) {
+    if (!data.success && !pairingToastsSuppressed()) {
       toaster.toast({
-        title: data.success ? "Pairing Success" : "Pairing Failed",
-        body: data.success ? `Game paired to tag ${data.uid}` : (data.error || "Write failed."),
-        critical: !data.success,
+        title: "Pairing Failed",
+        body: data.error || "Write failed.",
+        critical: true,
         duration: 3000
       });
     }

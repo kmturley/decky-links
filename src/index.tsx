@@ -41,7 +41,6 @@ async function triggerPairing() {
     await cancelPairing();
     sharedState.pairing = false;
     notifySubscribers();
-    toaster.toast({ title: "Pairing Cancelled", body: "Mode exited." });
     return;
   }
 
@@ -65,11 +64,6 @@ async function triggerPairing() {
 
   sharedState.pairing = true;
   notifySubscribers();
-  toaster.toast({
-    title: "Pairing Mode",
-    body: `Tap a tag to pair with Game ID: ${app.appid}`,
-    duration: 5000,
-  });
 }
 
 async function triggerUpdateSetting(key: string, value: any) {

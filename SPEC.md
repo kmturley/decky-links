@@ -236,6 +236,19 @@ User selects "Pair Card" while viewing a game.
    * Card removed AND
    * Game exited
 
+### 8.1 Auto-Launch Setting (`auto_launch`)
+
+* **Enabled**: tapping a valid tag launches the linked game/URI (subject to no-game-running rule).
+* **Disabled**: no game launch is performed; for Steam-linked tags, the game details page is opened instead (`steam://open/games/details/<appid>`).
+
+### 8.2 Auto-Close Setting (`auto_close`)
+
+When a paired tag is removed while its game is running:
+
+* **Enabled**: Decky Links requests Steam to terminate the running game.
+  * For non-Steam shortcuts, termination uses the paired `rungameid`/gameID64 target.
+* **Disabled**: Decky Links does not terminate the game; it opens Steam side menu flow (pause behavior).
+
 ---
 
 ## 9. Game Detection Requirements
