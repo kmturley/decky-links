@@ -6,6 +6,8 @@
 
 Decky Links is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for SteamOS that allows you to launch games and apps by tapping physical NFC tags. By storing portable URI payloads directly on NFC cards, stickers, or 3D-printed cartridges, you can create a physical, cartridge-like experience for your digital games.
 
+![Steam Deck with NFC cards, stickers and 3d-printed cartridges](https://raw.githubusercontent.com/kmturley/decky-links/refs/heads/main/decky-links-media-types.jpg)
+
 ---
 
 ## 🛠 Key Features
@@ -18,6 +20,25 @@ Decky Links is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loade
 * **Auto-Close:** Automatically close games when a tag is removed. If disabled, the Steam menu/pause screen will be displayed.
 
 Watch demo: [https://www.youtube.com/watch?v=dVYhwyseCYk](https://www.youtube.com/watch?v=dVYhwyseCYk)
+
+---
+
+## Decky Links vs Zaparoo
+
+[Zaparoo](https://zaparoo.org) is a cross‑platform "universal loading" system with support for Windows, Linux, SteamOS, MiSTer, Batocera and more; it comes with a Designer app, scripting API, and a wide range of reader types (NFC, barcode, MQTT, etc.).
+
+[Decky Links](https://github.com/kmturley/decky-links) is intentionally narrower scope with deeper SteamOS/Steam Deck integration and utilizes Steam’s native URI launch and quit behaviour. The result is a simpler, lower‑overhead experience for Deck owners who just want to flash a tag and launch games without needing a separate service.
+
+### Key differences
+
+* **Platform scope** – Zaparoo runs everywhere; Decky Links is SteamOS‑only.
+* **Integration depth** – Decky Links uses Steam client APIs and respects Steam’s session rules; Zaparoo is more generic.
+* **Setup** – Zaparoo requires installing a core service and (optionally) the Designer/Mobile app; Decky Links installs via Decky Loader with card pairing built into the plugin UI.
+* **Flexibility vs simplicity** – Zaparoo’s feature set (zap:// URIs, scripting, multiple reader types, queueing, media player support) is broader but also more complex. Decky Links keeps behaviour deterministic (single active card, no stacking/re‑launch) and its URI allowlist is strictly limited.
+* **Community & tooling** – Zaparoo has a larger community, more active development, and hardware partners; Decky Links is a small niche project aimed at Steam Deck enthusiasts.
+
+**When to choose which?**
+Use Zaparoo if you need a unified solution across multiple devices or want advanced rules and APIs; pick Decky Links when you just want a lightweight, Steam‑native NFC launcher on SteamOS and don’t need the extra bells and whistles.
 
 ---
 
