@@ -11,8 +11,8 @@ The system is designed to:
 * Avoid dependence on private Steam APIs
 * Use SteamOS-native behaviors for quitting games
 * Provide predictable, deterministic behavior
-* Be installable as a self-contained extension (v1 scope)
-* Support both native Steam titles and non-Steam shortcuts
+* Be installable as a self-contained extension
+* Support both native Steam games and non-Steam games
 
 ---
 

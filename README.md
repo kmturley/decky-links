@@ -1,58 +1,25 @@
-# Decky Links
+# 🔗 Decky Links
 
-Decky Links is a Steam Deck plugin that launches games and other approved URIs by tapping NFC tags.
+**Launch games and apps on SteamOS using physical NFC tags.**
 
-This project implements the v1 direction defined in [SPEC.md](./SPEC.md): deterministic launch behavior, no game stacking, portable tag data, and minimal SteamOS-native integration.
+![Steam Deck with NFC tag reader](https://raw.githubusercontent.com/kmturley/decky-links/refs/heads/main/decky-links.jpg)
 
-## Project Context
+Decky Links is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for SteamOS that allows you to launch games and apps by tapping physical NFC tags. By storing portable URI payloads directly on NFC cards, stickers, or 3D-printed cartridges, you can create a physical, cartridge-like experience for your digital games.
 
-Decky Links exists to make physical game cards/tags usable on Steam Deck without maintaining a local library index.
+---
 
-Core goals:
+## 🛠 Key Features
 
-- Store launch info directly on NFC tags (portable across devices).
-- Prevent launching over an already running game.
-- Avoid auto-relaunch loops after manual game exit.
-- Use SteamOS-native behavior for launch/close flows.
-- Keep runtime behavior predictable and state-driven.
+* **Simple installation:** Utilize Decky Loader for installation and updates.
+* **NFC Detection:** High-speed polling via PN532 (UART) for instant tag recognition.
+* **Flexible:** Works with Steam games `steam://run/`, Non-Steam games `steam://rungameid/`, and Web URLs `https://`.
+* **Pairing Mode:** Custom SteamOS interface to pair games with NFC tags.
+* **Auto-Launch:** Automatically launch a game when a tag is tapped. If disabled, the game's details page will be displayed.
+* **Auto-Close:** Automatically close games when a tag is removed. If disabled, the Steam menu/pause screen will be displayed.
 
-## What It Does
+---
 
-- Detects NFC tag presence/removal via PN532 (UART).
-- Reads/writes NDEF URI records on tags.
-- Supports approved URI types:
-  - `steam://run/<appid>`
-  - `steam://rungameid/<gameID64>`
-  - `https://`
-- Supports Steam and non-Steam game launching:
-  - Steam titles via `steam://run/<appid>`
-  - Non-Steam shortcuts via `steam://rungameid/<gameID64>`
-- Provides pairing mode to write the current game URI to a tag.
-- Launches Steam URIs through Steam client APIs (`SteamClient.URL.ExecuteSteamURL` / Steam launch APIs).
-- Handles card removal while a paired game is running:
-  - optional auto-close
-  - otherwise opens Steam side menu flow
-
-## Settings Behavior
-
-### Auto-Launch (`auto_launch`)
-
-- Enabled:
-  - Tag tap launches the linked game/URI (if no game is already running).
-- Disabled:
-  - No launch is performed.
-  - For Steam-linked tags, Decky Links opens the game details page instead.
-
-### Auto-Close (`auto_close`)
-
-- Enabled:
-  - Removing a paired tag while its game is running triggers game termination.
-  - Non-Steam shortcuts are terminated using their `rungameid`/gameID64 target.
-- Disabled:
-  - Removing a paired tag does not terminate the game.
-  - Decky Links opens the Steam side menu (pause flow).
-
-## Architecture
+## 🏗 Architecture
 
 ### Backend (`main.py`)
 
