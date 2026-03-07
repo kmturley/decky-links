@@ -57,6 +57,25 @@ The system is designed to:
 
 ## 3. NFC Tag Format
 
+Decky Links is written to communicate with **ISO14443‑A** type tags.  Two
+families are explicitly supported:
+
+* **Mifare Classic 1K/4K** – the small white cards that ship with many PN532
+  kits.  These require authentication with one of the well‑known default
+  keys and provide 16‑byte blocks starting at block 4.  This is the original
+  hardware supported by the plugin.
+* **NTAG21x** (NTAG213, NTAG215, etc.) – the black game‑copy cards many users
+  purchase online.  These tags do **not** implement Classic authentication and
+  instead expose 4‑byte pages; the code automatically falls back to the
+  NTAG read/write commands when a Classic auth attempt fails.
+
+These two formats are functionally equivalent from the user's perspective –
+both can encode a single NDEF URI record – but the plugin handles them
+slightly differently under the hood.  Choosing either family will work as
+long as the card has sufficient capacity for the URI (see §3.3 below).
+
+## 3. NFC Tag Format
+
 ### 3.1 Storage Format
 
 NFC tags store a URI payload in a single **NDEF URI record** (NDEF Record Type Name `U`).

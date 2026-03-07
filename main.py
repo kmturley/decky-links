@@ -33,6 +33,11 @@ ALLOWED_URI_SCHEMES = ("https://",)
 # NTAG213 usable payload limit (Spec §3.3 – "~144 bytes usable").
 # Subtract 4 bytes overhead for the NDEF TLV wrapper and record header.
 NTAG213_MAX_PAYLOAD_BYTES = 140
+# NTAG215 and other NTAG21x tags offer much more user memory (504 bytes for
+# NTAG215).  We don't attempt to autodetect the exact chip, but having a
+# larger ceiling avoids rejecting perfectly good NTAG215 cards.
+NTAG21X_MAX_PAYLOAD_BYTES = 504
+
 MIFARE_CLASSIC_FIRST_DATA_BLOCK = 4
 MIFARE_CLASSIC_MAX_BLOCK = 62
 MIFARE_CLASSIC_BLOCK_SIZE = 16
@@ -390,9 +395,48 @@ class Plugin:
 
     # --- NDEF Read ---
 
+    def _iter_ntag_pages(self):
+        """Return the sequence of user‑writable pages on an NTAG21x device.
+
+        NTAG213/215/etc. reserve pages 0–3 for manufacturer data; user NDEF
+        messages start at page 4.  We limit to page 39 which covers the largest
+        NTAG21x variants (44 total pages, last 4 reserved for configuration).
+        """
+        for page in range(4, 40):
+            yield page
+
+    def _is_ntag(self, uid) -> bool:
+        """Quick heuristic: assume NTAG21x when authentication fails but a
+        raw read still returns data.
+
+        This handles the common case of an NTAG215 card (used by the black
+        game‑copy tags) which does not support Mifare‑Classic auth.
+        """
+        # Try Classic auth first.  If any key works, it's definitely not an NTAG.
+        keys = [
+            b'\xFF\xFF\xFF\xFF\xFF\xFF',
+            b'\xD3\xF7\xD3\xF7\xD3\xF7',
+            b'\xA0\xA1\xA2\xA3\xA4\xA5',
+        ]
+        for key in keys:
+            try:
+                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
+                    return False
+            except Exception:
+                # some readers return errors when auth commands are unsupported
+                break
+            time.sleep(0.05)
+
+        # authentication failed; see if a raw read succeeds
+        try:
+            return self.reader.mifare_classic_read_block(4) is not None
+        except Exception:
+            return False
+
     def _read_ndef_uri(self):
         """
         Read an NDEF URI record from the currently-presented tag (Spec §3.1).
+        Supports both Mifare‑Classic and NTAG21x tags.
         Returns the URI string on success, None on failure.
         """
         try:
@@ -400,25 +444,49 @@ class Plugin:
             if not uid:
                 return None
 
-            # Try to authenticate Mifare Classic Sector 1 (Block 4)
+            # Determine tag type by attempting a Classic authentication.
             authenticated = False
+            is_ntag        = False
+
             keys = [
                 b'\xFF\xFF\xFF\xFF\xFF\xFF',
                 b'\xD3\xF7\xD3\xF7\xD3\xF7',
                 b'\xA0\xA1\xA2\xA3\xA4\xA5',
             ]
             for key in keys:
-                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
+                try:
+                    if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
+                        authenticated = True
+                        break
+                except Exception as e:
+                    decky.logger.info(f"Classic auth exception during read: {e}")
+                    # break early; we'll treat this as an NTAG-tag scenario
+                    authenticated = False
                     break
-                time.sleep(0.05)
+                finally:
+                    time.sleep(0.05)
 
             if not authenticated:
                 decky.logger.info("Auth failed for block 4 – attempting raw read fallback")
+                # if we can still read page 4 then we're likely talking to an
+                # NTAG21x device rather than a Classic with unknown keys.
+                try:
+                    if self.reader.mifare_classic_read_block(4) is not None:
+                        is_ntag = True
+                except Exception:
+                    # read itself might also throw on unsupported commands
+                    is_ntag = True
 
             data = bytearray()
-            for i in self._iter_mifare_data_blocks():
-                block = self.reader.mifare_classic_read_block(i)
+            if is_ntag:
+                blocks_iter = self._iter_ntag_pages()
+                read_fn     = self.reader.ntag2xx_read_block
+            else:
+                blocks_iter = self._iter_mifare_data_blocks()
+                read_fn     = self.reader.mifare_classic_read_block
+
+            for i in blocks_iter:
+                block = read_fn(i)
                 if block:
                     data.extend(block)
                     if 0xFE in block:
@@ -486,74 +554,115 @@ class Plugin:
 
     def _write_ndef_uri(self, uid, uri):
         """
-        Write a URI as an NDEF URI record to a Mifare Classic tag (Spec §3.1).
-        Enforces NTAG213 capacity limit (Spec §3.3).
-        Returns (True, None) on success or (False, error_message) on failure.
+        Write a URI as an NDEF URI record to the currently-presented tag.
+
+        Supports both Mifare‑Classic and NTAG21x devices.  A successful write
+        returns ``(True, None)``; failures yield ``(False, error_message)``.
         """
-        # Capacity check (Spec §3.3)
-        # Estimate: TLV header (2 bytes) + NDEF record header (~4 bytes) +
-        #           NDEF URI prefix byte (1) + URI bytes + TLV terminator (1 byte)
+        # --- prepare TLV payload ------------------------------------------------
         uri_bytes      = uri.encode("utf-8")
+
+        # Build NDEF record and wrap in TLV; length may be adjusted later.
+        record  = ndef.UriRecord(uri)
+        message = b"".join(ndef.message_encoder([record]))
+        tlv     = bytearray([0x03, len(message)]) + message + b"\xFE"
+
+        # Attempt Classic authentication first to distinguish tag types.
+        authenticated = False
+        keys = [
+            b'\xFF\xFF\xFF\xFF\xFF\xFF',
+            b'\xD3\xF7\xD3\xF7\xD3\xF7',
+            b'\xA0\xA1\xA2\xA3\xA4\xA5',
+        ]
+        for key in keys:
+            try:
+                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
+                    authenticated = True
+                    break
+            except Exception as e:
+                # some tags (e.g. NTAG21x) don't support the Classic auth
+                # command; treat that the same as a failed auth so we fall
+                # back to the NTAG path.  Log for debugging.
+                decky.logger.info(f"Classic auth raised, assuming non-Classic tag: {e}")
+                authenticated = False
+                break
+            finally:
+                time.sleep(0.05)
+
+        # choose limits based on tag family
+        if authenticated:
+            max_payload = NTAG213_MAX_PAYLOAD_BYTES
+        else:
+            max_payload = NTAG21X_MAX_PAYLOAD_BYTES
+
+        # capacity check (Spec §3.3)
         estimated_size = 2 + 4 + 1 + len(uri_bytes) + 1
-        if estimated_size > NTAG213_MAX_PAYLOAD_BYTES:
+        if estimated_size > max_payload:
             msg = (
                 f"URI too long: estimated {estimated_size} bytes "
-                f"exceeds NTAG213 limit of {NTAG213_MAX_PAYLOAD_BYTES} bytes."
+                f"exceeds limit of {max_payload} bytes."
             )
             decky.logger.error(msg)
             return False, msg
 
         try:
-            authenticated = False
-            keys = [
-                b'\xFF\xFF\xFF\xFF\xFF\xFF',
-                b'\xD3\xF7\xD3\xF7\xD3\xF7',
-                b'\xA0\xA1\xA2\xA3\xA4\xA5',
-            ]
-            for key in keys:
-                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
-                    break
-                time.sleep(0.05)
+            if authenticated:
+                # --- classic write path ------------------------------------------------
+                # pad to 16‑byte blocks
+                while len(tlv) % MIFARE_CLASSIC_BLOCK_SIZE != 0:
+                    tlv.append(0x00)
 
-            if not authenticated:
-                msg = "Authentication failed: Default keys rejected."
-                decky.logger.error(f"{msg} (UID: {uid.hex()})")
-                return False, msg
-
-            # Build NDEF URI record (Spec §3.1)
-            record  = ndef.UriRecord(uri)
-            message = b"".join(ndef.message_encoder([record]))
-
-            # Wrap in NDEF TLV: [0x03][Length][Message][0xFE]
-            tlv = bytearray([0x03, len(message)]) + message + b"\xFE"
-
-            # Pad to Mifare Classic block size (16 bytes)
-            while len(tlv) % MIFARE_CLASSIC_BLOCK_SIZE != 0:
-                tlv.append(0x00)
-
-            writable_blocks = self._iter_mifare_data_blocks()
-            required_blocks = len(tlv) // MIFARE_CLASSIC_BLOCK_SIZE
-            if required_blocks > len(writable_blocks):
-                msg = (
-                    f"URI too long for writable Mifare blocks: needs {required_blocks}, "
-                    f"available {len(writable_blocks)}."
-                )
-                decky.logger.error(msg)
-                return False, msg
-
-            for i in range(0, len(tlv), MIFARE_CLASSIC_BLOCK_SIZE):
-                block_num = writable_blocks[i // MIFARE_CLASSIC_BLOCK_SIZE]
-                block_data = tlv[i:i + 16]
-                decky.logger.info(f"Writing NDEF block {block_num}: {block_data.hex()}")
-                if not self.reader.mifare_classic_write_block(block_num, block_data):
-                    msg = f"Write failed at block {block_num}"
+                writable_blocks = self._iter_mifare_data_blocks()
+                required_blocks = len(tlv) // MIFARE_CLASSIC_BLOCK_SIZE
+                if required_blocks > len(writable_blocks):
+                    msg = (
+                        f"URI too long for writable Mifare blocks: needs {required_blocks}, "
+                        f"available {len(writable_blocks)}."
+                    )
                     decky.logger.error(msg)
                     return False, msg
 
-            decky.logger.info("NDEF Write Successful")
-            return True, None
+                for i in range(0, len(tlv), MIFARE_CLASSIC_BLOCK_SIZE):
+                    block_num = writable_blocks[i // MIFARE_CLASSIC_BLOCK_SIZE]
+                    block_data = tlv[i : i + 16]
+                    decky.logger.info(f"Writing NDEF block {block_num}: {block_data.hex()}")
+                    if not self.reader.mifare_classic_write_block(block_num, block_data):
+                        msg = f"Write failed at block {block_num}"
+                        decky.logger.error(msg)
+                        return False, msg
 
+                decky.logger.info("NDEF Write Successful")
+                return True, None
+            else:
+                # --- NTAG21x write path ------------------------------------------------
+                decky.logger.info(
+                    "Authentication failed: assuming NTAG21x, using NTAG write path"
+                )
+                # pad to 4‑byte pages
+                while len(tlv) % 4 != 0:
+                    tlv.append(0x00)
+
+                pages = list(self._iter_ntag_pages())
+                required_pages = len(tlv) // 4
+                if required_pages > len(pages):
+                    msg = (
+                        f"URI too long for NTAG pages: needs {required_pages}, "
+                        f"available {len(pages)}."
+                    )
+                    decky.logger.error(msg)
+                    return False, msg
+
+                for i in range(0, len(tlv), 4):
+                    page_num = pages[i // 4]
+                    page_data = tlv[i : i + 4]
+                    decky.logger.info(f"Writing NTAG page {page_num}: {page_data.hex()}")
+                    if not self.reader.ntag2xx_write_block(page_num, page_data):
+                        msg = f"Write failed at page {page_num}"
+                        decky.logger.error(msg)
+                        return False, msg
+
+                decky.logger.info("NTAG NDEF Write Successful")
+                return True, None
         except Exception as e:
             decky.logger.error(f"Error writing NDEF: {e}")
             decky.logger.error(traceback.format_exc())

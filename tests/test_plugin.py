@@ -561,6 +561,89 @@ class TestNTAGCapacity:
 
 
 # -----------------------------------------------------------------------
+# §XX — NTAG21x (e.g. NTAG215) support
+# -----------------------------------------------------------------------
+
+class TestNTAG21xSupport:
+
+    def test_ntag_write_fallback_when_auth_fails(self, plugin):
+        uid = _make_uid()
+        uri = "steam://rungameid/123"
+
+        # simulate a card that rejects Classic auth
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.ntag2xx_write_block.return_value = True
+
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is True
+        assert err is None
+        plugin.reader.ntag2xx_write_block.assert_called()
+
+    def test_ntag_write_handles_auth_throwing(self, plugin):
+        uid = _make_uid()
+        uri = "steam://rungameid/999"
+
+        # simulate driver raising during auth (unexpected response)
+        def bad_auth(uid_arg, blk, kn, key):
+            raise RuntimeError("Received unexpected command response")
+        plugin.reader.mifare_classic_authenticate_block.side_effect = bad_auth
+        plugin.reader.ntag2xx_write_block.return_value = True
+
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is True
+        assert err is None
+        plugin.reader.ntag2xx_write_block.assert_called()
+
+    def test_ntag_capacity_allows_longer_uris(self, plugin):
+        uid = _make_uid()
+        # generate URI just over the 140‑byte Classic limit but under 504
+        uri = "https://" + "a" * 300
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.ntag2xx_write_block.return_value = True
+
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is True
+        assert err is None
+
+    def test_ntag_oversize_still_rejected(self, plugin):
+        uid = _make_uid()
+        uri = "https://" + "a" * 600  # well above 504 limitation
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is False
+        assert "too long" in (err or "").lower()
+
+    def test_read_ndef_uri_on_ntag_detects_and_parses(self, plugin, uid_bytes):
+        # set up the reader to mimic an NTAG
+        plugin.reader.read_passive_target.return_value = uid_bytes
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        # a raw read — non-None tells _is_ntag() to flag NTAG family
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00\x00\x00\x00"
+        # provide some pages containing a TLV terminator
+        # craft a minimal TLV: 0x03 (NDEF msg), length=1, payload=0x00, terminator
+        plugin.reader.ntag2xx_read_block.side_effect = [bytes([0x03, 0x01, 0x00, 0xFE]), b"\x00\x00\x00\x00"]
+
+        # replace the ndef module used by main with a simple stub that
+        # only provides UriRecord and message_decoder – this avoids the
+        # MagicMock that conftest installs.
+        import main as _mainmod
+        class StubUriRecord:
+            def __init__(self, uri):
+                self.uri = uri
+        class StubNdef:
+            UriRecord = StubUriRecord
+            @staticmethod
+            def message_decoder(data):
+                return [StubUriRecord("steam://rungameid/77")]
+        _mainmod.ndef = StubNdef
+
+        uri = plugin._read_ndef_uri()
+
+        assert uri == "steam://rungameid/77"
+
+
+# -----------------------------------------------------------------------
 # §6.3 — Card Removed During Game triggers correct event
 # -----------------------------------------------------------------------
 

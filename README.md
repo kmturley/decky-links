@@ -17,6 +17,8 @@ Decky Links is a [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loade
 * **Auto-Launch:** Automatically launch a game when a tag is tapped. If disabled, the game's details page will be displayed.
 * **Auto-Close:** Automatically close games when a tag is removed. If disabled, the Steam menu/pause screen will be displayed.
 
+Watch demo: [https://www.youtube.com/watch?v=dVYhwyseCYk](https://www.youtube.com/watch?v=dVYhwyseCYk)
+
 ---
 
 ## 🏗 Architecture
