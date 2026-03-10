@@ -1112,3 +1112,72 @@ class TestKeyManagement:
         # Should only have default keys
         assert len(keys) == 3
         assert keys == MifareClassicHandler.DEFAULT_KEYS
+
+
+
+class TestSectorInfoRPC:
+    """Tests for sector info RPC endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_get_sector_info_current_tag(self, plugin):
+        """Should get sector info for current tag."""
+        plugin.current_tag_uid = "DEADBEEF"
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin.reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        # Mock _classify_tag to return mifare-classic
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.get_sector_info()
+        
+        assert len(result) == 16
+        assert all("sector" in s for s in result)
+
+    @pytest.mark.asyncio
+    async def test_get_sector_info_specified_uid(self, plugin):
+        """Should get sector info for specified UID."""
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin.reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.get_sector_info("CAFEBABE")
+        
+        assert len(result) == 16
+
+    @pytest.mark.asyncio
+    async def test_get_sector_info_no_tag(self, plugin):
+        """Should return empty list when no tag present."""
+        plugin.current_tag_uid = None
+        
+        result = await plugin.get_sector_info()
+        
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_sector_info_wrong_tag_type(self, plugin):
+        """Should return empty list for non-Mifare Classic tags."""
+        plugin.current_tag_uid = "DEADBEEF"
+        plugin.reader = MagicMock()
+        
+        plugin._classify_tag = lambda uid: {"type": "ntag21x"}
+        
+        result = await plugin.get_sector_info()
+        
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_sector_info_no_reader(self, plugin):
+        """Should return empty list when no reader available."""
+        plugin.current_tag_uid = "DEADBEEF"
+        plugin.reader = None
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.get_sector_info()
+        
+        assert result == []

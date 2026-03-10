@@ -194,6 +194,111 @@ class MifareClassicHandler(TagHandler):
         """Mifare Classic 1K capacity: ~176 bytes usable."""
         return len(self.data_blocks) * self.BLOCK_SIZE
 
+    def get_sector_info(self, reader) -> List[dict]:
+        """Get lock status for all sectors.
+        
+        Returns list of dicts with sector number, blocks, and lock status.
+        """
+        sectors = []
+        for sector in range(16):  # Mifare Classic 1K has 16 sectors
+            trailer_block = sector * 4 + 3
+            first_block = sector * 4
+            
+            sector_info = {
+                "sector": sector,
+                "first_block": first_block,
+                "trailer_block": trailer_block,
+                "locked": False,
+                "readable": False,
+                "writable": False,
+            }
+            
+            # Try to authenticate and read trailer
+            keys = self._get_keys_to_try()
+            authenticated = False
+            
+            for key in keys:
+                try:
+                    if reader.mifare_classic_authenticate_block(self.uid, trailer_block, 0x60, key):
+                        authenticated = True
+                        # Read trailer block to check access bits
+                        trailer = reader.mifare_classic_read_block(trailer_block)
+                        if trailer and len(trailer) >= 16:
+                            # Access bits are in bytes 6-8
+                            # Simplified: if we can read, mark as readable
+                            sector_info["readable"] = True
+                            # Try to write to test block to check writability
+                            test_block = first_block if first_block != 0 else first_block + 1
+                            if test_block % 4 != 3:  # Skip trailer
+                                try:
+                                    original = reader.mifare_classic_read_block(test_block)
+                                    if original:
+                                        # Try writing same data back
+                                        if reader.mifare_classic_write_block(test_block, original):
+                                            sector_info["writable"] = True
+                                except Exception:
+                                    pass
+                        break
+                except Exception:
+                    continue
+            
+            if not authenticated:
+                sector_info["locked"] = True
+            
+            sectors.append(sector_info)
+        
+        return sectors
+
+    def lock_sector(self, reader, sector: int, key_a: bytes, key_b: bytes) -> Tuple[bool, Optional[str]]:
+        """Lock a sector by setting access bits to read-only.
+        
+        Args:
+            reader: NFC reader instance
+            sector: Sector number (0-15)
+            key_a: Key A for authentication (6 bytes)
+            key_b: Key B for authentication (6 bytes)
+            
+        Returns:
+            (success, error_message)
+        """
+        if sector < 0 or sector > 15:
+            return False, f"Invalid sector {sector}, must be 0-15"
+        
+        trailer_block = sector * 4 + 3
+        
+        # Try to authenticate with provided keys
+        try:
+            if not reader.mifare_classic_authenticate_block(self.uid, trailer_block, 0x60, key_a):
+                return False, f"Authentication failed for sector {sector}"
+        except Exception as e:
+            return False, f"Authentication error: {e}"
+        
+        # Read current trailer
+        try:
+            trailer = reader.mifare_classic_read_block(trailer_block)
+            if not trailer or len(trailer) < 16:
+                return False, "Failed to read trailer block"
+        except Exception as e:
+            return False, f"Read error: {e}"
+        
+        # Build new trailer with read-only access bits
+        # Access bits format: C1 C2 C3 (bytes 6-8)
+        # For read-only: 0x78 0x77 0x88 (simplified)
+        new_trailer = bytearray(trailer)
+        new_trailer[0:6] = key_a  # Key A
+        new_trailer[6:9] = bytes([0x78, 0x77, 0x88])  # Access bits (read-only)
+        new_trailer[9] = 0x69  # GPB
+        new_trailer[10:16] = key_b  # Key B
+        
+        # Write new trailer
+        try:
+            if not reader.mifare_classic_write_block(trailer_block, bytes(new_trailer)):
+                return False, "Failed to write trailer block"
+        except Exception as e:
+            return False, f"Write error: {e}"
+        
+        return True, None
+
 
 class UltralightHandler(TagHandler):
     """Handler for Mifare Ultralight / NTAG21x variants."""

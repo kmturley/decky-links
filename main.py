@@ -1036,6 +1036,44 @@ class Plugin:
             decky.logger.error(f"Failed to list keys: {e}")
             return []
 
+    async def get_sector_info(self, uid: Optional[str] = None):
+        """Get sector lock status for current or specified tag.
+        
+        Args:
+            uid: Optional tag UID hex string. If None, uses current tag.
+            
+        Returns:
+            List of sector info dicts, or empty list on error.
+        """
+        try:
+            # Use current tag if no UID specified
+            if uid:
+                uid_bytes = bytes.fromhex(uid)
+            elif self.current_tag_uid:
+                uid_bytes = bytes.fromhex(self.current_tag_uid)
+            else:
+                decky.logger.warning("No tag present for sector info")
+                return []
+            
+            # Get tag metadata to determine type
+            meta = self._classify_tag(uid_bytes)
+            if meta.get("type") != "mifare-classic":
+                decky.logger.warning(f"Sector info only supported for Mifare Classic, got {meta.get('type')}")
+                return []
+            
+            # Create handler and get sector info
+            from nfc.tag_handlers import MifareClassicHandler
+            handler = MifareClassicHandler(uid_bytes, self.key_manager)
+            
+            if not self.reader:
+                decky.logger.error("No reader available for sector info")
+                return []
+            
+            return handler.get_sector_info(self.reader)
+        except Exception as e:
+            decky.logger.error(f"Failed to get sector info: {e}")
+            return []
+
     async def set_running_game(self, appid):
         """
         Called by the frontend when game state changes (Spec §9).

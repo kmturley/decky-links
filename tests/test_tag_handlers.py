@@ -718,3 +718,223 @@ class TestPerformanceOptimization:
         handler = MifareClassicHandler(uid)
         
         assert handler.batch_size == 3
+
+
+
+class TestSectorLockDetection:
+    """Tests for Mifare Classic sector lock detection."""
+
+    def test_get_sector_info_all_unlocked(self):
+        """Should detect all sectors as unlocked when authentication succeeds."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        reader.mifare_classic_write_block.return_value = True
+        
+        sectors = handler.get_sector_info(reader)
+        
+        assert len(sectors) == 16
+        assert all(not s["locked"] for s in sectors)
+        assert all(s["readable"] for s in sectors)
+        assert all(s["writable"] for s in sectors)
+
+    def test_get_sector_info_some_locked(self):
+        """Should detect locked sectors when authentication fails."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        # Sectors 0-7 unlocked, 8-15 locked
+        def auth_side_effect(uid, block, key_type, key):
+            sector = block // 4
+            return sector < 8
+        
+        reader.mifare_classic_authenticate_block.side_effect = auth_side_effect
+        reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        reader.mifare_classic_write_block.return_value = True
+        
+        sectors = handler.get_sector_info(reader)
+        
+        assert len(sectors) == 16
+        # First 8 sectors unlocked
+        assert all(not sectors[i]["locked"] for i in range(8))
+        # Last 8 sectors locked
+        assert all(sectors[i]["locked"] for i in range(8, 16))
+
+    def test_get_sector_info_read_only(self):
+        """Should detect read-only sectors when write fails."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        reader.mifare_classic_write_block.return_value = False  # Write fails
+        
+        sectors = handler.get_sector_info(reader)
+        
+        assert len(sectors) == 16
+        assert all(not s["locked"] for s in sectors)
+        assert all(s["readable"] for s in sectors)
+        assert all(not s["writable"] for s in sectors)
+
+    def test_get_sector_info_structure(self):
+        """Should return correct sector structure."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\\x00" * 16
+        reader.mifare_classic_write_block.return_value = True
+        
+        sectors = handler.get_sector_info(reader)
+        
+        # Check first sector structure
+        assert sectors[0]["sector"] == 0
+        assert sectors[0]["first_block"] == 0
+        assert sectors[0]["trailer_block"] == 3
+        
+        # Check last sector structure
+        assert sectors[15]["sector"] == 15
+        assert sectors[15]["first_block"] == 60
+        assert sectors[15]["trailer_block"] == 63
+
+
+
+class TestSectorLocking:
+    """Tests for Mifare Classic sector locking."""
+
+    def test_lock_sector_success(self):
+        """Should successfully lock a sector."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\\xFF" * 6 + b"\\x00" * 4 + b"\\xFF" * 6
+        reader.mifare_classic_write_block.return_value = True
+        
+        key_a = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        key_b = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        
+        success, error = handler.lock_sector(reader, 1, key_a, key_b)
+        
+        assert success is True
+        assert error is None
+        reader.mifare_classic_write_block.assert_called_once()
+
+    def test_lock_sector_invalid_sector(self):
+        """Should reject invalid sector numbers."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        key_a = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        key_b = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        
+        success, error = handler.lock_sector(reader, -1, key_a, key_b)
+        assert success is False
+        assert "Invalid sector" in error
+        
+        success, error = handler.lock_sector(reader, 16, key_a, key_b)
+        assert success is False
+        assert "Invalid sector" in error
+
+    def test_lock_sector_auth_failure(self):
+        """Should fail when authentication fails."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = False
+        
+        key_a = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        key_b = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        
+        success, error = handler.lock_sector(reader, 1, key_a, key_b)
+        
+        assert success is False
+        assert "Authentication failed" in error
+
+    def test_lock_sector_read_failure(self):
+        """Should fail when trailer read fails."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = None
+        
+        key_a = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        key_b = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        
+        success, error = handler.lock_sector(reader, 1, key_a, key_b)
+        
+        assert success is False
+        assert "Failed to read" in error
+
+    def test_lock_sector_write_failure(self):
+        """Should fail when trailer write fails."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xAA\\xBB\\xCC\\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\\xFF" * 16
+        reader.mifare_classic_write_block.return_value = False
+        
+        key_a = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        key_b = b"\\xFF\\xFF\\xFF\\xFF\\xFF\\xFF"
+        
+        success, error = handler.lock_sector(reader, 1, key_a, key_b)
+        
+        assert success is False
+        assert "Failed to write" in error
+
+    def test_lock_sector_trailer_structure(self):
+        """Should write correct trailer structure."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        reader.mifare_classic_authenticate_block.return_value = True
+        reader.mifare_classic_read_block.return_value = b"\x00" * 16
+        reader.mifare_classic_write_block.return_value = True
+        
+        key_a = b"\xAA\xBB\xCC\xDD\xEE\xFF"
+        key_b = b"\x11\x22\x33\x44\x55\x66"
+        
+        handler.lock_sector(reader, 1, key_a, key_b)
+        
+        # Check the written trailer
+        call_args = reader.mifare_classic_write_block.call_args[0]
+        written_trailer = call_args[1]
+        
+        # Verify structure
+        assert written_trailer[0:6] == key_a
+        assert written_trailer[6:9] == bytes([0x78, 0x77, 0x88])  # Access bits
+        assert written_trailer[10:16] == key_b
