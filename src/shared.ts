@@ -63,6 +63,9 @@ export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], { connected: boolean; path: string }>("get_reader_status");
 export const getTagStatus = callable<[], { uid: string | null; uri: string | null }>("get_tag_status");
 export const setRunningGame = callable<[appid: number | null], void>("set_running_game");
+export const setTagKey = callable<[uid: string, key_a: string, key_b: string], boolean>("set_tag_key");
+export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: string }>("get_tag_key");
+export const listTagKeys = callable<[], string[]>("list_tag_keys");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

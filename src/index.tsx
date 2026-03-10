@@ -27,6 +27,7 @@ import {
 // (the rest of the file remains unchanged)
 
 
+import { KeyManagementPanel } from "./KeyManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget } from "./lib/steamIds";
@@ -164,6 +165,8 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
       </PanelSection>
+
+      <KeyManagementPanel />
     </PanelSection>
   );
 };

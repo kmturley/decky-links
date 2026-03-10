@@ -31,19 +31,39 @@ class NTAGHandler(TagHandler):
 
     def __init__(self, uid: bytes):
         self.uid = uid
-        # NTAG21x: pages 4-133 are user-writable (130 pages * 4 bytes = 520 bytes)
         self.user_pages = list(range(4, 134))
+        self.batch_size = 4
 
     def read_ndef(self, reader) -> bytes:
-        """Read NDEF data from NTAG pages."""
+        """Read NDEF data from NTAG pages with batching."""
         data = bytearray()
-        for page in self.user_pages:
+        page_idx = 0
+        
+        while page_idx < len(self.user_pages):
             try:
+                # Try batch read if explicitly available
+                if hasattr(reader, 'ntag2xx_read_blocks'):
+                    try:
+                        batch_pages = self.user_pages[page_idx:page_idx + self.batch_size]
+                        blocks = reader.ntag2xx_read_blocks(batch_pages)
+                        if blocks is not None and len(blocks) > 0:
+                            for block in blocks:
+                                data.extend(block)
+                                if 0xFE in block:
+                                    return bytes(data)
+                            page_idx += len(batch_pages)
+                            continue
+                    except (TypeError, AttributeError):
+                        pass
+                
+                # Fallback to single-block read
+                page = self.user_pages[page_idx]
                 block = reader.ntag2xx_read_block(page)
                 if block:
                     data.extend(block)
-                    if 0xFE in block:  # NDEF terminator
+                    if 0xFE in block:
                         break
+                    page_idx += 1
                 else:
                     break
             except Exception:
@@ -52,7 +72,6 @@ class NTAGHandler(TagHandler):
 
     def write_ndef(self, reader, data: bytes) -> Tuple[bool, Optional[str]]:
         """Write NDEF data to NTAG pages."""
-        # Pad to 4-byte pages
         while len(data) % 4 != 0:
             data = data + b"\x00"
 
@@ -81,29 +100,71 @@ class MifareClassicHandler(TagHandler):
     FIRST_DATA_BLOCK = 4
     MAX_BLOCK = 62
     BLOCK_SIZE = 16
+    DEFAULT_KEYS = [
+        b'\xFF\xFF\xFF\xFF\xFF\xFF',
+        b'\xD3\xF7\xD3\xF7\xD3\xF7',
+        b'\xA0\xA1\xA2\xA3\xA4\xA5',
+    ]
 
-    def __init__(self, uid: bytes):
+    def __init__(self, uid: bytes, key_manager=None):
         self.uid = uid
+        self.key_manager = key_manager
         self.data_blocks = self._compute_data_blocks()
+        self.batch_size = 3
+
+    def _get_keys_to_try(self) -> list:
+        """Get list of keys to try: custom keys first, then defaults."""
+        keys = []
+        if self.key_manager:
+            uid_hex = self.uid.hex().upper()
+            custom = self.key_manager.get_keys(uid_hex)
+            if custom:
+                try:
+                    keys.append(bytes.fromhex(custom[0]))
+                    keys.append(bytes.fromhex(custom[1]))
+                except (ValueError, IndexError):
+                    pass
+        keys.extend(self.DEFAULT_KEYS)
+        return keys
 
     def _compute_data_blocks(self) -> List[int]:
         """Return list of writable data blocks (skip trailer blocks)."""
         blocks = []
         for block in range(self.FIRST_DATA_BLOCK, self.MAX_BLOCK + 1):
-            if block % 4 != 3:  # Skip trailer blocks
+            if block % 4 != 3:
                 blocks.append(block)
         return blocks
 
     def read_ndef(self, reader) -> bytes:
-        """Read NDEF data from Mifare Classic blocks."""
+        """Read NDEF data from Mifare Classic blocks with batching."""
         data = bytearray()
-        for block in self.data_blocks:
+        block_idx = 0
+        
+        while block_idx < len(self.data_blocks):
             try:
+                # Try batch read if explicitly available
+                if hasattr(reader, 'mifare_classic_read_blocks'):
+                    try:
+                        batch_blocks = self.data_blocks[block_idx:block_idx + self.batch_size]
+                        blocks = reader.mifare_classic_read_blocks(batch_blocks)
+                        if blocks is not None and len(blocks) > 0:
+                            for block in blocks:
+                                data.extend(block)
+                                if 0xFE in block:
+                                    return bytes(data)
+                            block_idx += len(batch_blocks)
+                            continue
+                    except (TypeError, AttributeError):
+                        pass
+                
+                # Fallback to single-block read
+                block = self.data_blocks[block_idx]
                 block_data = reader.mifare_classic_read_block(block)
                 if block_data:
                     data.extend(block_data)
-                    if 0xFE in block_data:  # NDEF terminator
+                    if 0xFE in block_data:
                         break
+                    block_idx += 1
                 else:
                     break
             except Exception:
@@ -112,7 +173,6 @@ class MifareClassicHandler(TagHandler):
 
     def write_ndef(self, reader, data: bytes) -> Tuple[bool, Optional[str]]:
         """Write NDEF data to Mifare Classic blocks."""
-        # Pad to 16-byte blocks
         while len(data) % self.BLOCK_SIZE != 0:
             data = data + b"\x00"
 
@@ -140,8 +200,8 @@ class UltralightHandler(TagHandler):
 
     def __init__(self, uid: bytes):
         self.uid = uid
-        # Ultralight: pages 4-15 are user-writable (12 pages * 4 bytes = 48 bytes)
         self.user_pages = list(range(4, 16))
+        self.batch_size = 4
 
     def read_ndef(self, reader) -> bytes:
         """Read NDEF data from Ultralight pages."""
@@ -196,7 +256,6 @@ class ISO15693Handler(TagHandler):
         data = bytearray()
         try:
             for block_num in range(self.max_blocks):
-                # ISO-15693 read single block: flags=0x20, cmd=0x21, block_num
                 cmd = bytes([0x20, 0x21, block_num])
                 response = reader.transceive(cmd, timeout=0.1)
                 if response and len(response) >= self.block_size:
@@ -223,7 +282,6 @@ class ISO15693Handler(TagHandler):
             for i in range(0, len(data), self.block_size):
                 block_num = i // self.block_size
                 block_data = data[i : i + self.block_size]
-                # ISO-15693 write single block: flags=0x20, cmd=0x21, block_num, data
                 cmd = bytes([0x20, 0x21, block_num]) + block_data
                 response = reader.transceive(cmd, timeout=0.1)
                 if not response:
@@ -250,7 +308,6 @@ class FeliCaHandler(TagHandler):
         data = bytearray()
         try:
             for block_num in range(self.max_blocks):
-                # FeliCa read without encryption: cmd_code=0x06, block_num
                 cmd = bytes([0x06, block_num])
                 response = reader.transceive(cmd, timeout=0.1)
                 if response and len(response) >= self.block_size:
@@ -277,7 +334,6 @@ class FeliCaHandler(TagHandler):
             for i in range(0, len(data), self.block_size):
                 block_num = i // self.block_size
                 block_data = data[i : i + self.block_size]
-                # FeliCa write without encryption: cmd_code=0x08, block_num, data
                 cmd = bytes([0x08, block_num]) + block_data
                 response = reader.transceive(cmd, timeout=0.1)
                 if not response:
@@ -303,11 +359,9 @@ class DESFireHandler(TagHandler):
         """Read NDEF data from DESFire file via transceive."""
         data = bytearray()
         try:
-            # DESFire select file: cmd=0x51, file_id=0x02 (NDEF file)
             select_cmd = bytes([0x51, 0x02])
             reader.transceive(select_cmd, timeout=0.1)
             
-            # DESFire read data: cmd=0x3D, offset (3 bytes LE), length (3 bytes LE)
             for offset in range(0, self.max_blocks * self.block_size, self.block_size):
                 offset_bytes = offset.to_bytes(3, 'little')
                 length_bytes = self.block_size.to_bytes(3, 'little')
@@ -334,11 +388,9 @@ class DESFireHandler(TagHandler):
             return False, f"Data too large: needs {required_blocks} blocks, available {self.max_blocks}"
 
         try:
-            # DESFire select file: cmd=0x51, file_id=0x02
             select_cmd = bytes([0x51, 0x02])
             reader.transceive(select_cmd, timeout=0.1)
             
-            # DESFire write data: cmd=0x3D, offset (3 bytes LE), length (3 bytes LE), data
             for i in range(0, len(data), self.block_size):
                 offset = i
                 block_data = data[i : i + self.block_size]
@@ -357,12 +409,20 @@ class DESFireHandler(TagHandler):
         return self.max_blocks * self.block_size
 
 
-def get_handler(tag_type: str, uid: bytes) -> Optional[TagHandler]:
-    """Factory function to get the appropriate handler for a tag type."""
+def get_handler(tag_type: str, uid: bytes, key_manager=None) -> Optional[TagHandler]:
+    """Factory function to get the appropriate handler for a tag type.
+    
+    Args:
+        tag_type: Type of tag (e.g. 'mifare-classic', 'ntag21x')
+        uid: Tag UID bytes
+        key_manager: Optional KeyManager for Mifare Classic custom keys
+    """
+    if tag_type == "mifare-classic":
+        return MifareClassicHandler(uid, key_manager)
+    
     handlers = {
         "ntag21x": NTAGHandler,
         "ultralight": UltralightHandler,
-        "mifare-classic": MifareClassicHandler,
         "iso15693": ISO15693Handler,
         "felica": FeliCaHandler,
         "desfire": DESFireHandler,

@@ -19,6 +19,7 @@ import ndef
 
 # Reader abstraction hides hardware-specific details
 from nfc.reader import PN532UARTReader
+from nfc.key_manager import KeyManager
 
 
 # -----------------------------------------------------------------------
@@ -153,6 +154,9 @@ class Plugin:
         decky.logger.info("Decky Links starting...")
         self.settings = SettingsManager(
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+        )
+        self.key_manager = KeyManager(
+            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "keys.json")
         )
         self.state           = PluginState.IDLE
         self.reader          = None
@@ -979,6 +983,58 @@ class Plugin:
     async def get_state(self):
         """Return current plugin state string (for frontend debugging / tests)."""
         return self.state.value
+
+    async def set_tag_key(self, uid: str, key_a: str, key_b: str):
+        """Store custom Mifare Classic authentication keys for a tag UID.
+
+        Args:
+            uid: Tag UID as hex string (e.g. "04A1B2C3D4E5F6")
+            key_a: Key A as 12-char hex string (6 bytes)
+            key_b: Key B as 12-char hex string (6 bytes)
+
+        Returns:
+            True if keys were stored successfully, False otherwise.
+        """
+        try:
+            self.key_manager.set_key(uid, key_a, key_b)
+            decky.logger.info(f"Stored custom keys for tag {uid}")
+            return True
+        except ValueError as e:
+            decky.logger.warning(f"Invalid key format: {e}")
+            return False
+        except Exception as e:
+            decky.logger.error(f"Failed to store keys: {e}")
+            return False
+
+    async def get_tag_key(self, uid: str):
+        """Retrieve stored Mifare Classic authentication keys for a tag UID.
+
+        Args:
+            uid: Tag UID as hex string
+
+        Returns:
+            Dict with 'key_a' and 'key_b' if found, empty dict otherwise.
+        """
+        try:
+            keys = self.key_manager.get_keys(uid)
+            if keys:
+                return {"key_a": keys[0], "key_b": keys[1]}
+            return {}
+        except Exception as e:
+            decky.logger.error(f"Failed to retrieve keys: {e}")
+            return {}
+
+    async def list_tag_keys(self):
+        """List all stored tag UIDs with custom keys.
+
+        Returns:
+            List of tag UIDs that have custom keys stored.
+        """
+        try:
+            return self.key_manager.list_keys()
+        except Exception as e:
+            decky.logger.error(f"Failed to list keys: {e}")
+            return []
 
     async def set_running_game(self, appid):
         """

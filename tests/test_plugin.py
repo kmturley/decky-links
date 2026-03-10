@@ -984,3 +984,131 @@ class TestCardRemovedDuringGame:
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "card_removed_during_game" not in emitted
         assert "tag_removed" in emitted
+
+
+# -----------------------------------------------------------------------
+# Feature 2 — Custom Key Management
+# -----------------------------------------------------------------------
+
+class TestKeyManagement:
+
+    @pytest.mark.asyncio
+    async def test_set_tag_key_valid(self, plugin):
+        """set_tag_key should store keys for a tag UID."""
+        uid = "DEADBEEFCAFE"
+        key_a = "FFFFFFFFFFFF"
+        key_b = "D3F7D3F7D3F7"
+        
+        result = await plugin.set_tag_key(uid, key_a, key_b)
+        
+        assert result is True
+        stored = plugin.key_manager.get_keys(uid)
+        assert stored == [key_a, key_b]
+
+    @pytest.mark.asyncio
+    async def test_set_tag_key_invalid_format(self, plugin):
+        """set_tag_key should reject invalid key formats."""
+        uid = "DEADBEEFCAFE"
+        
+        # Too short
+        result = await plugin.set_tag_key(uid, "FFFF", "FFFFFFFFFFFF")
+        assert result is False
+        
+        # Invalid hex
+        result = await plugin.set_tag_key(uid, "GGGGGGGGGGGG", "FFFFFFFFFFFF")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_get_tag_key_found(self, plugin):
+        """get_tag_key should return stored keys."""
+        uid = "DEADBEEFCAFE"
+        key_a = "FFFFFFFFFFFF"
+        key_b = "D3F7D3F7D3F7"
+        
+        plugin.key_manager.set_key(uid, key_a, key_b)
+        
+        result = await plugin.get_tag_key(uid)
+        
+        assert result == {"key_a": key_a, "key_b": key_b}
+
+    @pytest.mark.asyncio
+    async def test_get_tag_key_not_found(self, plugin):
+        """get_tag_key should return empty dict for unknown UID."""
+        result = await plugin.get_tag_key("NONEXISTENT")
+        
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_list_tag_keys(self, plugin):
+        """list_tag_keys should return all stored UIDs."""
+        uid1 = "DEADBEEFCAFE"
+        uid2 = "CAFEBEEFDEAD"
+        
+        plugin.key_manager.set_key(uid1, "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+        plugin.key_manager.set_key(uid2, "A0A1A2A3A4A5", "FFFFFFFFFFFF")
+        
+        result = await plugin.list_tag_keys()
+        
+        assert len(result) == 2
+        assert uid1 in result
+        assert uid2 in result
+
+    @pytest.mark.asyncio
+    async def test_list_tag_keys_empty(self, plugin):
+        """list_tag_keys should return empty list when no keys stored."""
+        result = await plugin.list_tag_keys()
+        
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_key_manager_persistence(self, plugin, tmp_path):
+        """Keys should persist across KeyManager instances."""
+        import json
+        from nfc.key_manager import KeyManager
+        
+        keys_path = tmp_path / "keys.json"
+        
+        # Create first instance and store keys
+        km1 = KeyManager(str(keys_path))
+        km1.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+        
+        # Create second instance and verify keys are loaded
+        km2 = KeyManager(str(keys_path))
+        stored = km2.get_keys("DEADBEEFCAFE")
+        
+        assert stored == ["FFFFFFFFFFFF", "D3F7D3F7D3F7"]
+
+    @pytest.mark.asyncio
+    async def test_mifare_handler_uses_custom_keys(self, plugin):
+        """MifareClassicHandler should try custom keys before defaults."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xDEADBEEFCAFE"
+        uid_hex = uid.hex().upper()
+        
+        # Store custom keys
+        plugin.key_manager.set_key(uid_hex, "A0A1A2A3A4A5", "B0B1B2B3B4B5")
+        
+        # Create handler with key manager
+        handler = MifareClassicHandler(uid, plugin.key_manager)
+        keys = handler._get_keys_to_try()
+        
+        # Custom keys should be first
+        assert keys[0] == bytes.fromhex("A0A1A2A3A4A5")
+        assert keys[1] == bytes.fromhex("B0B1B2B3B4B5")
+        # Default keys should follow
+        assert len(keys) > 2
+
+    @pytest.mark.asyncio
+    async def test_mifare_handler_without_custom_keys(self, plugin):
+        """MifareClassicHandler should use defaults when no custom keys."""
+        from nfc.tag_handlers import MifareClassicHandler
+        
+        uid = b"\\xDEADBEEFCAFE"
+        
+        handler = MifareClassicHandler(uid, plugin.key_manager)
+        keys = handler._get_keys_to_try()
+        
+        # Should only have default keys
+        assert len(keys) == 3
+        assert keys == MifareClassicHandler.DEFAULT_KEYS

@@ -11,6 +11,7 @@ from nfc.tag_handlers import (
     DESFireHandler,
     get_handler,
 )
+from nfc.key_manager import KeyManager
 
 
 class TestNTAGHandler:
@@ -431,7 +432,93 @@ class TestDESFireHandler:
         assert capacity == 256 * 16
 
 
-class TestHandlerFactory:
+class TestMifareClassicKeyManagement:
+    """Tests for Mifare Classic custom key management."""
+
+    def test_classic_with_custom_keys(self):
+        """Classic handler should use custom keys when provided."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        uid_hex = uid.hex().upper()
+        
+        km = KeyManager()
+        km.set_key(uid_hex, "A0A1A2A3A4A5", "B0B1B2B3B4B5")
+        
+        handler = MifareClassicHandler(uid, km)
+        keys = handler._get_keys_to_try()
+        
+        # Custom keys should be first
+        assert keys[0] == bytes.fromhex("A0A1A2A3A4A5")
+        assert keys[1] == bytes.fromhex("B0B1B2B3B4B5")
+        # Default keys should follow
+        assert len(keys) > 2
+
+    def test_classic_without_custom_keys(self):
+        """Classic handler should use default keys when no custom keys."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        
+        km = KeyManager()
+        handler = MifareClassicHandler(uid, km)
+        keys = handler._get_keys_to_try()
+        
+        # Should only have default keys
+        assert len(keys) == 3
+        assert keys == MifareClassicHandler.DEFAULT_KEYS
+
+    def test_classic_without_key_manager(self):
+        """Classic handler should work without key manager."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        
+        handler = MifareClassicHandler(uid)
+        keys = handler._get_keys_to_try()
+        
+        # Should only have default keys
+        assert len(keys) == 3
+        assert keys == MifareClassicHandler.DEFAULT_KEYS
+
+    def test_classic_invalid_custom_keys_ignored(self):
+        """Classic handler should ignore invalid custom keys."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        uid_hex = uid.hex().upper()
+        
+        km = KeyManager()
+        # Store invalid keys (wrong format)
+        km.tag_keys[uid_hex] = ["INVALID", "KEYS"]
+        
+        handler = MifareClassicHandler(uid, km)
+        keys = handler._get_keys_to_try()
+        
+        # Should fall back to default keys
+        assert len(keys) == 3
+        assert keys == MifareClassicHandler.DEFAULT_KEYS
+
+    def test_factory_passes_key_manager(self):
+        """Factory should pass key manager to Classic handler."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        uid_hex = uid.hex().upper()
+        
+        km = KeyManager()
+        km.set_key(uid_hex, "A0A1A2A3A4A5", "B0B1B2B3B4B5")
+        
+        handler = get_handler("mifare-classic", uid, km)
+        
+        assert isinstance(handler, MifareClassicHandler)
+        assert handler.key_manager is km
+        keys = handler._get_keys_to_try()
+        assert keys[0] == bytes.fromhex("A0A1A2A3A4A5")
+
+    def test_factory_without_key_manager(self):
+        """Factory should work without key manager."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        
+        handler = get_handler("mifare-classic", uid)
+        
+        assert isinstance(handler, MifareClassicHandler)
+        assert handler.key_manager is None
+        keys = handler._get_keys_to_try()
+        assert keys == MifareClassicHandler.DEFAULT_KEYS
+
+
+
     """Tests for get_handler factory function."""
 
     def test_get_handler_ntag(self):
@@ -535,3 +622,99 @@ class TestHandlerIntegration:
         ]
         read_data = handler.read_ndef(reader)
         assert len(read_data) > 0
+
+
+class TestPerformanceOptimization:
+    """Tests for multi-block read/write optimization."""
+
+    def test_ntag_batch_read_when_available(self):
+        """NTAG should use batch read if reader supports it."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = NTAGHandler(uid)
+        
+        reader = MagicMock()
+        # Mock batch read method
+        reader.ntag2xx_read_blocks.return_value = [
+            b"\x03\x10\xD1\x01",
+            b"\x0C\x55\x65\x78",
+            b"\x61\x6D\xFE\x00",
+            b"\x00\x00\x00\x00",
+        ]
+        
+        data = handler.read_ndef(reader)
+        
+        assert len(data) > 0
+        assert 0xFE in data
+        reader.ntag2xx_read_blocks.assert_called_once()
+
+    def test_ntag_fallback_to_single_read(self):
+        """NTAG should fallback to single read if batch not available."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = NTAGHandler(uid)
+        
+        reader = MagicMock()
+        # No batch read method
+        del reader.ntag2xx_read_blocks
+        reader.ntag2xx_read_block.side_effect = [
+            b"\x03\x10\xD1\x01",
+            b"\x0C\x55\x65\x78",
+            b"\x61\x6D\xFE\x00",
+        ]
+        
+        data = handler.read_ndef(reader)
+        
+        assert len(data) > 0
+        assert 0xFE in data
+        assert reader.ntag2xx_read_block.call_count == 3
+
+    def test_classic_batch_read_when_available(self):
+        """Classic should use batch read if reader supports it."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        # Mock batch read method
+        reader.mifare_classic_read_blocks.return_value = [
+            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
+            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        ]
+        
+        data = handler.read_ndef(reader)
+        
+        assert len(data) > 0
+        assert 0xFE in data
+        reader.mifare_classic_read_blocks.assert_called_once()
+
+    def test_classic_fallback_to_single_read(self):
+        """Classic should fallback to single read if batch not available."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        reader = MagicMock()
+        # No batch read method
+        del reader.mifare_classic_read_blocks
+        reader.mifare_classic_read_block.side_effect = [
+            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
+            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        ]
+        
+        data = handler.read_ndef(reader)
+        
+        assert len(data) > 0
+        assert 0xFE in data
+        assert reader.mifare_classic_read_block.call_count == 2
+
+    def test_ntag_batch_size_respected(self):
+        """NTAG batch read should respect batch size limit."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = NTAGHandler(uid)
+        
+        assert handler.batch_size == 4
+
+    def test_classic_batch_size_respected(self):
+        """Classic batch read should respect batch size limit."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        handler = MifareClassicHandler(uid)
+        
+        assert handler.batch_size == 3

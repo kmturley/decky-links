@@ -88,6 +88,7 @@ def plugin(tmp_path):
     """
     # Import after mocks are in place
     from main import Plugin, PluginState, SettingsManager
+    from nfc.key_manager import KeyManager
 
     p = Plugin()
 
@@ -105,6 +106,9 @@ def plugin(tmp_path):
     mock_settings.set    = lambda k, v: _settings.update({k: v})
     mock_settings.settings = _settings
     p.settings = mock_settings
+
+    # Key manager for custom Mifare Classic keys
+    p.key_manager = KeyManager()
 
     # Hardware mocks — we now use a generic Reader interface
     p.reader = MagicMock()
