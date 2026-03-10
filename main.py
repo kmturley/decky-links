@@ -1074,6 +1074,67 @@ class Plugin:
             decky.logger.error(f"Failed to get sector info: {e}")
             return []
 
+    async def lock_sector(self, uid: str, sector: int, key_a: str, key_b: str):
+        """Lock a sector on a Mifare Classic tag.
+        
+        Args:
+            uid: Tag UID hex string
+            sector: Sector number (0-15)
+            key_a: Key A hex string (12 chars = 6 bytes)
+            key_b: Key B hex string (12 chars = 6 bytes)
+            
+        Returns:
+            True if successful, False otherwise.
+        """
+        try:
+            # Validate inputs
+            if not uid or not isinstance(uid, str):
+                decky.logger.warning("Invalid UID for sector lock")
+                return False
+            
+            if sector < 0 or sector > 15:
+                decky.logger.warning(f"Invalid sector {sector}")
+                return False
+            
+            if len(key_a) != 12 or len(key_b) != 12:
+                decky.logger.warning("Keys must be 12 hex characters")
+                return False
+            
+            # Convert hex strings to bytes
+            try:
+                uid_bytes = bytes.fromhex(uid)
+                key_a_bytes = bytes.fromhex(key_a)
+                key_b_bytes = bytes.fromhex(key_b)
+            except ValueError as e:
+                decky.logger.warning(f"Invalid hex format: {e}")
+                return False
+            
+            # Verify tag type
+            meta = self._classify_tag(uid_bytes)
+            if meta.get("type") != "mifare-classic":
+                decky.logger.warning(f"Sector locking only supported for Mifare Classic")
+                return False
+            
+            if not self.reader:
+                decky.logger.error("No reader available for sector lock")
+                return False
+            
+            # Create handler and lock sector
+            from nfc.tag_handlers import MifareClassicHandler
+            handler = MifareClassicHandler(uid_bytes, self.key_manager)
+            
+            success, error = handler.lock_sector(self.reader, sector, key_a_bytes, key_b_bytes)
+            
+            if not success:
+                decky.logger.error(f"Failed to lock sector {sector}: {error}")
+            else:
+                decky.logger.info(f"Successfully locked sector {sector} on tag {uid}")
+            
+            return success
+        except Exception as e:
+            decky.logger.error(f"Failed to lock sector: {e}")
+            return False
+
     async def set_running_game(self, appid):
         """
         Called by the frontend when game state changes (Spec §9).

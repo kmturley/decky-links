@@ -67,6 +67,7 @@ export const setTagKey = callable<[uid: string, key_a: string, key_b: string], b
 export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: string }>("get_tag_key");
 export const listTagKeys = callable<[], string[]>("list_tag_keys");
 export const getSectorInfo = callable<[uid?: string], Array<{sector: number; first_block: number; trailer_block: number; locked: boolean; readable: boolean; writable: boolean}>>("get_sector_info");
+export const lockSector = callable<[uid: string, sector: number, key_a: string, key_b: string], boolean>("lock_sector");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

@@ -28,6 +28,7 @@ import {
 
 
 import { KeyManagementPanel } from "./KeyManagementPanel";
+import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget } from "./lib/steamIds";
@@ -167,6 +168,8 @@ const Content: FC = () => {
       </PanelSection>
 
       <KeyManagementPanel />
+
+      <SectorManagementPanel tagUid={state.tagUid} />
     </PanelSection>
   );
 };

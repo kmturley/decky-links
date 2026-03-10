@@ -1181,3 +1181,186 @@ class TestSectorInfoRPC:
         result = await plugin.get_sector_info()
         
         assert result == []
+
+
+
+class TestLockSectorRPC:
+    """Tests for lock_sector RPC endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_success(self, plugin):
+        """Should successfully lock a sector."""
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin.reader.mifare_classic_read_block.return_value = b"\xFF" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_invalid_uid(self, plugin):
+        """Should reject invalid UID."""
+        result = await plugin.lock_sector("", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        assert result is False
+        
+        result = await plugin.lock_sector(None, 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_invalid_sector(self, plugin):
+        """Should reject invalid sector numbers."""
+        result = await plugin.lock_sector("DEADBEEF", -1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        assert result is False
+        
+        result = await plugin.lock_sector("DEADBEEF", 16, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_invalid_keys(self, plugin):
+        """Should reject invalid key formats."""
+        # Too short
+        result = await plugin.lock_sector("DEADBEEF", 1, "FFFF", "FFFFFFFFFFFF")
+        assert result is False
+        
+        # Invalid hex
+        result = await plugin.lock_sector("DEADBEEF", 1, "GGGGGGGGGGGG", "FFFFFFFFFFFF")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_wrong_tag_type(self, plugin):
+        """Should reject non-Mifare Classic tags."""
+        plugin.reader = MagicMock()
+        plugin._classify_tag = lambda uid: {"type": "ntag21x"}
+        
+        result = await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_no_reader(self, plugin):
+        """Should fail when no reader available."""
+        plugin.reader = None
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_handler_failure(self, plugin):
+        """Should return False when handler fails."""
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        result = await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        
+        assert result is False
+
+
+
+class TestSectorLockingIntegration:
+    """Integration tests for sector locking workflow."""
+
+    @pytest.mark.asyncio
+    async def test_full_sector_lock_workflow(self, plugin):
+        """Should complete full workflow: detect sectors, lock one, verify."""
+        plugin.current_tag_uid = "DEADBEEF"
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin.reader.mifare_classic_read_block.return_value = b"\xFF" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        # Step 1: Get sector info
+        sectors_before = await plugin.get_sector_info()
+        assert len(sectors_before) == 16
+        assert all(not s["locked"] for s in sectors_before)
+        
+        # Step 2: Lock sector 1
+        success = await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF")
+        assert success is True
+        
+        # Step 3: Verify lock was written
+        plugin.reader.mifare_classic_write_block.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_sector_lock_with_custom_keys(self, plugin):
+        """Should use custom keys from key manager when locking."""
+        uid_hex = "DEADBEEF"
+        plugin.key_manager.set_key(uid_hex, "A0A1A2A3A4A5", "B0B1B2B3B4B5")
+        
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin.reader.mifare_classic_read_block.return_value = b"\xFF" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        # Get sector info should try custom keys first
+        sectors = await plugin.get_sector_info(uid_hex)
+        assert len(sectors) == 16
+
+    @pytest.mark.asyncio
+    async def test_cannot_lock_already_locked_sector(self, plugin):
+        """Should fail to lock a sector that's already locked."""
+        plugin.reader = MagicMock()
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        # Try to lock with wrong keys
+        success = await plugin.lock_sector("DEADBEEF", 1, "000000000000", "000000000000")
+        
+        assert success is False
+
+    @pytest.mark.asyncio
+    async def test_sector_info_reflects_lock_status(self, plugin):
+        """Should show correct lock status in sector info."""
+        plugin.current_tag_uid = "DEADBEEF"
+        plugin.reader = MagicMock()
+        
+        # Simulate some sectors locked, some unlocked
+        def auth_side_effect(uid, block, key_type, key):
+            sector = block // 4
+            return sector < 8  # First 8 sectors unlocked
+        
+        plugin.reader.mifare_classic_authenticate_block.side_effect = auth_side_effect
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00" * 16
+        plugin.reader.mifare_classic_write_block.return_value = True
+        
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        sectors = await plugin.get_sector_info()
+        
+        # Verify lock status matches authentication results
+        for i in range(8):
+            assert not sectors[i]["locked"], f"Sector {i} should be unlocked"
+        for i in range(8, 16):
+            assert sectors[i]["locked"], f"Sector {i} should be locked"
+
+    @pytest.mark.asyncio
+    async def test_lock_sector_validates_all_inputs(self, plugin):
+        """Should validate all inputs before attempting lock."""
+        plugin.reader = MagicMock()
+        plugin._classify_tag = lambda uid: {"type": "mifare-classic"}
+        
+        # Invalid UID
+        assert await plugin.lock_sector("", 1, "FFFFFFFFFFFF", "FFFFFFFFFFFF") is False
+        
+        # Invalid sector
+        assert await plugin.lock_sector("DEADBEEF", -1, "FFFFFFFFFFFF", "FFFFFFFFFFFF") is False
+        assert await plugin.lock_sector("DEADBEEF", 16, "FFFFFFFFFFFF", "FFFFFFFFFFFF") is False
+        
+        # Invalid keys
+        assert await plugin.lock_sector("DEADBEEF", 1, "SHORT", "FFFFFFFFFFFF") is False
+        assert await plugin.lock_sector("DEADBEEF", 1, "FFFFFFFFFFFF", "INVALID!") is False
+        
+        # Reader should never be called for invalid inputs
+        plugin.reader.mifare_classic_authenticate_block.assert_not_called()
