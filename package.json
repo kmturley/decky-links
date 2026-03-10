@@ -9,7 +9,7 @@
     "stop": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl stop plugin_loader\" && ssh deck@steamdeck.local \"echo 'ssap' | sudo -S chown -R deck:deck /home/deck/homebrew/plugins/\"",
     "start": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl start plugin_loader\"",
     "watch": "rollup -c -w",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "PYTHONPATH=. .venv/bin/pytest -q"
   },
   "repository": {
     "type": "git",

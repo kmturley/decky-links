@@ -93,7 +93,9 @@ class TestStateMachine:
         """When no URI found, state goes CARD_PRESENT briefly then back to READY."""
         from main import PluginState
         uid = _make_uid()
-        with patch.object(plugin, "_read_ndef_uri", return_value=None), \
+        # patch lower-level reader to return no URI record
+        fake_rec = MagicMock()
+        with patch.object(plugin, "_read_ndef_records", return_value=[]), \
              patch.object(plugin, "_play_sound"):
             await plugin._handle_scan(uid)
         assert plugin.state == PluginState.READY
@@ -104,7 +106,9 @@ class TestStateMachine:
         from main import PluginState
         uid = _make_uid()
         plugin.running_game_id = None
-        with patch.object(plugin, "_read_ndef_uri", return_value="steam://rungameid/400"), \
+        # simulate NDEF records containing steam URI
+        from ndef import UriRecord
+        with patch.object(plugin, "_read_ndef_records", return_value=[UriRecord("steam://rungameid/400")]), \
              patch.object(plugin, "_play_sound"):
             await plugin._handle_scan(uid)
         # No game yet reported → state stays CARD_PRESENT
@@ -171,6 +175,7 @@ class TestSettingsLoadValidation:
             "polling_interval": "0",        # invalid type/range
             "auto_launch": "yes",           # invalid type
             "auto_close": False,            # valid
+            "reader_type": "unknown",      # invalid value
         }))
 
         settings = SettingsManager(str(settings_path))
@@ -180,6 +185,7 @@ class TestSettingsLoadValidation:
         assert settings.get("polling_interval") == 0.5
         assert settings.get("auto_launch") is True
         assert settings.get("auto_close") is False
+        assert settings.get("reader_type") == "pn532_uart"
 
 
 # -----------------------------------------------------------------------
@@ -209,7 +215,8 @@ class TestNoGameStacking:
         plugin.running_game_id = None
         uid                    = _make_uid()
 
-        with patch.object(plugin, "_read_ndef_uri", return_value="https://example.com"), \
+        from ndef import UriRecord
+        with patch.object(plugin, "_read_ndef_records", return_value=[UriRecord("https://example.com")]), \
              patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
              patch.object(plugin, "_play_sound"):
             await plugin._handle_scan(uid)
@@ -299,26 +306,50 @@ class TestReaderInit:
         assert meta["type"] == "ntag21x"
         assert meta["capacity_bytes"] > 0
 
+    def test_classify_felica_by_length(self, plugin):
+        uid = b"\x01\x02\x03\x04\x05\x06\x07\x08"  # 8 bytes
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "felica"
+        assert meta["capacity_bytes"] == 0
+
+    @pytest.mark.asyncio
+    async def test_reader_disconnect_triggers_reinit(self, plugin, mock_decky):
+        # place a fake reader that reports disconnected
+        plugin.reader = MagicMock()
+        plugin.reader.is_connected.return_value = False
+        triggered = False
+        async def fake_init():
+            nonlocal triggered
+            triggered = True
+        plugin._init_reader = fake_init
+        # run a short slice of the loop; it should notice the disconnected reader
+        loop_task = asyncio.create_task(plugin._nfc_loop())
+        await asyncio.sleep(0.2)
+        loop_task.cancel()
+        assert triggered
+
     @pytest.mark.asyncio
     async def test_get_tag_metadata_method(self, plugin, uid_bytes):
         plugin.reader.mifare_classic_authenticate_block.return_value = False
         plugin.reader.mifare_classic_read_block.return_value = b"\x00"
-        # simulate current tag
+        # simulate current tag and override classify to include protected
         plugin.current_tag_uid = uid_bytes.hex().upper()
+        plugin._classify_tag = lambda u: {"type": "ntag21x", "capacity_bytes": 4, "protected": False}
         info = await plugin.get_tag_metadata()
         assert info.get("type") == "ntag21x"
+        assert info.get("protected") is False
         # invalid hex
         bad = await plugin.get_tag_metadata("nothex")
         assert "error" in bad
 
     @pytest.mark.asyncio
     async def test_init_reader_success_sets_reader(self, mock_decky, tmp_path):
+        import main
         from main import Plugin
-        from nfc import reader as reader_mod
-        # patch the PN532UARTReader so connect() returns True
+        # patch the PN532UARTReader imported into main so _create_reader uses mock
         mock_reader = MagicMock()
         mock_reader.connect = AsyncMock(return_value=True)
-        patcher = patch.object(reader_mod, 'PN532UARTReader', return_value=mock_reader)
+        patcher = patch.object(main, 'PN532UARTReader', return_value=mock_reader)
         patcher.start()
         try:
             p = Plugin()
@@ -326,7 +357,8 @@ class TestReaderInit:
             fake_path = str(tmp_path / "dev")
             open(fake_path, "w").close()
             p.settings = MagicMock()
-            p.settings.get = lambda k: fake_path if k == "device_path" else 115200
+            # also ensure reader_type is correct so _init_reader succeeds
+            p.settings.get = lambda k: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else 115200)
 
             await p._init_reader()
             assert p.reader is mock_reader
@@ -335,18 +367,18 @@ class TestReaderInit:
 
     @pytest.mark.asyncio
     async def test_init_reader_failure_leaves_none(self, mock_decky, tmp_path):
+        import main
         from main import Plugin
-        from nfc import reader as reader_mod
         mock_reader = MagicMock()
         mock_reader.connect = AsyncMock(return_value=False)
-        patcher = patch.object(reader_mod, 'PN532UARTReader', return_value=mock_reader)
+        patcher = patch.object(main, 'PN532UARTReader', return_value=mock_reader)
         patcher.start()
         try:
             p = Plugin()
             fake_path = str(tmp_path / "dev2")
             open(fake_path, "w").close()
             p.settings = MagicMock()
-            p.settings.get = lambda k: fake_path if k == "device_path" else 115200
+            p.settings.get = lambda k: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else 115200)
 
             await p._init_reader()
             assert p.reader is None
@@ -373,6 +405,110 @@ class TestReaderInit:
         fake.firmware_version.side_effect = boom
         info2 = await plugin.get_reader_diagnostics()
         assert info2.get("error") == "nope"
+
+    def test_reader_type_validation(self, plugin):
+        # valid and invalid values
+        assert plugin._validate_setting("reader_type", "pn532_uart")
+        assert not plugin._validate_setting("reader_type", "badtype")
+
+    @pytest.mark.asyncio
+    async def test_set_reader_type_setting(self, plugin, mock_decky):
+        # plugin.set_setting proxies validation
+        assert await plugin.set_setting("reader_type", "pn532_uart")
+        assert not await plugin.set_setting("reader_type", "invalidtype")
+
+    @pytest.mark.asyncio
+    async def test_init_reader_respects_type(self, plugin, tmp_path, mock_decky):
+        # force settings for reader type resolution
+        fake_path = str(tmp_path / "dev")
+        open(fake_path, "w").close()
+        plugin.settings.get = lambda k: fake_path if k == "device_path" else (
+            "pn532_uart" if k == "reader_type" else 115200)
+
+        # patch factory to return a fake reader
+        fake_reader = MagicMock()
+        fake_reader.connect = AsyncMock(return_value=True)
+        with patch.object(plugin, "_create_reader", return_value=fake_reader):
+            await plugin._init_reader()
+            assert plugin.reader is fake_reader
+
+    @pytest.mark.asyncio
+    async def test_init_reader_unknown_type_leaves_none(self, plugin, tmp_path):
+        fake_path = str(tmp_path / "dev")
+        open(fake_path, "w").close()
+        plugin.settings.get = lambda k: fake_path if k == "device_path" else (
+            "no-such" if k == "reader_type" else 115200)
+        await plugin._init_reader()
+        assert plugin.reader is None
+
+    @pytest.mark.asyncio
+    async def test_create_reader_unknown(self, plugin):
+        plugin.settings.get = lambda k: "nope" if k == "reader_type" else "/dev/null"
+        assert await plugin._create_reader() is None
+
+    @pytest.mark.asyncio
+    async def test_create_reader_nfcpy_fallback(self, plugin, monkeypatch):
+        import sys
+        # patch import failure
+        plugin.settings.get = lambda k: "nfcpy" if k == "reader_type" else "/dev/null"
+        monkeypatch.setitem(sys.modules, "nfcpy_backend", None)
+        assert await plugin._create_reader() is None
+
+    @pytest.mark.asyncio
+    async def test_ndef_detected_event_emitted(self, plugin, mock_decky, uid_bytes):
+        # set up reader return
+        plugin.reader.read_uid.return_value = uid_bytes
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00" * 4
+        # fake metadata cache
+        plugin.current_tag_meta = {"foo": "bar"}
+        # make _read_ndef_records return fake records
+        fake_rec = MagicMock()
+        with patch.object(plugin, "_read_ndef_records", return_value=[fake_rec]):
+            await plugin._handle_scan(uid_bytes)
+        mock_decky.emit.assert_any_call("ndef_detected", {"records": [fake_rec]})
+        mock_decky.emit.assert_any_call("tag_metadata", {"foo": "bar"})
+
+    async def test_tag_metadata_event_emitted_when_classified(self, plugin, mock_decky, uid_bytes):
+        # classification should update metadata and emit event
+        plugin.reader.read_uid.return_value = uid_bytes
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00" * 4
+        # ensure no metadata to start
+        assert plugin.current_tag_meta == {}
+
+        # call _handle_scan which performs classification
+        await plugin._handle_scan(uid_bytes)
+        # classification should have added some fields
+        assert "uid" in plugin.current_tag_meta
+        mock_decky.emit.assert_any_call("tag_metadata", plugin.current_tag_meta)
+
+    def test_simulate_tag_sets_state_and_emits(self, plugin, mock_decky):
+        uid = b"\xAA\xBB\xCC\xDD"
+        uri = "https://foo"
+        # patch classify to avoid hardware calls
+        plugin._classify_tag = lambda u: {"uid": u.hex().upper()}
+        # run simulation
+        coro = plugin.simulate_tag(uid, uri)
+        # since simulate_tag is async, run it
+        import asyncio
+        asyncio.get_event_loop().run_until_complete(coro)
+        assert plugin.current_tag_uid == uid.hex().upper()
+        assert plugin.current_tag_uri == uri
+        mock_decky.emit.assert_has_calls([
+            call("tag_detected", {"uid": uid.hex().upper()}),
+            call("uri_detected", {"uri": uri, "uid": uid.hex().upper()}),
+        ])
+
+    def test_classify_tag_protected_flag(self, plugin, uid_bytes):
+        # simulate read error indicative of protection
+        def boom(*args, **kwargs):
+            raise RuntimeError("locked")
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.side_effect = boom
+        meta = plugin._classify_tag(uid_bytes)
+        assert meta.get("capacity_bytes") == 0
+        assert meta.get("protected") is True
 
 # -----------------------------------------------------------------------
 # §10 — Debounce
@@ -617,23 +753,31 @@ class TestNTAGCapacity:
     def test_short_uri_within_limit(self, plugin):
         uid     = _make_uid()
         uri     = "steam://rungameid/400"   # 22 bytes — well within limit
+        # treat as NTAG to bypass classic checks
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
         success, err = plugin._write_ndef_uri(uid, uri)
         # Result depends on mock reader; we just assert the size guard doesn't trigger
         assert err != "URI too long" if err else True
 
     def test_oversized_uri_is_rejected(self, plugin):
         uid  = _make_uid()
-        uri  = "https://" + "a" * 200      # 208 bytes — exceeds 140 byte limit
+        # choose a URI longer than the NTAG capacity (~520 bytes after our range
+        # expansion) so that the size guard should trip.
+        uri  = "https://" + "a" * 600
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
         success, err = plugin._write_ndef_uri(uid, uri)
         assert success is False
         assert "too long" in (err or "").lower()
 
     def test_uri_exactly_at_limit_is_allowed(self, plugin):
         uid = _make_uid()
-        # 140 - 8 (overhead: 2 TLV + 4 header + 1 prefix + 1 terminator) = 132 usable chars
-        uri = "https://" + "x" * 124      # 132 bytes total → within limit
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        # compute capacity dynamically and ensure we test just under that threshold
+        capacity = plugin._classify_tag(uid)["capacity_bytes"]
+        # subtract approximate overhead (8 bytes) and prefix length
+        usable = capacity - 8
+        uri = "https://" + "x" * (usable - len("https://"))
         success, err = plugin._write_ndef_uri(uid, uri)
-        # Should not be rejected by size check (may fail auth with mock, but not size)
         assert "too long" not in (err or "").lower()
 
     def test_write_skips_mifare_trailer_blocks(self, plugin):
@@ -772,11 +916,10 @@ class TestNTAG21xSupport:
         plugin.reader.mifare_classic_read_block.return_value = b"\x00\x00\x00\x00"
 
         # we'll bypass the TLV logic by stubbing _read_ndef_records itself
+        from ndef import UriRecord
         first = MagicMock()
         first.__class__.__name__ = 'TextRecord'
-        second = MagicMock()
-        second.__class__.__name__ = 'UriRecord'
-        second.uri = "https://example.com"
+        second = UriRecord("https://example.com")
 
         with patch.object(plugin, "_read_ndef_records", return_value=[first, second]):
             uri = plugin._read_ndef_uri()
