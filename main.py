@@ -14,9 +14,11 @@ py_modules_path = os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules")
 if py_modules_path not in sys.path:
     sys.path.insert(0, py_modules_path)
 
-import serial
-from adafruit_pn532.uart import PN532_UART
 import ndef
+
+# Reader abstraction hides hardware-specific details
+from nfc.reader import PN532UARTReader
+
 
 # -----------------------------------------------------------------------
 # Constants
@@ -146,6 +148,7 @@ class Plugin:
         )
         self.state           = PluginState.IDLE
         self.reader          = None
+        # legacy field, retained for compatibility with old tests
         self.uart            = None
         self.is_pairing      = False
         self.pairing_uri     = None
@@ -221,7 +224,8 @@ class Plugin:
                         continue
 
                 # ---- Poll ----
-                uid = self.reader.read_passive_target(timeout=0.2)
+                # use the abstract helper
+                uid = self.reader.read_uid(timeout=0.2)
 
                 if uid:
                     missing_count = 0
@@ -230,6 +234,17 @@ class Plugin:
                     is_new_tag = (uid_hex != last_uid_hex)
 
                     if is_new_tag:
+                        # collision: a different tag was seen without the prior
+                        # one being removed.  Notify the frontend so it can warn
+                        # the user.
+                        if last_uid_hex is not None:
+                            decky.logger.info(
+                                f"Multiple tags present: {last_uid_hex}, {uid_hex}"
+                            )
+                            await decky.emit("multiple_tags", {
+                                "previous": last_uid_hex,
+                                "current": uid_hex,
+                            })
                         last_uid_hex = uid_hex
                         decky.logger.info(f"New tag arrival: {uid_hex}")
                         await decky.emit("tag_detected", {"uid": uid_hex})
@@ -308,32 +323,32 @@ class Plugin:
     # --- Reader Init ---
 
     async def _init_reader(self):
+        """Create and connect to the configured NFC reader.
+
+        The old implementation directly instantiated ``PN532_UART`` and
+        manipulated the serial port.  The new version uses the
+        :class:`PN532UARTReader` abstraction which automatically manages
+        transport and can be replaced with other backends in future.
+        """
         path = self.settings.get("device_path")
         baud = self.settings.get("baudrate")
 
+        # quick existence check before attempting to open serial
         if not os.path.exists(path):
             return
 
-        try:
-            decky.logger.info(f"Attempting to connect to PN532 on {path} at {baud}")
-            self.uart   = serial.Serial(path, baudrate=baud, timeout=0.1)
-            self.reader = PN532_UART(self.uart, debug=False)
-
-            version = self.reader.firmware_version
-            if version:
-                decky.logger.info(f"Connected to PN532: {version}")
-                self.reader.SAM_configuration()
-                self._set_state(PluginState.READY)
-                await decky.emit("reader_status", {"connected": True, "path": path})
-            else:
-                decky.logger.error("Failed to get PN532 firmware version")
-                self.uart.close()
-                self.reader = None
-                self.uart   = None
-        except Exception as e:
-            decky.logger.error(f"Init reader failed: {e}")
+        reader = PN532UARTReader(path, baud, logger=decky.logger)
+        connected = await reader.connect()
+        if not connected:
+            decky.logger.error("Reader init failed: unable to connect")
             self.reader = None
+            return
 
+        # success
+        decky.logger.info("Connected to PN532 (via Reader abstraction)")
+        self.reader = reader
+        self._set_state(PluginState.READY)
+        await decky.emit("reader_status", {"connected": True, "path": path})
     # --- Scan Handler ---
 
     async def _handle_scan(self, uid):
@@ -433,91 +448,119 @@ class Plugin:
         except Exception:
             return False
 
-    def _read_ndef_uri(self):
+    def _classify_tag(self, uid):
+        """Return basic metadata about the presented tag.
+
+        Currently this only distinguishes between Mifare Classic and
+        NTAG21x-style tags and reports an approximate capacity in bytes.  The
+        information is useful for UI feedback and for making decisions such
+        as size checks or choosing the correct read/write primitive.
         """
-        Read an NDEF URI record from the currently-presented tag (Spec §3.1).
-        Supports both Mifare‑Classic and NTAG21x tags.
-        Returns the URI string on success, None on failure.
-        """
-        try:
-            uid = self.reader.read_passive_target(timeout=0.1)
-            if not uid:
-                return None
+        meta = {"uid": uid.hex().upper(), "type": "unknown", "capacity_bytes": 0}
 
-            # Determine tag type by attempting a Classic authentication.
-            authenticated = False
-            is_ntag        = False
-
-            keys = [
-                b'\xFF\xFF\xFF\xFF\xFF\xFF',
-                b'\xD3\xF7\xD3\xF7\xD3\xF7',
-                b'\xA0\xA1\xA2\xA3\xA4\xA5',
-            ]
-            for key in keys:
-                try:
-                    if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                        authenticated = True
-                        break
-                except Exception as e:
-                    decky.logger.info(f"Classic auth exception during read: {e}")
-                    # break early; we'll treat this as an NTAG-tag scenario
-                    authenticated = False
-                    break
-                finally:
-                    time.sleep(0.05)
-
-            if not authenticated:
-                decky.logger.info("Auth failed for block 4 – attempting raw read fallback")
-                # if we can still read page 4 then we're likely talking to an
-                # NTAG21x device rather than a Classic with unknown keys.
-                try:
-                    if self.reader.mifare_classic_read_block(4) is not None:
-                        is_ntag = True
-                except Exception:
-                    # read itself might also throw on unsupported commands
-                    is_ntag = True
-
-            data = bytearray()
-            if is_ntag:
-                blocks_iter = self._iter_ntag_pages()
-                read_fn     = self.reader.ntag2xx_read_block
-            else:
-                blocks_iter = self._iter_mifare_data_blocks()
-                read_fn     = self.reader.mifare_classic_read_block
-
-            for i in blocks_iter:
-                block = read_fn(i)
-                if block:
-                    data.extend(block)
-                    if 0xFE in block:
-                        break
-                else:
-                    break
-
-            if not data:
-                return None
-
-            # NDEF TLV (Type 0x03 = NDEF Message) — spec §3.1 uses NDEF URI records
-            if len(data) > 2 and data[0] == 0x03:
-                length    = data[1]
-                ndef_data = data[2:2 + length]
-                for record in ndef.message_decoder(ndef_data):
-                    if isinstance(record, ndef.UriRecord):
-                        return record.uri
-
-            # Fallback: raw URI string encoded directly on tag
+        authenticated = False
+        keys = [
+            b"\xFF\xFF\xFF\xFF\xFF\xFF",
+            b"\xD3\xF7\xD3\xF7\xD3\xF7",
+            b"\xA0\xA1\xA2\xA3\xA4\xA5",
+        ]
+        for key in keys:
             try:
-                import re
-                decoded = data.decode("utf-8", errors="ignore").strip("\x00")
-                match   = re.search(r"[a-zA-Z0-9]+://[^\s\x00]+", decoded)
-                if match:
-                    return match.group(0)
+                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
+                    authenticated = True
+                    break
+            except Exception:
+                break
+            finally:
+                time.sleep(0.05)
+
+        if authenticated:
+            meta["type"] = "mifare-classic"
+            blocks = list(self._iter_mifare_data_blocks())
+            meta["capacity_bytes"] = len(blocks) * MIFARE_CLASSIC_BLOCK_SIZE
+        else:
+            try:
+                if self.reader.mifare_classic_read_block(4) is not None:
+                    meta["type"] = "ntag21x"
+                    pages = list(self._iter_ntag_pages())
+                    meta["capacity_bytes"] = len(pages) * 4
             except Exception:
                 pass
 
-        except Exception as e:
-            decky.logger.error(f"Error reading NDEF: {e}")
+        return meta
 
+    def _read_ndef_records(self):
+        """Read and return all NDEF records present on the current tag.
+
+        The implementation largely mirrors the old ``_read_ndef_uri`` logic
+        but stops short of interpreting the payload; callers can iterate the
+        returned list to find whatever record type they're interested in.
+        Returning a list makes it easy to add additional event hooks later
+        (e.g. ``ndef_detected``) without touching the low‑level read code.
+        """
+        uid = self.reader.read_uid(timeout=0.1)
+        if not uid:
+            return []
+
+        # Use the new classification helper to determine tag family and
+        # capacity.  This factorises the same logic used elsewhere and makes
+        # metadata available for diagnostics/UI.
+        tag_meta = self._classify_tag(uid)
+        authenticated = tag_meta.get("type") == "mifare-classic"
+        is_ntag = tag_meta.get("type") == "ntag21x"
+
+        data = bytearray()
+        if is_ntag:
+            blocks_iter = self._iter_ntag_pages()
+            read_fn = self.reader.ntag2xx_read_block
+        else:
+            blocks_iter = self._iter_mifare_data_blocks()
+            read_fn = self.reader.mifare_classic_read_block
+
+        for i in blocks_iter:
+            block = read_fn(i)
+            if block:
+                data.extend(block)
+                if 0xFE in block:
+                    break
+            else:
+                break
+
+        if not data:
+            return []
+
+        records = []
+        # parse TLV-wrapped NDEF message if present
+        if len(data) > 2 and data[0] == 0x03:
+            length = data[1]
+            ndef_data = data[2:2 + length]
+            for rec in ndef.message_decoder(ndef_data):
+                records.append(rec)
+
+        # no records found? attempt the crude regex fallback so we at least
+        # return a best-effort UriRecord if the bytes look like one.
+        if not records:
+            try:
+                import re
+                decoded = data.decode("utf-8", errors="ignore").strip("\x00")
+                match = re.search(r"[a-zA-Z0-9]+://[^\s\x00]+", decoded)
+                if match:
+                    # construct a synthetic UriRecord for consistency
+                    records.append(ndef.UriRecord(match.group(0)))
+            except Exception:
+                pass
+
+        return records
+
+    def _read_ndef_uri(self):
+        """Convenience wrapper that returns the first URI record's value.
+
+        This replaces the older monolithic implementation.  Only a single
+        URI is returned for now; other record types are ignored.
+        """
+        for record in self._read_ndef_records():
+            if isinstance(record, ndef.UriRecord):
+                return record.uri
         return None
 
     # --- Pairing Handler ---
@@ -589,13 +632,21 @@ class Plugin:
             finally:
                 time.sleep(0.05)
 
-        # choose limits based on tag family
+        # choose limits based on tag family; compute actual available space
         if authenticated:
-            max_payload = NTAG213_MAX_PAYLOAD_BYTES
+            # Mifare Classic: count writable blocks and multiply by block size
+            blocks = list(self._iter_mifare_data_blocks())
+            max_payload = len(blocks) * MIFARE_CLASSIC_BLOCK_SIZE
         else:
-            max_payload = NTAG21X_MAX_PAYLOAD_BYTES
+            # NTAG family: count user-writable pages
+            pages = list(self._iter_ntag_pages())
+            max_payload = len(pages) * 4
 
-        # capacity check (Spec §3.3)
+        # subtract a small amount for TLV/record overhead later (handled in
+        # estimated_size check) – we just need a conservative upper bound.
+
+        # capacity check (Spec §3.3).  We estimate TLV/record overhead and
+        # compare against the computed payload ceiling above.
         estimated_size = 2 + 4 + 1 + len(uri_bytes) + 1
         if estimated_size > max_payload:
             msg = (
@@ -740,6 +791,47 @@ class Plugin:
             "uid": self.current_tag_uid,
             "uri": self.current_tag_uri,
         }
+
+    async def get_tag_metadata(self, uid: str | None = None):
+        """Return classification info for a tag.
+
+        If ``uid`` is ``None`` the currently-present tag is used; otherwise the
+        provided hexadecimal UID string is interpreted.  The return value is a
+        dict produced by :meth:`_classify_tag`.
+        """
+        # convert hex string to bytes if necessary
+        if uid and isinstance(uid, str):
+            try:
+                uid_bytes = bytes.fromhex(uid)
+            except ValueError:
+                return {"error": "invalid uid"}
+        else:
+            uid_bytes = None
+
+        if uid_bytes is None:
+            # use currently-present UID if any
+            if not self.current_tag_uid:
+                return {}
+            uid_bytes = bytes.fromhex(self.current_tag_uid)
+
+        try:
+            return self._classify_tag(uid_bytes)
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def get_reader_diagnostics(self):
+        """Return low-level diagnostics about the connected reader.
+
+        The frontend can call this to show firmware version, connection
+        status, or any errors seen while interacting with the device.
+        """
+        info = {"connected": self.reader is not None}
+        if self.reader:
+            try:
+                info["firmware"] = self.reader.firmware_version()
+            except Exception as e:
+                info["error"] = str(e)
+        return info
 
     async def get_state(self):
         """Return current plugin state string (for frontend debugging / tests)."""

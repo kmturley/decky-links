@@ -98,8 +98,12 @@ def plugin(tmp_path):
     mock_settings.settings = _settings
     p.settings = mock_settings
 
-    # Hardware mocks
+    # Hardware mocks — we now use a generic Reader interface
     p.reader = MagicMock()
+    # ensure the convenience helper exists; tests patch read_uid explicitly when
+    # they need to simulate a UID
+    p.reader.read_uid = MagicMock()
+    # existing code occasionally references p.uart; keep a dummy for now
     p.uart   = MagicMock()
 
     # Plugin state

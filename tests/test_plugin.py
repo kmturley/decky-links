@@ -285,6 +285,96 @@ class TestNoAutoRelaunch:
 
 
 # -----------------------------------------------------------------------
+# §9.1 — Reader abstraction init tests
+# -----------------------------------------------------------------------
+
+class TestReaderInit:
+
+    def test_classify_tag_reports_types(self, plugin, uid_bytes):
+        # assume reader methods will indicate non-classic
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00"
+        meta = plugin._classify_tag(uid_bytes)
+        assert meta["uid"] == uid_bytes.hex().upper()
+        assert meta["type"] == "ntag21x"
+        assert meta["capacity_bytes"] > 0
+
+    @pytest.mark.asyncio
+    async def test_get_tag_metadata_method(self, plugin, uid_bytes):
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00"
+        # simulate current tag
+        plugin.current_tag_uid = uid_bytes.hex().upper()
+        info = await plugin.get_tag_metadata()
+        assert info.get("type") == "ntag21x"
+        # invalid hex
+        bad = await plugin.get_tag_metadata("nothex")
+        assert "error" in bad
+
+    @pytest.mark.asyncio
+    async def test_init_reader_success_sets_reader(self, mock_decky, tmp_path):
+        from main import Plugin
+        from nfc import reader as reader_mod
+        # patch the PN532UARTReader so connect() returns True
+        mock_reader = MagicMock()
+        mock_reader.connect = AsyncMock(return_value=True)
+        patcher = patch.object(reader_mod, 'PN532UARTReader', return_value=mock_reader)
+        patcher.start()
+        try:
+            p = Plugin()
+            # make settings return a fake existing path
+            fake_path = str(tmp_path / "dev")
+            open(fake_path, "w").close()
+            p.settings = MagicMock()
+            p.settings.get = lambda k: fake_path if k == "device_path" else 115200
+
+            await p._init_reader()
+            assert p.reader is mock_reader
+        finally:
+            patcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_init_reader_failure_leaves_none(self, mock_decky, tmp_path):
+        from main import Plugin
+        from nfc import reader as reader_mod
+        mock_reader = MagicMock()
+        mock_reader.connect = AsyncMock(return_value=False)
+        patcher = patch.object(reader_mod, 'PN532UARTReader', return_value=mock_reader)
+        patcher.start()
+        try:
+            p = Plugin()
+            fake_path = str(tmp_path / "dev2")
+            open(fake_path, "w").close()
+            p.settings = MagicMock()
+            p.settings.get = lambda k: fake_path if k == "device_path" else 115200
+
+            await p._init_reader()
+            assert p.reader is None
+        finally:
+            patcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_get_reader_diagnostics(self, plugin):
+        # no reader connected
+        plugin.reader = None
+        assert await plugin.get_reader_diagnostics() == {"connected": False}
+
+        # attach a fake reader with firmware
+        fake = MagicMock()
+        fake.firmware_version.return_value = (1, 2, 3, 4)
+        plugin.reader = fake
+        info = await plugin.get_reader_diagnostics()
+        assert info["connected"] is True
+        assert info["firmware"] == (1, 2, 3, 4)
+
+        # simulate exception fetching firmware
+        def boom():
+            raise RuntimeError("nope")
+        fake.firmware_version.side_effect = boom
+        info2 = await plugin.get_reader_diagnostics()
+        assert info2.get("error") == "nope"
+
+# -----------------------------------------------------------------------
 # §10 — Debounce
 # -----------------------------------------------------------------------
 
@@ -614,9 +704,42 @@ class TestNTAG21xSupport:
         assert success is False
         assert "too long" in (err or "").lower()
 
+    def test_classic_capacity_detection_blocks(self, plugin):
+        """Capacity should reflect the number of writable blocks."""
+        uid = _make_uid()
+        uri = "https://short"
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        # limit available blocks artificially
+        plugin._iter_mifare_data_blocks = lambda: [4, 5]  # only 2 blocks => 32 bytes
+
+        # long URI that would fit in default but not here
+        long_uri = "https://" + "x" * 100
+        success, err = plugin._write_ndef_uri(uid, long_uri)
+        assert success is False
+        assert "exceeds limit" in (err or "").lower()
+
+    def test_classic_capacity_allows_small_write(self, plugin):
+        uid = _make_uid()
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        plugin._iter_mifare_data_blocks = lambda: [4, 5, 6]
+        uri = "https://ok"
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is True
+        assert err is None
+
+    def test_ntag_capacity_detection_pages(self, plugin):
+        uid = _make_uid()
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin._iter_ntag_pages = lambda: [4, 5]
+        # each page 4 bytes -> 8 bytes available
+        uri = "https://"  # ~8 bytes including overhead -> should fail
+        success, err = plugin._write_ndef_uri(uid, uri)
+        assert success is False
+        assert "exceeds limit" in (err or "").lower()
+
     def test_read_ndef_uri_on_ntag_detects_and_parses(self, plugin, uid_bytes):
         # set up the reader to mimic an NTAG
-        plugin.reader.read_passive_target.return_value = uid_bytes
+        plugin.reader.read_uid.return_value = uid_bytes
         plugin.reader.mifare_classic_authenticate_block.return_value = False
         # a raw read — non-None tells _is_ntag() to flag NTAG family
         plugin.reader.mifare_classic_read_block.return_value = b"\x00\x00\x00\x00"
@@ -642,10 +765,47 @@ class TestNTAG21xSupport:
 
         assert uri == "steam://rungameid/77"
 
+    def test_multiple_ndef_records_first_uri_returned(self, plugin, uid_bytes):
+        # mimic tag with two records: first a TextRecord then a UriRecord
+        plugin.reader.read_uid.return_value = uid_bytes
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00\x00\x00\x00"
+
+        # we'll bypass the TLV logic by stubbing _read_ndef_records itself
+        first = MagicMock()
+        first.__class__.__name__ = 'TextRecord'
+        second = MagicMock()
+        second.__class__.__name__ = 'UriRecord'
+        second.uri = "https://example.com"
+
+        with patch.object(plugin, "_read_ndef_records", return_value=[first, second]):
+            uri = plugin._read_ndef_uri()
+        assert uri == "https://example.com"
+
 
 # -----------------------------------------------------------------------
 # §6.3 — Card Removed During Game triggers correct event
 # -----------------------------------------------------------------------
+
+class TestMultiTagDetection:
+
+    @pytest.mark.asyncio
+    async def test_multiple_tags_event(self, plugin, mock_decky, uid_bytes):
+        # simulate two different UIDs in succession without removal
+        plugin.reader.read_uid.return_value = uid_bytes
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        # first pass
+        await plugin._handle_scan(uid_bytes)
+        # second pass with different uid
+        other = b"\xBA\xAD\xF0\x0D"
+        plugin.reader.read_uid.return_value = other
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_scan(other)
+        mock_decky.emit.assert_any_call("multiple_tags", {
+            "previous": uid_bytes.hex().upper(),
+            "current": other.hex().upper(),
+        })
+
 
 class TestCardRemovedDuringGame:
 
