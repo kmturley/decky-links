@@ -135,7 +135,7 @@ class SettingsManager:
         if key in ("auto_launch", "auto_close"):
             return isinstance(value, bool)
         if key == "reader_type":
-            return isinstance(value, str) and value in ("pn532_uart", "nfcpy")
+            return isinstance(value, str) and value in ("pn532_uart", "acr122u", "proxmark", "nfcpy")
         return False
 
 
@@ -214,7 +214,7 @@ class Plugin:
         if key not in ALLOWED_SETTING_KEYS:
             return False
         if key == "reader_type":
-            return isinstance(value, str) and value in ("pn532_uart", "nfcpy")
+            return isinstance(value, str) and value in ("pn532_uart", "acr122u", "proxmark", "nfcpy")
         if key == "device_path":
             return (
                 isinstance(value, str)
@@ -366,9 +366,8 @@ class Plugin:
     async def _create_reader(self):
         """Return a reader instance based on configured settings.
 
-        The only supported type today is ``pn532_uart``; other backends may be
-        added in future (e.g. ``nfcpy``).  A ``None`` result indicates the
-        type is unknown or the backend unavailable.
+        Supported types: pn532_uart, acr122u, proxmark.
+        A ``None`` result indicates the type is unknown or the backend unavailable.
         """
         rtype = self.settings.get("reader_type")
         path = self.settings.get("device_path")
@@ -376,6 +375,20 @@ class Plugin:
 
         if rtype == "pn532_uart":
             return PN532UARTReader(path, baud, logger=decky.logger)
+        elif rtype == "acr122u":
+            try:
+                from nfc.acr122u_backend import ACR122UReader
+                return ACR122UReader(logger=decky.logger)
+            except ImportError:
+                decky.logger.error("ACR122U backend requires pyscard library")
+                return None
+        elif rtype == "proxmark":
+            try:
+                from nfc.proxmark_backend import ProxmarkReader
+                return ProxmarkReader(path, logger=decky.logger)
+            except ImportError:
+                decky.logger.error("Proxmark backend not available")
+                return None
         elif rtype == "nfcpy":
             try:
                 from nfcpy_backend import NfcPyReader
