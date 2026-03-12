@@ -20,6 +20,7 @@ import ndef
 # Reader abstraction hides hardware-specific details
 from nfc.reader import PN532UARTReader
 from nfc.key_manager import KeyManager
+from nfc.signature_manager import SignatureManager
 
 
 # -----------------------------------------------------------------------
@@ -157,6 +158,9 @@ class Plugin:
         )
         self.key_manager = KeyManager(
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "keys.json")
+        )
+        self.signature_manager = SignatureManager(
+            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "signing_keys.json")
         )
         self.state           = PluginState.IDLE
         self.reader          = None
@@ -1179,3 +1183,157 @@ class Plugin:
             self._set_state(PluginState.READY)
 
         return True
+
+    async def generate_signing_key(self, key_id: str):
+        """Generate new signing key pair.
+        
+        Args:
+            key_id: Identifier for the key pair
+            
+        Returns:
+            Dict with public_key or error
+        """
+        try:
+            public_key, _ = self.signature_manager.generate_key_pair(key_id)
+            decky.logger.info(f"Generated signing key: {key_id}")
+            return {"success": True, "public_key": public_key}
+        except Exception as e:
+            decky.logger.error(f"Failed to generate key: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def import_signing_key(self, key_id: str, public_key: str, private_key: Optional[str] = None):
+        """Import existing signing key pair.
+        
+        Args:
+            key_id: Identifier for the key pair
+            public_key: Public key PEM
+            private_key: Optional private key PEM
+            
+        Returns:
+            Success boolean
+        """
+        try:
+            self.signature_manager.import_key_pair(key_id, public_key, private_key)
+            decky.logger.info(f"Imported signing key: {key_id}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to import key: {e}")
+            return False
+
+    async def delete_signing_key(self, key_id: str):
+        """Delete a signing key pair.
+        
+        Args:
+            key_id: Identifier for the key pair
+            
+        Returns:
+            Success boolean
+        """
+        try:
+            self.signature_manager.delete_key(key_id)
+            decky.logger.info(f"Deleted signing key: {key_id}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to delete key: {e}")
+            return False
+
+    async def list_signing_keys(self):
+        """List all signing key IDs.
+        
+        Returns:
+            List of key IDs
+        """
+        try:
+            return self.signature_manager.list_keys()
+        except Exception as e:
+            decky.logger.error(f"Failed to list keys: {e}")
+            return []
+
+    async def get_public_key(self, key_id: str):
+        """Get public key for a key ID.
+        
+        Args:
+            key_id: Identifier for the key pair
+            
+        Returns:
+            Public key PEM or None
+        """
+        try:
+            return self.signature_manager.get_public_key(key_id)
+        except Exception as e:
+            decky.logger.error(f"Failed to get public key: {e}")
+            return None
+
+    async def sign_uri(self, uri: str, key_id: str):
+        """Sign a URI and return signed NDEF message.
+        
+        Args:
+            uri: URI to sign
+            key_id: Signing key ID
+            
+        Returns:
+            Dict with signed_message (hex) or error
+        """
+        try:
+            import ndef
+            from nfc.signature_record import SignatureRecord, create_signed_ndef_message
+            
+            # Create URI record
+            uri_record = ndef.UriRecord(uri)
+            uri_bytes = b"".join(ndef.message_encoder([uri_record]))
+            
+            # Sign the URI bytes
+            signature = self.signature_manager.sign_data(key_id, uri_bytes)
+            
+            # Create signature record
+            sig_record = SignatureRecord(signature, key_id)
+            sig_bytes = sig_record.to_ndef_record()
+            
+            # Combine into signed message
+            signed_message = create_signed_ndef_message(uri_bytes, sig_bytes)
+            
+            decky.logger.info(f"Signed URI with key {key_id}")
+            return {"success": True, "signed_message": signed_message.hex()}
+        except Exception as e:
+            decky.logger.error(f"Failed to sign URI: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def verify_signature(self, signed_message_hex: str):
+        """Verify signature in signed NDEF message.
+        
+        Args:
+            signed_message_hex: Signed NDEF message as hex string
+            
+        Returns:
+            Dict with valid boolean and details
+        """
+        try:
+            from nfc.signature_record import SignatureRecord, extract_uri_from_signed_message
+            
+            signed_message = bytes.fromhex(signed_message_hex)
+            uri_bytes, sig_bytes = extract_uri_from_signed_message(signed_message)
+            
+            if not uri_bytes or not sig_bytes:
+                return {"valid": False, "error": "Invalid message format"}
+            
+            # Parse signature record
+            sig_record = SignatureRecord.from_ndef_payload(sig_bytes[3:])  # Skip header
+            if not sig_record:
+                return {"valid": False, "error": "Invalid signature record"}
+            
+            # Verify signature
+            valid = self.signature_manager.verify_signature(
+                sig_record.key_id,
+                uri_bytes,
+                sig_record.signature
+            )
+            
+            decky.logger.info(f"Signature verification: {valid}")
+            return {
+                "valid": valid,
+                "key_id": sig_record.key_id,
+                "algorithm": sig_record.algorithm
+            }
+        except Exception as e:
+            decky.logger.error(f"Failed to verify signature: {e}")
+            return {"valid": False, "error": str(e)}
