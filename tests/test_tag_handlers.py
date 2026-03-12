@@ -6,6 +6,7 @@ from nfc.tag_handlers import (
     NTAGHandler,
     MifareClassicHandler,
     UltralightHandler,
+    ISO14443BHandler,
     ISO15693Handler,
     FeliCaHandler,
     DESFireHandler,
@@ -222,6 +223,76 @@ class TestUltralightHandler:
         capacity = handler.get_capacity()
         
         assert capacity == 12 * 4
+
+
+class TestISO14443BHandler:
+    """Tests for ISO-14443B handler."""
+
+    def test_iso14443b_read_ndef_success(self):
+        """ISO-14443B read should use transceive to read blocks."""
+        uid = b"\x01\x02\x03\x04"
+        handler = ISO14443BHandler(uid)
+        
+        reader = MagicMock()
+        reader.transceive.side_effect = [
+            b"\x03\x10\xD1\x01",
+            b"\x0C\x55\x65\x78",
+            b"\x61\x6D\xFE\x00",
+        ]
+        
+        data = handler.read_ndef(reader)
+        
+        assert len(data) > 0
+        assert 0xFE in data
+
+    def test_iso14443b_read_ndef_empty_on_failure(self):
+        """ISO-14443B read should return empty bytes on transceive failure."""
+        uid = b"\x01\x02\x03\x04"
+        handler = ISO14443BHandler(uid)
+        
+        reader = MagicMock()
+        reader.transceive.side_effect = RuntimeError("Transceive failed")
+        
+        data = handler.read_ndef(reader)
+        
+        assert data == b""
+
+    def test_iso14443b_write_ndef_success(self):
+        """ISO-14443B write should use transceive to write blocks."""
+        uid = b"\x01\x02\x03\x04"
+        handler = ISO14443BHandler(uid)
+        
+        reader = MagicMock()
+        reader.transceive.return_value = b"\x00"
+        
+        data = b"\x03\x10\xD1\x01\x0C\x55"
+        success, error = handler.write_ndef(reader, data)
+        
+        assert success is True
+        assert error is None
+
+    def test_iso14443b_write_ndef_failure(self):
+        """ISO-14443B write should return error on transceive failure."""
+        uid = b"\x01\x02\x03\x04"
+        handler = ISO14443BHandler(uid)
+        
+        reader = MagicMock()
+        reader.transceive.return_value = None
+        
+        data = b"\x03\x10\xD1\x01"
+        success, error = handler.write_ndef(reader, data)
+        
+        assert success is False
+        assert "failed" in error.lower()
+
+    def test_iso14443b_capacity(self):
+        """ISO-14443B capacity should be ~1KB."""
+        uid = b"\x01\x02\x03\x04"
+        handler = ISO14443BHandler(uid)
+        
+        capacity = handler.get_capacity()
+        
+        assert capacity == 1024
 
 
 class TestISO15693Handler:
@@ -543,6 +614,14 @@ class TestMifareClassicKeyManagement:
         handler = get_handler("ultralight", uid)
         
         assert isinstance(handler, UltralightHandler)
+        assert handler.uid == uid
+
+    def test_get_handler_iso14443b(self):
+        """Factory should return ISO14443BHandler for iso14443b type."""
+        uid = b"\x01\x02\x03\x04"
+        handler = get_handler("iso14443b", uid)
+        
+        assert isinstance(handler, ISO14443BHandler)
         assert handler.uid == uid
 
     def test_get_handler_iso15693(self):

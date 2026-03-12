@@ -564,6 +564,15 @@ class Plugin:
 
         authenticated = False
         # heuristics for additional families (best effort with current reader API)
+        # ISO-14443B: 4-byte UID, detected via read_uid_iso14443b
+        if len(uid) == 4 and hasattr(self.reader, 'read_uid_iso14443b'):
+            try:
+                test_uid = self.reader.read_uid_iso14443b(timeout=0.1)
+                if test_uid and test_uid == uid:
+                    meta["type"] = "iso14443b"
+                    return meta
+            except Exception:
+                pass
         # ISO-15693 / NFC-V often uses 8-byte UID starting with E0.
         if len(uid) == 8 and uid[0] == 0xE0:
             meta["type"] = "iso15693"

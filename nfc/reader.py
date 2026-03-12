@@ -58,6 +58,13 @@ class Reader(ABC):
         backends should provide a compatible behaviour.
         """
 
+    @abstractmethod
+    def read_uid_iso14443b(self, timeout: float = 0.2) -> Optional[bytes]:
+        """Read UID from ISO-14443B tag.
+        
+        Returns UID bytes or None if no tag present.
+        """
+
 
 class PN532UARTReader(Reader):
     """PN532 reader connected over a UART serial port.
@@ -119,6 +126,15 @@ class PN532UARTReader(Reader):
     def read_uid(self, timeout: float = 0.2) -> Optional[bytes]:
         if self._reader:
             return self._reader.read_passive_target(timeout=timeout)
+        return None
+
+    def read_uid_iso14443b(self, timeout: float = 0.2) -> Optional[bytes]:
+        """Read UID from ISO-14443B tag using baud rate 3 (106 kbps Type B)."""
+        if self._reader:
+            try:
+                return self._reader.read_passive_target(baud_rate=3, timeout=timeout)
+            except Exception:
+                pass
         return None
 
     # allow callers to transparently access any other PN532_UART methods

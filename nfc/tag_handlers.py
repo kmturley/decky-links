@@ -452,6 +452,58 @@ class FeliCaHandler(TagHandler):
         return self.max_blocks * self.block_size
 
 
+class ISO14443BHandler(TagHandler):
+    """Handler for ISO-14443B tags."""
+
+    def __init__(self, uid: bytes):
+        self.uid = uid
+        self.block_size = 4
+        self.max_blocks = 256
+
+    def read_ndef(self, reader) -> bytes:
+        """Read NDEF data from ISO-14443B blocks via transceive."""
+        data = bytearray()
+        try:
+            for block_num in range(self.max_blocks):
+                cmd = bytes([0x30, block_num])
+                response = reader.transceive(cmd, timeout=0.1)
+                if response and len(response) >= self.block_size:
+                    block_data = response[:self.block_size]
+                    data.extend(block_data)
+                    if 0xFE in block_data:
+                        break
+                else:
+                    break
+        except Exception:
+            pass
+        return bytes(data)
+
+    def write_ndef(self, reader, data: bytes) -> Tuple[bool, Optional[str]]:
+        """Write NDEF data to ISO-14443B blocks via transceive."""
+        while len(data) % self.block_size != 0:
+            data = data + b"\x00"
+
+        required_blocks = len(data) // self.block_size
+        if required_blocks > self.max_blocks:
+            return False, f"Data too large: needs {required_blocks} blocks, available {self.max_blocks}"
+
+        try:
+            for i in range(0, len(data), self.block_size):
+                block_num = i // self.block_size
+                block_data = data[i : i + self.block_size]
+                cmd = bytes([0xA2, block_num]) + block_data
+                response = reader.transceive(cmd, timeout=0.1)
+                if not response:
+                    return False, f"Write failed at block {block_num}"
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    def get_capacity(self) -> int:
+        """ISO-14443B capacity: ~1KB."""
+        return self.max_blocks * self.block_size
+
+
 class DESFireHandler(TagHandler):
     """Handler for DESFire tags."""
 
@@ -528,6 +580,7 @@ def get_handler(tag_type: str, uid: bytes, key_manager=None) -> Optional[TagHand
     handlers = {
         "ntag21x": NTAGHandler,
         "ultralight": UltralightHandler,
+        "iso14443b": ISO14443BHandler,
         "iso15693": ISO15693Handler,
         "felica": FeliCaHandler,
         "desfire": DESFireHandler,
