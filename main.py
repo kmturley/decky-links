@@ -15,6 +15,11 @@ py_modules_path = os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules")
 if py_modules_path not in sys.path:
     sys.path.insert(0, py_modules_path)
 
+# Add plugin directory to path so nfc module can be imported
+plugin_dir = decky.DECKY_PLUGIN_DIR
+if plugin_dir not in sys.path:
+    sys.path.insert(0, plugin_dir)
+
 import ndef
 
 # Reader abstraction hides hardware-specific details
@@ -471,8 +476,19 @@ class Plugin:
         self._play_sound("scan.flac")
 
         records = self._read_ndef_records()
-        await decky.emit("ndef_detected", {"records": records})
 
+        # The `records` object is a list of `ndef` record objects, which are
+        # not directly JSON serializable. We need to convert them to a list
+        # of dictionaries before emitting them.
+        serializable_records = []
+        for record in records:
+            rec_dict = {}
+            for attr in ['type', 'name', 'uri', 'text', 'language', 'encoding']:
+                if hasattr(record, attr):
+                    rec_dict[attr] = getattr(record, attr)
+            serializable_records.append(rec_dict)
+        await decky.emit("ndef_detected", {"records": serializable_records})
+        
         # also send metadata about the tag itself (type/capacity/protection)
         if hasattr(self, "current_tag_meta") and self.current_tag_meta is not None:
             await decky.emit("tag_metadata", self.current_tag_meta)
@@ -657,7 +673,7 @@ class Plugin:
         # metadata available for diagnostics/UI.
         tag_meta = self._classify_tag(uid)
         authenticated = tag_meta.get("type") == "mifare-classic"
-        is_ntag = tag_meta.get("type") == "ntag21x"
+        is_ntag = tag_meta.get("type") in ("ntag21x", "ultralight")
 
         data = bytearray()
         if is_ntag:
@@ -684,19 +700,52 @@ class Plugin:
         if len(data) > 2 and data[0] == 0x03:
             length = data[1]
             ndef_data = data[2:2 + length]
-            for rec in ndef.message_decoder(ndef_data):
-                records.append(rec)
+            try:
+                for rec in ndef.message_decoder(ndef_data):
+                    records.append(rec)
+            except Exception as e:
+                # If NDEF decoding fails, log it and try fallback
+                decky.logger.warning(f"NDEF decode error: {e}")
+                # Try to extract URI directly from the raw data
+                try:
+                    # NDEF URI record format: record_header, type_length, payload_length, type, uri_prefix, uri_data
+                    # Look for the URI type (0x55) and extract what follows
+                    if len(ndef_data) > 3:
+                        # Skip record header and type length, look for payload length and type
+                        for i in range(len(ndef_data) - 2):
+                            if ndef_data[i] == 0x55:  # URI type
+                                # Found URI type, next byte is URI prefix, rest is URI
+                                uri_prefix_byte = ndef_data[i + 1] if i + 1 < len(ndef_data) else 0
+                                uri_data = ndef_data[i + 2:]
+                                if uri_data:
+                                    try:
+                                        uri_str = uri_data.decode("utf-8", errors="ignore").strip("\x00\xfe")
+                                        if uri_str:
+                                            records.append(ndef.UriRecord(uri_str))
+                                            break
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
 
         # no records found? attempt the crude regex fallback so we at least
         # return a best-effort UriRecord if the bytes look like one.
         if not records:
             try:
                 import re
+                # Try to extract URI from raw bytes
+                # Look for common URI schemes
                 decoded = data.decode("utf-8", errors="ignore").strip("\x00")
-                match = re.search(r"[a-zA-Z0-9]+://[^\s\x00]+", decoded)
+                # Match URI schemes: scheme://path, being more permissive with characters
+                match = re.search(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\x00\xfe]+)", decoded)
                 if match:
+                    uri = match.group(1).strip()
                     # construct a synthetic UriRecord for consistency
-                    records.append(ndef.UriRecord(match.group(0)))
+                    try:
+                        records.append(ndef.UriRecord(uri))
+                    except Exception:
+                        # If UriRecord creation fails, just skip it
+                        pass
             except Exception:
                 pass
 
@@ -767,9 +816,12 @@ class Plugin:
         uri_bytes      = uri.encode("utf-8")
 
         # Build NDEF record and wrap in TLV; length may be adjusted later.
-        record  = ndef.UriRecord(uri)
-        message = b"".join(ndef.message_encoder([record]))
-        tlv     = bytearray([0x03, len(message)]) + message + b"\xFE"
+        try:
+            record  = ndef.UriRecord(uri)
+            message = b"".join(ndef.message_encoder([record]))
+            tlv     = bytearray([0x03, len(message)]) + message + b"\xFE"
+        except Exception as e:
+            return (False, f"Failed to create NDEF record: {e}")
 
         # Attempt Classic authentication first to distinguish tag types.
         authenticated = False

@@ -7,9 +7,18 @@ ECDSA (Elliptic Curve Digital Signature Algorithm) with SHA-256.
 import os
 import json
 from typing import Optional, Tuple
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.backends import default_backend
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.backends import default_backend
+    CRYPTO_AVAILABLE = True
+except Exception:
+    hashes = None
+    serialization = None
+    ec = None
+    default_backend = None
+    CRYPTO_AVAILABLE = False
 
 
 class SignatureManager:
@@ -18,8 +27,15 @@ class SignatureManager:
     def __init__(self, keys_path: Optional[str] = None):
         self.keys_path = keys_path
         self.signing_keys = {}
+        self.crypto_available = CRYPTO_AVAILABLE
         if keys_path:
             self.load()
+
+    def _require_crypto(self):
+        if not self.crypto_available:
+            raise RuntimeError(
+                "cryptography is not installed; signing features are disabled"
+            )
 
     def generate_key_pair(self, key_id: str) -> Tuple[str, str]:
         """Generate new ECDSA key pair.
@@ -30,6 +46,7 @@ class SignatureManager:
         Returns:
             Tuple of (public_key_pem, private_key_pem)
         """
+        self._require_crypto()
         private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
         public_key = private_key.public_key()
         
@@ -62,6 +79,7 @@ class SignatureManager:
             public_key_pem: Public key in PEM format
             private_key_pem: Optional private key in PEM format
         """
+        self._require_crypto()
         # Validate keys by loading them
         serialization.load_pem_public_key(public_key_pem.encode('utf-8'), default_backend())
         if private_key_pem:
@@ -114,6 +132,7 @@ class SignatureManager:
             KeyError: If key_id not found
             ValueError: If private key not available
         """
+        self._require_crypto()
         if key_id not in self.signing_keys:
             raise KeyError(f"Key ID {key_id} not found")
         
@@ -141,6 +160,7 @@ class SignatureManager:
         Returns:
             True if signature is valid, False otherwise
         """
+        self._require_crypto()
         if key_id not in self.signing_keys:
             return False
         

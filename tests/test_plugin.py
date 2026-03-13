@@ -467,7 +467,12 @@ class TestReaderInit:
         fake_rec = MagicMock()
         with patch.object(plugin, "_read_ndef_records", return_value=[fake_rec]):
             await plugin._handle_scan(uid_bytes)
-        mock_decky.emit.assert_any_call("ndef_detected", {"records": [fake_rec]})
+        # Check that ndef_detected was emitted with serialized records
+        calls = [call for call in mock_decky.emit.call_args_list if call[0][0] == "ndef_detected"]
+        assert len(calls) == 1
+        assert "records" in calls[0][0][1]
+        assert len(calls[0][0][1]["records"]) == 1
+        # Also check tag_metadata was emitted
         mock_decky.emit.assert_any_call("tag_metadata", {"foo": "bar"})
 
     async def test_tag_metadata_event_emitted_when_classified(self, plugin, mock_decky, uid_bytes):
