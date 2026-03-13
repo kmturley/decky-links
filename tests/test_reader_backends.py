@@ -253,6 +253,313 @@ class TestProxmarkBackend:
         assert reader._connected is False
 
 
+class TestNfcPyBackend:
+    """Tests for nfcpy reader backend."""
+
+    @pytest.mark.asyncio
+    async def test_nfcpy_connect_success(self):
+        """nfcpy should connect successfully."""
+        from nfc.nfcpy_backend import NfcPyReader
+        import sys
+        
+        # Mock the nfcpy library
+        mock_nfcpy = MagicMock()
+        mock_clf = MagicMock()
+        mock_nfcpy.ContactlessFrontend.return_value = mock_clf
+        
+        reader = NfcPyReader()
+        
+        # Patch the import inside connect
+        original_nfc = sys.modules.get('nfc')
+        sys.modules['nfc'] = mock_nfcpy
+        
+        try:
+            connected = await reader.connect()
+            assert connected is True
+            assert reader.is_connected() is True
+        finally:
+            if original_nfc:
+                sys.modules['nfc'] = original_nfc
+
+    @pytest.mark.asyncio
+    async def test_nfcpy_connect_failure(self):
+        """nfcpy should fail when device not found."""
+        from nfc.nfcpy_backend import NfcPyReader
+        import sys
+        
+        mock_nfcpy = MagicMock()
+        mock_nfcpy.ContactlessFrontend.side_effect = Exception("Device not found")
+        
+        reader = NfcPyReader()
+        
+        original_nfc = sys.modules.get('nfc')
+        sys.modules['nfc'] = mock_nfcpy
+        
+        try:
+            connected = await reader.connect()
+            assert connected is False
+        finally:
+            if original_nfc:
+                sys.modules['nfc'] = original_nfc
+
+    def test_nfcpy_read_uid(self):
+        """nfcpy should read UID."""
+        from nfc.nfcpy_backend import NfcPyReader
+        import sys
+        
+        mock_nfcpy = MagicMock()
+        mock_clf = MagicMock()
+        mock_target = MagicMock()
+        mock_target.identifier = b'\x04\xAA\xBB\xCC'
+        mock_clf.sense.return_value = mock_target
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        
+        # Mock nfc module for sense call
+        original_nfc = sys.modules.get('nfc')
+        sys.modules['nfc'] = mock_nfcpy
+        sys.modules['nfc.clf'] = mock_nfcpy.clf
+        
+        try:
+            uid = reader.read_uid()
+            assert uid == b'\x04\xAA\xBB\xCC'
+        finally:
+            if original_nfc:
+                sys.modules['nfc'] = original_nfc
+            else:
+                del sys.modules['nfc']
+            if 'nfc.clf' in sys.modules:
+                del sys.modules['nfc.clf']
+
+    def test_nfcpy_read_uid_iso14443b(self):
+        """nfcpy should read ISO-14443B UID."""
+        from nfc.nfcpy_backend import NfcPyReader
+        import sys
+        
+        mock_nfcpy = MagicMock()
+        mock_clf = MagicMock()
+        mock_target = MagicMock()
+        mock_target.identifier = b'\x01\x02\x03\x04'
+        mock_clf.sense.return_value = mock_target
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        
+        original_nfc = sys.modules.get('nfc')
+        sys.modules['nfc'] = mock_nfcpy
+        sys.modules['nfc.clf'] = mock_nfcpy.clf
+        
+        try:
+            uid = reader.read_uid_iso14443b()
+            assert uid == b'\x01\x02\x03\x04'
+        finally:
+            if original_nfc:
+                sys.modules['nfc'] = original_nfc
+            else:
+                del sys.modules['nfc']
+            if 'nfc.clf' in sys.modules:
+                del sys.modules['nfc.clf']
+
+    def test_nfcpy_ntag_read_block(self):
+        """nfcpy should read NTAG block."""
+        from nfc.nfcpy_backend import NfcPyReader
+        
+        mock_clf = MagicMock()
+        mock_clf.exchange.return_value = b'\x03\x10\xD1\x01'
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        reader._target = MagicMock()
+        
+        data = reader.ntag2xx_read_block(4)
+        
+        assert data == b'\x03\x10\xD1\x01'
+
+    def test_nfcpy_ntag_write_block(self):
+        """nfcpy should write NTAG block."""
+        from nfc.nfcpy_backend import NfcPyReader
+        
+        mock_clf = MagicMock()
+        mock_clf.exchange.return_value = b'\x0A'  # ACK
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        reader._target = MagicMock()
+        
+        success = reader.ntag2xx_write_block(4, b'\x03\x10\xD1\x01')
+        
+        assert success is True
+
+    def test_nfcpy_mifare_read_block(self):
+        """nfcpy should read Mifare Classic block."""
+        from nfc.nfcpy_backend import NfcPyReader
+        
+        mock_clf = MagicMock()
+        mock_clf.exchange.return_value = b'\x00' * 16
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        reader._target = MagicMock()
+        
+        data = reader.mifare_classic_read_block(4)
+        
+        assert data == b'\x00' * 16
+
+    def test_nfcpy_transceive(self):
+        """nfcpy should support transceive."""
+        from nfc.nfcpy_backend import NfcPyReader
+        
+        mock_clf = MagicMock()
+        mock_clf.exchange.return_value = b'\x90\x00'
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        reader._target = MagicMock()
+        
+        response = reader.transceive(b'\x00\xA4\x04\x00')
+        
+        assert response == b'\x90\x00'
+
+    def test_nfcpy_close(self):
+        """nfcpy should close connection."""
+        from nfc.nfcpy_backend import NfcPyReader
+        
+        mock_clf = MagicMock()
+        
+        reader = NfcPyReader()
+        reader._clf = mock_clf
+        
+        reader.close()
+        
+        assert reader._clf is None
+        mock_clf.close.assert_called_once()
+
+
+class TestProxmarkBackend:
+    """Tests for Proxmark3 reader backend."""
+
+    @pytest.mark.asyncio
+    async def test_proxmark_connect_success(self):
+        """Proxmark should connect successfully."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Proxmark3 v4.0.0"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            
+            connected = await reader.connect()
+            
+            assert connected is True
+            assert reader.is_connected() is True
+
+    @pytest.mark.asyncio
+    async def test_proxmark_connect_failure(self):
+        """Proxmark should fail when device not found."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="")
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            
+            connected = await reader.connect()
+            
+            assert connected is False
+
+    def test_proxmark_read_uid(self):
+        """Proxmark should read UID."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="UID : 04 AA BB CC"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            reader._connected = True
+            
+            uid = reader.read_uid()
+            
+            assert uid == b'\x04\xAA\xBB\xCC'
+
+    def test_proxmark_read_uid_iso14443b(self):
+        """Proxmark should read ISO-14443B UID."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="UID : 01 02 03 04"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            reader._connected = True
+            
+            uid = reader.read_uid_iso14443b()
+            
+            assert uid == b'\x01\x02\x03\x04'
+
+    def test_proxmark_ntag_read_block(self):
+        """Proxmark should read NTAG block."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="0310D101"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            reader._connected = True
+            
+            data = reader.ntag2xx_read_block(4)
+            
+            assert data == b'\x03\x10\xD1\x01'
+
+    def test_proxmark_ntag_write_block(self):
+        """Proxmark should write NTAG block."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Write success"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            reader._connected = True
+            
+            success = reader.ntag2xx_write_block(4, b'\x03\x10\xD1\x01')
+            
+            assert success is True
+
+    def test_proxmark_firmware_version(self):
+        """Proxmark should return firmware version."""
+        with patch('nfc.proxmark_backend.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Proxmark3 v4.2.1"
+            )
+            
+            from nfc.proxmark_backend import ProxmarkReader
+            reader = ProxmarkReader()
+            reader._connected = True
+            
+            version = reader.firmware_version()
+            
+            assert version == (4, 2, 1, 0)
+
+    def test_proxmark_close(self):
+        """Proxmark should close connection."""
+        from nfc.proxmark_backend import ProxmarkReader
+        reader = ProxmarkReader()
+        reader._connected = True
+        
+        reader.close()
+        
+        assert reader._connected is False
+
+
 class TestReaderFactory:
     """Tests for reader factory with multiple backends."""
 

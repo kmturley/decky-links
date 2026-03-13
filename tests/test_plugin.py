@@ -447,12 +447,13 @@ class TestReaderInit:
         assert await plugin._create_reader() is None
 
     @pytest.mark.asyncio
-    async def test_create_reader_nfcpy_fallback(self, plugin, monkeypatch):
-        import sys
-        # patch import failure
+    async def test_create_reader_nfcpy_success(self, plugin, monkeypatch):
+        # nfcpy backend now exists and should be created successfully
         plugin.settings.get = lambda k: "nfcpy" if k == "reader_type" else "/dev/null"
-        monkeypatch.setitem(sys.modules, "nfcpy_backend", None)
-        assert await plugin._create_reader() is None
+        reader = await plugin._create_reader()
+        # Should create nfcpy reader
+        assert reader is not None
+        assert reader.__class__.__name__ == "NfcPyReader"
 
     @pytest.mark.asyncio
     async def test_ndef_detected_event_emitted(self, plugin, mock_decky, uid_bytes):

@@ -395,10 +395,10 @@ class Plugin:
                 return None
         elif rtype == "nfcpy":
             try:
-                from nfcpy_backend import NfcPyReader
+                from nfc.nfcpy_backend import NfcPyReader
                 return NfcPyReader(path, logger=decky.logger)
             except ImportError:
-                decky.logger.error("Requested nfcpy backend not installed")
+                decky.logger.error("nfcpy backend requires nfcpy library")
                 return None
         else:
             decky.logger.warning(f"Unknown reader type: {rtype}")
