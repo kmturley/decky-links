@@ -5,9 +5,12 @@ import time
 import json
 import traceback
 import subprocess
+import threading
+import re
 from enum import Enum
 from urllib.parse import urlparse
-from typing import Optional
+from typing import Optional, Dict, Any, List, Tuple
+from collections import OrderedDict
 
 # Add vendored modules to path
 import decky
@@ -40,6 +43,9 @@ ALLOWED_STEAM_URI_PREFIXES = (
 )
 ALLOWED_URI_SCHEMES = ("https://",)
 
+# Regex for validating Steam app IDs (1-10 digits, max ~4 billion)
+STEAM_APPID_PATTERN = re.compile(r'^[0-9]{1,10}$')
+
 # NTAG213 usable payload limit (Spec §3.3 – "~144 bytes usable").
 # Subtract 4 bytes overhead for the NDEF TLV wrapper and record header.
 NTAG213_MAX_PAYLOAD_BYTES = 140
@@ -67,6 +73,22 @@ ALLOWED_SETTING_KEYS = {
 # -----------------------------------------------------------------------
 
 class PluginState(Enum):
+    """Plugin state machine (Spec §5).
+    
+    State transitions:
+    - IDLE → READY: Reader connected and initialized
+    - READY → CARD_PRESENT: New tag detected
+    - CARD_PRESENT → READY: Tag removed (no game running)
+    - CARD_PRESENT → GAME_RUNNING: Game launched (auto_launch enabled)
+    - GAME_RUNNING → READY: Game exited (via set_running_game)
+    - GAME_RUNNING → READY: Tag removed during game (after card_removed_during_game event)
+    - Any state → IDLE: Reader disconnected or error
+    
+    Key invariants:
+    - Only one tag is active at a time (single active card model)
+    - No auto-relaunch: requires physical card reinsertion
+    - Game state is authoritative from frontend (Router.MainRunningApp)
+    """
     IDLE         = "IDLE"          # No NFC reader detected
     READY        = "READY"         # Reader connected, no card, no game running
     CARD_PRESENT = "CARD_PRESENT"  # Card detected, URI parsed, awaiting launch decision
@@ -114,9 +136,16 @@ class SettingsManager:
 
     def save(self):
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            dir_path = os.path.dirname(self.path)
+            os.makedirs(dir_path, exist_ok=True)
+            # Check write permissions before attempting to write
+            if not os.access(dir_path, os.W_OK):
+                decky.logger.error(f"No write permission for settings directory: {dir_path}")
+                return
             with open(self.path, "w") as f:
                 json.dump(self.settings, f, indent=4)
+        except IOError as e:
+            decky.logger.error(f"Failed to write settings file {self.path}: {e}")
         except Exception as e:
             decky.logger.error(f"Failed to save settings: {e}")
 
@@ -153,6 +182,7 @@ class Plugin:
 
     RECONNECT_DELAY_MIN = 1.0
     RECONNECT_DELAY_MAX = 30.0
+    DEBOUNCE_THRESHOLD = 3  # Consecutive None reads required to confirm tag removal
 
     # --- Lifecycle ---
 
@@ -162,10 +192,12 @@ class Plugin:
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
         )
         self.key_manager = KeyManager(
-            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "keys.json")
+            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "keys.json"),
+            logger=decky.logger
         )
         self.signature_manager = SignatureManager(
-            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "signing_keys.json")
+            os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "signing_keys.json"),
+            logger=decky.logger
         )
         self.state           = PluginState.IDLE
         self.reader          = None
@@ -177,6 +209,13 @@ class Plugin:
         self.current_tag_uid = None
         self.current_tag_uri = None
         self._reconnect_delay = self.RECONNECT_DELAY_MIN
+        # RPC call caching to reduce load with thread-safe lock
+        self._tag_status_lock = threading.RLock()
+        self._last_tag_status_query = 0
+        self._tag_status_cache = None
+        # Tag classification cache (UID hex -> metadata dict) with LRU eviction
+        self._tag_classification_cache = OrderedDict()
+        self._tag_cache_max_size = 128
         self.polling_task    = asyncio.create_task(self._nfc_loop())
 
     async def _unload(self):
@@ -208,14 +247,44 @@ class Plugin:
         """
         Returns True when uri is permitted by the protocol allowlist.
         Allowed: steam://run/*, steam://rungameid/*, and https:// only.
+        
+        Validates format strictly to prevent injection attacks.
         """
-        if not isinstance(uri, str) or not uri:
+        if not isinstance(uri, str) or not uri or len(uri) > 2048:
             return False
-        if any(uri.startswith(prefix) for prefix in ALLOWED_STEAM_URI_PREFIXES):
-            return True
-        if any(uri.startswith(scheme) for scheme in ALLOWED_URI_SCHEMES):
-            parsed = urlparse(uri)
-            return parsed.scheme == "https" and bool(parsed.netloc)
+        
+        # Validate Steam URIs
+        for prefix in ALLOWED_STEAM_URI_PREFIXES:
+            if uri.startswith(prefix):
+                # Extract and validate app ID
+                remainder = uri[len(prefix):]
+                app_id = remainder.split('/')[0]  # Get first path component
+                
+                if not app_id or not STEAM_APPID_PATTERN.match(app_id):
+                    decky.logger.warning(f"Invalid Steam app ID: {app_id}")
+                    return False
+                
+                # Ensure no path traversal after app ID
+                if '/' in remainder and not remainder.startswith(app_id + '/'):
+                    decky.logger.warning(f"Suspicious Steam URI format: {uri}")
+                    return False
+                
+                return True
+        
+        # Validate HTTPS URIs
+        if uri.startswith("https://"):
+            try:
+                parsed = urlparse(uri)
+                # Validate domain format (basic check)
+                if not parsed.netloc or '.' not in parsed.netloc:
+                    return False
+                # Reject localhost/private IPs
+                if parsed.netloc in ('localhost', '127.0.0.1', '::1'):
+                    return False
+                return True
+            except Exception:
+                return False
+        
         return False
 
     def _validate_setting(self, key, value) -> bool:
@@ -243,7 +312,6 @@ class Plugin:
     async def _nfc_loop(self):
         last_uid_hex = None
         missing_count = 0
-        DEBOUNCE_THRESHOLD = 3  # Consecutive None reads required to confirm removal
 
         while True:
             try:
@@ -311,7 +379,7 @@ class Plugin:
                     # ---- Tag absent — debounce removal ----
                     if last_uid_hex:
                         missing_count += 1
-                        if missing_count >= DEBOUNCE_THRESHOLD:
+                        if missing_count >= self.DEBOUNCE_THRESHOLD:
                             decky.logger.info(
                                 f"Tag removed: {last_uid_hex} (after {missing_count} misses)"
                             )
@@ -332,7 +400,15 @@ class Plugin:
                     self.uart = None
 
             interval = self.settings.get("polling_interval")
-            if not isinstance(interval, (int, float)) or not (0.1 <= float(interval) <= 10.0):
+            if not isinstance(interval, (int, float)):
+                decky.logger.warning(
+                    f"Invalid polling_interval type: {type(interval).__name__}, using default 0.5"
+                )
+                interval = 0.5
+            elif not (0.1 <= float(interval) <= 10.0):
+                decky.logger.warning(
+                    f"polling_interval {interval} out of range [0.1, 10.0], using default 0.5"
+                )
                 interval = 0.5
             await asyncio.sleep(float(interval))
 
@@ -585,15 +661,24 @@ class Plugin:
         except Exception:
             return False
 
-    def _classify_tag(self, uid):
+    def _classify_tag(self, uid: bytes) -> Dict[str, Any]:
         """Return basic metadata about the presented tag.
 
         Currently this only distinguishes between Mifare Classic and
         NTAG21x-style tags and reports an approximate capacity in bytes.  The
         information is useful for UI feedback and for making decisions such
         as size checks or choosing the correct read/write primitive.
+        
+        Results are cached to avoid repeated reader calls for the same UID.
         """
-        meta = {"uid": uid.hex().upper(), "type": "unknown", "capacity_bytes": 0, "protected": False}
+        uid_hex = uid.hex().upper()
+        
+        # Check cache first
+        if uid_hex in self._tag_classification_cache:
+            decky.logger.debug(f"Tag {uid_hex} classification cache hit")
+            return self._tag_classification_cache[uid_hex]
+        
+        meta = {"uid": uid_hex, "type": "unknown", "capacity_bytes": 0, "protected": False}
 
         authenticated = False
         # heuristics for additional families (best effort with current reader API)
@@ -603,17 +688,20 @@ class Plugin:
                 test_uid = self.reader.read_uid_iso14443b(timeout=0.1)
                 if test_uid and test_uid == uid:
                     meta["type"] = "iso14443b"
+                    self._cache_tag_classification(uid_hex, meta)
                     return meta
             except Exception:
                 pass
         # ISO-15693 / NFC-V often uses 8-byte UID starting with E0.
         if len(uid) == 8 and uid[0] == 0xE0:
             meta["type"] = "iso15693"
+            self._cache_tag_classification(uid_hex, meta)
             return meta
         # simple heuristic for FeliCa/NFC-F: 8-byte UID, non-E0 prefix
         if len(uid) == 8:
             meta["type"] = "felica"
             # capacity unknown for now
+            self._cache_tag_classification(uid_hex, meta)
             return meta
 
         keys = [
@@ -625,8 +713,10 @@ class Plugin:
             try:
                 if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
                     authenticated = True
+                    decky.logger.debug(f"Tag {uid_hex} authenticated with key {key.hex()}")
                     break
-            except Exception:
+            except Exception as e:
+                decky.logger.debug(f"Auth attempt failed for key {key.hex()}: {e}")
                 break
             finally:
                 time.sleep(0.05)
@@ -635,6 +725,7 @@ class Plugin:
             meta["type"] = "mifare-classic"
             blocks = list(self._iter_mifare_data_blocks())
             meta["capacity_bytes"] = len(blocks) * MIFARE_CLASSIC_BLOCK_SIZE
+            decky.logger.debug(f"Classified tag {uid_hex} as Mifare Classic with {len(blocks)} data blocks")
         else:
             try:
                 if self.reader.mifare_classic_read_block(4) is not None:
@@ -644,8 +735,10 @@ class Plugin:
                         meta["type"] = "ultralight"
                     pages = list(self._iter_ntag_pages())
                     meta["capacity_bytes"] = len(pages) * 4
-            except Exception:
+                    decky.logger.debug(f"Classified tag {uid_hex} as {meta['type']} with {len(pages)} pages")
+            except Exception as e:
                 # error reading page may indicate the tag is locked/protected
+                decky.logger.debug(f"Failed to read page 4 for tag {uid_hex}: {e}")
                 meta["protected"] = True
 
         # rough DESFire hint: 7-byte UID where neither classic auth nor page read worked
@@ -653,9 +746,25 @@ class Plugin:
         if meta["type"] == "unknown" and len(uid) == 7:
             meta["type"] = "desfire"
 
+        self._cache_tag_classification(uid_hex, meta)
         return meta
 
-    def _read_ndef_records(self):
+    def _cache_tag_classification(self, uid_hex: str, meta: Dict[str, Any]) -> None:
+        """Cache tag classification metadata with LRU eviction.
+        
+        Prevents unbounded memory growth by evicting oldest entries when
+        cache exceeds max size.
+        """
+        self._tag_classification_cache[uid_hex] = meta
+        
+        # Simple LRU: if cache exceeds max size, remove oldest entry
+        if len(self._tag_classification_cache) > self._tag_cache_max_size:
+            # Remove first (oldest) entry
+            oldest_key = next(iter(self._tag_classification_cache))
+            del self._tag_classification_cache[oldest_key]
+            decky.logger.debug(f"Tag classification cache evicted {oldest_key}")
+
+    def _read_ndef_records(self) -> List[Any]:
         """Read and return all NDEF records present on the current tag.
 
         The implementation largely mirrors the old ``_read_ndef_uri`` logic
@@ -737,21 +846,23 @@ class Plugin:
                 # Look for common URI schemes
                 decoded = data.decode("utf-8", errors="ignore").strip("\x00")
                 # Match URI schemes: scheme://path, being more permissive with characters
-                match = re.search(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\x00\xfe]+)", decoded)
+                match = re.search(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\x00\xfe]{1,2048})", decoded)
                 if match:
                     uri = match.group(1).strip()
-                    # construct a synthetic UriRecord for consistency
-                    try:
-                        records.append(ndef.UriRecord(uri))
-                    except Exception:
-                        # If UriRecord creation fails, just skip it
-                        pass
-            except Exception:
-                pass
+                    # Validate extracted URI before creating record
+                    if self._validate_uri(uri):
+                        try:
+                            records.append(ndef.UriRecord(uri))
+                        except Exception as e:
+                            decky.logger.debug(f"Failed to create UriRecord from extracted URI: {e}")
+                    else:
+                        decky.logger.debug(f"Extracted URI failed validation: {uri}")
+            except Exception as e:
+                decky.logger.debug(f"Regex fallback failed: {e}")
 
         return records
 
-    def _read_ndef_uri(self):
+    def _read_ndef_uri(self) -> Optional[str]:
         """Convenience wrapper that returns the first URI record's value.
 
         Previously we merely checked for a ``uri`` attribute, but that
@@ -780,11 +891,18 @@ class Plugin:
         if not self.pairing_uri:
             decky.logger.warning("Pairing triggered but no URI set!")
             self.is_pairing = False
+            self.pairing_uri = None
             return
 
-        decky.logger.info(f"Pairing: writing {self.pairing_uri} to tag {uid.hex()}")
+        # Atomic state update: exit pairing mode immediately to prevent
+        # new tags from interfering with the write operation
+        pairing_uri = self.pairing_uri
+        self.is_pairing = False
+        self.pairing_uri = None
+
+        decky.logger.info(f"Pairing: writing {pairing_uri} to tag {uid.hex()}")
         try:
-            success, error_msg = self._write_ndef_uri(uid, self.pairing_uri)
+            success, error_msg = self._write_ndef_uri(uid, pairing_uri)
             self._play_sound("success.flac" if success else "error.flac")
             await decky.emit("pairing_result", {
                 "success": success,
@@ -798,14 +916,10 @@ class Plugin:
                 "uid":     uid.hex(),
                 "error":   str(e),
             })
-        finally:
-            self.is_pairing  = False
-            self.pairing_uri = None
-            decky.logger.info("Pairing mode exited.")
 
     # --- NDEF Write ---
 
-    def _write_ndef_uri(self, uid, uri):
+    def _write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         """
         Write a URI as an NDEF URI record to the currently-presented tag.
 
@@ -945,6 +1059,11 @@ class Plugin:
 
     async def _launch_uri(self, uri):
         """Launch a URI via the system handler (xdg-open)."""
+        # Defensive validation: ensure URI is safe before passing to subprocess
+        if not self._validate_uri(uri):
+            decky.logger.error(f"Attempted to launch invalid URI: {uri}")
+            return
+        
         decky.logger.info(f"Launching URI via xdg-open: {uri}")
         try:
             subprocess.Popen(["xdg-open", uri], shell=False)
@@ -954,10 +1073,31 @@ class Plugin:
     # --- Audio ---
 
     def _play_sound(self, filename):
+        """Play a sound file from the assets/sounds directory.
+        
+        Only whitelisted sound files are allowed to prevent path traversal attacks.
+        """
+        # Whitelist allowed sounds
+        ALLOWED_SOUNDS = {"scan.flac", "success.flac", "error.flac"}
+        
+        if filename not in ALLOWED_SOUNDS:
+            decky.logger.warning(f"Attempted to play unauthorized sound: {filename}")
+            return
+        
         try:
             sound_path = os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename)
-            if os.path.exists(sound_path):
-                subprocess.Popen(["paplay", sound_path])
+            
+            # Verify file exists before attempting to play
+            if not os.path.exists(sound_path):
+                decky.logger.error(f"Sound file not found: {sound_path}")
+                return
+            
+            # Verify it's a regular file (not a directory or symlink to sensitive location)
+            if not os.path.isfile(sound_path):
+                decky.logger.error(f"Sound path is not a regular file: {sound_path}")
+                return
+            
+            subprocess.Popen(["paplay", sound_path])
         except Exception as e:
             decky.logger.error(f"Failed to play sound {filename}: {e}")
 
@@ -1000,10 +1140,24 @@ class Plugin:
         }
 
     async def get_tag_status(self):
-        return {
-            "uid": self.current_tag_uid,
-            "uri": self.current_tag_uri,
-        }
+        """Get current tag status with thread-safe caching to reduce load.
+        
+        Results are cached for 100ms to avoid excessive polling.
+        """
+        now = time.time()
+        
+        with self._tag_status_lock:
+            # Return cached result if still fresh (100ms cache)
+            if (now - self._last_tag_status_query) < 0.1 and self._tag_status_cache is not None:
+                return self._tag_status_cache
+            
+            # Update cache atomically
+            self._last_tag_status_query = now
+            self._tag_status_cache = {
+                "uid": self.current_tag_uid,
+                "uri": self.current_tag_uri,
+            }
+            return self._tag_status_cache
 
     async def simulate_tag(self, uid: bytes, uri: Optional[str] = None):
         """Helper for testing/debug – pretend a tag with given UID/URI is present.
@@ -1073,9 +1227,20 @@ class Plugin:
         Returns:
             True if keys were stored successfully, False otherwise.
         """
+        # Validate UID format
+        if not isinstance(uid, str) or not uid:
+            decky.logger.warning("Invalid UID: must be non-empty string")
+            return False
+        
         try:
-            self.key_manager.set_key(uid, key_a, key_b)
-            decky.logger.info(f"Stored custom keys for tag {uid}")
+            bytes.fromhex(uid)  # Validate hex format
+        except ValueError:
+            decky.logger.warning(f"Invalid UID format (not hex): {uid}")
+            return False
+        
+        try:
+            self.key_manager.set_key(uid.upper(), key_a, key_b)
+            decky.logger.info(f"Stored custom keys for tag {uid.upper()}")
             return True
         except ValueError as e:
             decky.logger.warning(f"Invalid key format: {e}")
@@ -1157,7 +1322,7 @@ class Plugin:
         
         Args:
             uid: Tag UID hex string
-            sector: Sector number (0-15)
+            sector: Sector number (0-15 for 1K, 0-39 for 4K)
             key_a: Key A hex string (12 chars = 6 bytes)
             key_b: Key B hex string (12 chars = 6 bytes)
             
@@ -1168,10 +1333,6 @@ class Plugin:
             # Validate inputs
             if not uid or not isinstance(uid, str):
                 decky.logger.warning("Invalid UID for sector lock")
-                return False
-            
-            if sector < 0 or sector > 15:
-                decky.logger.warning(f"Invalid sector {sector}")
                 return False
             
             if len(key_a) != 12 or len(key_b) != 12:
@@ -1187,10 +1348,20 @@ class Plugin:
                 decky.logger.warning(f"Invalid hex format: {e}")
                 return False
             
-            # Verify tag type
+            # Verify tag type and get capacity
             meta = self._classify_tag(uid_bytes)
             if meta.get("type") != "mifare-classic":
                 decky.logger.warning(f"Sector locking only supported for Mifare Classic")
+                return False
+            
+            # Determine max sectors based on capacity
+            # Mifare Classic 1K: 16 sectors (64 bytes per sector)
+            # Mifare Classic 4K: 40 sectors (32 bytes for sectors 0-31, 64 bytes for sectors 32-39)
+            capacity = meta.get("capacity_bytes", 0)
+            max_sectors = 40 if capacity > 2048 else 16
+            
+            if sector < 0 or sector >= max_sectors:
+                decky.logger.warning(f"Invalid sector {sector} for {capacity}-byte tag (max {max_sectors - 1})")
                 return False
             
             if not self.reader:

@@ -126,6 +126,10 @@ def plugin(tmp_path):
     p.current_tag_uid = None
     p.current_tag_uri = None
     p.current_tag_meta = {}
+    
+    # Tag classification cache (added in code review fixes)
+    p._tag_classification_cache = {}
+    p._tag_cache_max_size = 128
 
     return p
 

@@ -27,6 +27,29 @@ class Reader(ABC):
     :class:`PN532UARTReader` permits delegating additional methods directly
     to the underlying driver so the existing plugin code can continue to
     call familiar names without change.
+    
+    Interface Contract:
+    - Implementations must support both synchronous and asynchronous operations
+    - All methods should be thread-safe or clearly document thread constraints
+    - Connection state must be queryable via is_connected()
+    - Firmware version should be available after successful connection
+    - UID reading should support configurable timeout
+    - Additional hardware-specific methods can be delegated via __getattr__
+    
+    Supported Methods (minimum):
+    - connect(): Establish connection to hardware
+    - close(): Release hardware resources
+    - is_connected(): Query connection status
+    - firmware_version(): Get firmware/version tuple
+    - read_uid(timeout): Read passive target UID
+    - read_uid_iso14443b(timeout): Read ISO-14443B UID
+    
+    Additional Methods (delegated):
+    - mifare_classic_authenticate_block(uid, block, key_type, key)
+    - mifare_classic_read_block(block)
+    - mifare_classic_write_block(block, data)
+    - ntag2xx_read_block(page)
+    - ntag2xx_write_block(page, data)
     """
 
     @abstractmethod
@@ -89,15 +112,52 @@ class PN532UARTReader(Reader):
         try:
             import serial
             from adafruit_pn532.uart import PN532_UART
+            import asyncio
 
-            self.uart = serial.Serial(self.device_path, baudrate=self.baudrate, timeout=0.1)
+            self.uart = serial.Serial(
+                self.device_path,
+                baudrate=self.baudrate,
+                timeout=0.1,
+                write_timeout=1.0
+            )
             self._reader = PN532_UART(self.uart, debug=False)
 
-            version = self._reader.firmware_version
-            if version:
-                # configure normal card-present polling mode
-                self._reader.SAM_configuration()
-                return True
+            # Add timeout for firmware version check to prevent indefinite hangs
+            try:
+                version = await asyncio.wait_for(
+                    asyncio.to_thread(lambda: self._reader.firmware_version),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                if self.logger:
+                    self.logger.error("Firmware version check timed out")
+                self.close()
+                return False
+            
+            if not version:
+                if self.logger:
+                    self.logger.error("Failed to retrieve firmware version")
+                self.close()
+                return False
+            
+            # Configure SAM with error handling
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._reader.SAM_configuration),
+                    timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                if self.logger:
+                    self.logger.error("SAM configuration timed out")
+                self.close()
+                return False
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"SAM configuration failed: {e}")
+                self.close()
+                return False
+            
+            return True
             # firmware fetch failed
         except Exception as e:
             if self.logger:

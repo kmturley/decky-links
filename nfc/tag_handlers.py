@@ -66,7 +66,15 @@ class NTAGHandler(TagHandler):
                     page_idx += 1
                 else:
                     break
-            except Exception:
+            except (TimeoutError, IOError) as e:
+                # Transient errors - log and stop reading
+                if hasattr(reader, '_logger'):
+                    reader._logger.debug(f"Transient read error at page {page_idx}: {e}")
+                break
+            except Exception as e:
+                # Unexpected errors - log warning
+                if hasattr(reader, '_logger'):
+                    reader._logger.warning(f"Unexpected error reading page {page_idx}: {e}")
                 break
         return bytes(data)
 

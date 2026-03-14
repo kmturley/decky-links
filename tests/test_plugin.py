@@ -158,6 +158,31 @@ class TestURIValidation:
     def test_none_blocked(self, plugin):
         assert plugin._validate_uri(None) is False   # type: ignore
 
+    def test_https_without_netloc_blocked(self, plugin):
+        """HTTPS URI must have a netloc (domain)."""
+        assert plugin._validate_uri("https://") is False
+
+    def test_https_with_only_path_blocked(self, plugin):
+        """HTTPS URI must have a netloc, not just a path."""
+        assert plugin._validate_uri("https:///path/to/resource") is False
+
+    def test_steam_uri_with_empty_appid_blocked(self, plugin):
+        """steam://run/ with empty appid is now blocked for security."""
+        # Empty app IDs are invalid and should be rejected
+        assert plugin._validate_uri("steam://run/") is False
+
+    def test_https_with_port_allowed(self, plugin):
+        """HTTPS URI with port should be allowed."""
+        assert plugin._validate_uri("https://example.com:8080/path") is True
+
+    def test_https_with_query_params_allowed(self, plugin):
+        """HTTPS URI with query parameters should be allowed."""
+        assert plugin._validate_uri("https://example.com/path?key=value") is True
+
+    def test_https_with_fragment_allowed(self, plugin):
+        """HTTPS URI with fragment should be allowed."""
+        assert plugin._validate_uri("https://example.com/path#section") is True
+
 
 # -----------------------------------------------------------------------
 # Settings Load Validation
@@ -311,6 +336,43 @@ class TestReaderInit:
         meta = plugin._classify_tag(uid)
         assert meta["type"] == "felica"
         assert meta["capacity_bytes"] == 0
+
+    def test_classify_iso15693_by_uid_prefix(self, plugin):
+        """ISO-15693 tags typically have 8-byte UID starting with 0xE0."""
+        uid = b"\xE0\x01\x02\x03\x04\x05\x06\x07"
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "iso15693"
+
+    def test_classify_iso14443b_by_length(self, plugin):
+        """ISO-14443B tags typically have 4-byte UID."""
+        uid = b"\x01\x02\x03\x04"
+        plugin.reader.read_uid_iso14443b = MagicMock(return_value=uid)
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "iso14443b"
+
+    def test_classify_ultralight_by_uid_length(self, plugin):
+        """Ultralight tags typically have 7-byte UID."""
+        uid = b"\x01\x02\x03\x04\x05\x06\x07"
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.return_value = b"\x00"
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "ultralight"
+
+    def test_classify_mifare_classic_authenticated(self, plugin):
+        """Mifare Classic tags authenticate with known keys."""
+        uid = b"\xDE\xAD\xBE\xEF"
+        plugin.reader.mifare_classic_authenticate_block.return_value = True
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "mifare-classic"
+        assert meta["capacity_bytes"] > 0
+
+    def test_classify_desfire_fallback(self, plugin):
+        """DESFire tags are detected as fallback for 7-byte UID with no auth."""
+        uid = b"\x01\x02\x03\x04\x05\x06\x07"
+        plugin.reader.mifare_classic_authenticate_block.return_value = False
+        plugin.reader.mifare_classic_read_block.side_effect = Exception("No page 4")
+        meta = plugin._classify_tag(uid)
+        assert meta["type"] == "desfire"
 
     @pytest.mark.asyncio
     async def test_reader_disconnect_triggers_reinit(self, plugin, mock_decky):

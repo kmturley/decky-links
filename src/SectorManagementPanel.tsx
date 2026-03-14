@@ -5,7 +5,6 @@ import {
   TextField,
   ModalRoot,
   showModal,
-  closeModal,
 } from "@decky/ui";
 import { FC, useState, useEffect } from "react";
 import { FaLock, FaUnlock, FaShieldAlt } from "react-icons/fa";
@@ -27,7 +26,8 @@ const LockSectorModal: FC<{
   uid: string;
   sector: number;
   onSuccess: () => void;
-}> = ({ uid, sector, onSuccess }) => {
+  onClose?: () => void;
+}> = ({ uid, sector, onSuccess, onClose }) => {
   const [keyA, setKeyA] = useState("FFFFFFFFFFFF");
   const [keyB, setKeyB] = useState("FFFFFFFFFFFF");
   const [loading, setLoading] = useState(false);
@@ -44,7 +44,7 @@ const LockSectorModal: FC<{
       if (success) {
         toaster.toast({ title: "Success", body: `Sector ${sector} locked` });
         onSuccess();
-        closeModal();
+        onClose?.();
       } else {
         toaster.toast({ title: "Error", body: "Failed to lock sector", critical: true });
       }
@@ -66,16 +66,14 @@ const LockSectorModal: FC<{
           label="Key A (12 hex chars)"
           value={keyA}
           onChange={(e) => setKeyA(e.target.value)}
-          placeholder="FFFFFFFFFFFF"
         />
         <TextField
           label="Key B (12 hex chars)"
           value={keyB}
           onChange={(e) => setKeyB(e.target.value)}
-          placeholder="FFFFFFFFFFFF"
         />
         <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-          <ButtonItem onClick={() => closeModal()} disabled={loading}>
+          <ButtonItem onClick={() => onClose?.()} disabled={loading}>
             Cancel
           </ButtonItem>
           <ButtonItem onClick={handleLock} disabled={loading}>
@@ -120,6 +118,7 @@ export const SectorManagementPanel: FC<{ tagUid?: string }> = ({ tagUid }) => {
         uid={tagUid}
         sector={sector}
         onSuccess={() => loadSectors()}
+        onClose={() => {}}
       />
     );
   };
@@ -184,7 +183,6 @@ export const SectorManagementPanel: FC<{ tagUid?: string }> = ({ tagUid }) => {
                 {!sector.locked && sector.writable && (
                   <ButtonItem
                     onClick={() => handleLockSector(sector.sector)}
-                    style={{ padding: "4px 8px", fontSize: "0.8em" }}
                   >
                     Lock
                   </ButtonItem>

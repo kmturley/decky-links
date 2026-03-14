@@ -21,6 +21,7 @@ import {
   startPairing,
   notifySubscribers,
   settingsRef,
+  type Settings,
 } from "./shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,13 +69,15 @@ async function triggerPairing() {
   notifySubscribers();
 }
 
-async function triggerUpdateSetting(key: string, value: any) {
+async function triggerUpdateSetting(key: keyof Settings, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
     toaster.toast({ title: "Settings Error", body: `Invalid value for ${key}.`, critical: true });
     return;
   }
-  sharedState.settings = { ...sharedState.settings, [key]: value };
+  if (sharedState.settings) {
+    sharedState.settings = { ...sharedState.settings, [key]: value };
+  }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
 }
@@ -169,7 +172,7 @@ const Content: FC = () => {
 
       <KeyManagementPanel />
 
-      <SectorManagementPanel tagUid={state.tagUid} />
+      <SectorManagementPanel tagUid={state.tagUid || undefined} />
     </PanelSection>
   );
 };

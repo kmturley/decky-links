@@ -5,7 +5,6 @@ import {
   TextField,
   ModalRoot,
   showModal,
-  closeModal,
 } from "@decky/ui";
 import { FC, useState, useEffect } from "react";
 import { FaKey, FaTrash, FaPlus } from "react-icons/fa";
@@ -24,7 +23,8 @@ interface KeyEntry {
 const KeyEditModal: FC<{
   uid?: string;
   onSave: (uid: string, key_a: string, key_b: string) => void;
-}> = ({ uid, onSave }) => {
+  onClose?: () => void;
+}> = ({ uid, onSave, onClose }) => {
   const [formUid, setFormUid] = useState(uid || "");
   const [keyA, setKeyA] = useState("");
   const [keyB, setKeyB] = useState("");
@@ -67,7 +67,7 @@ const KeyEditModal: FC<{
       if (success) {
         toaster.toast({ title: "Success", body: `Keys saved for ${formUid}` });
         onSave(formUid.toUpperCase(), keyA.toUpperCase(), keyB.toUpperCase());
-        closeModal();
+        onClose?.();
       } else {
         toaster.toast({ title: "Error", body: "Failed to save keys", critical: true });
       }
@@ -87,22 +87,19 @@ const KeyEditModal: FC<{
           value={formUid}
           onChange={(e) => setFormUid(e.target.value)}
           disabled={!!uid}
-          placeholder="e.g., DEADBEEFCAFE"
         />
         <TextField
           label="Key A (12 hex chars)"
           value={keyA}
           onChange={(e) => setKeyA(e.target.value)}
-          placeholder="e.g., FFFFFFFFFFFF"
         />
         <TextField
           label="Key B (12 hex chars)"
           value={keyB}
           onChange={(e) => setKeyB(e.target.value)}
-          placeholder="e.g., D3F7D3F7D3F7"
         />
         <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-          <ButtonItem onClick={() => closeModal()} disabled={loading}>
+          <ButtonItem onClick={() => onClose?.()} disabled={loading}>
             Cancel
           </ButtonItem>
           <ButtonItem onClick={handleSave} disabled={loading}>
@@ -150,6 +147,7 @@ export const KeyManagementPanel: FC = () => {
     showModal(
       <KeyEditModal
         onSave={() => loadKeys()}
+        onClose={() => {}}
       />
     );
   };
@@ -159,6 +157,7 @@ export const KeyManagementPanel: FC = () => {
       <KeyEditModal
         uid={uid}
         onSave={() => loadKeys()}
+        onClose={() => {}}
       />
     );
   };
@@ -202,7 +201,6 @@ export const KeyManagementPanel: FC = () => {
               </div>
               <ButtonItem
                 onClick={() => handleEditKey(entry.uid)}
-                style={{ padding: "4px 8px", fontSize: "0.8em" }}
               >
                 Edit
               </ButtonItem>
@@ -211,7 +209,6 @@ export const KeyManagementPanel: FC = () => {
                   setKeys(keys.filter((k) => k.uid !== entry.uid));
                   toaster.toast({ title: "Deleted", body: `Keys for ${entry.uid} removed` });
                 }}
-                style={{ padding: "4px 8px", fontSize: "0.8em" }}
               >
                 <FaTrash size={12} />
               </ButtonItem>
