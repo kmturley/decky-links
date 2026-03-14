@@ -2,6 +2,38 @@ import { addEventListener, removeEventListener, callable, toaster } from "@decky
 import { useState, useEffect } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Type definitions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Settings {
+    device_path: string;
+    baudrate: number;
+    polling_interval: number;
+    auto_launch: boolean;
+    auto_close: boolean;
+    reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
+}
+
+export interface ReaderStatus {
+    connected: boolean;
+    path: string;
+}
+
+export interface TagStatus {
+    uid: string | null;
+    uri: string | null;
+}
+
+export interface SectorInfo {
+    sector: number;
+    first_block: number;
+    trailer_block: number;
+    locked: boolean;
+    readable: boolean;
+    writable: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Shared state & helpers
 // These were originally in index.tsx; moving them here avoids circular
 // dependencies when other components (like the game-page pairer) need to
@@ -9,8 +41,8 @@ import { useState, useEffect } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface SharedState {
-  settings: any;
-  readerStatus: { connected: boolean; path: string };
+  settings: Settings | null;
+  readerStatus: ReaderStatus;
   tagUid: string | null;
   tagUri: string | null;
   activeAppId: string | null;
@@ -56,13 +88,18 @@ export function useSharedState(): SharedState {
 // Backend calls
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const getSettings = callable<[], any>("get_settings");
-export const setSetting = callable<[key: string, value: any], boolean>("set_setting");
+export const getSettings = callable<[], Settings>("get_settings");
+export const setSetting = callable<[key: keyof Settings, value: any], boolean>("set_setting");
 export const startPairing = callable<[uri: string], boolean>("start_pairing");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
-export const getReaderStatus = callable<[], { connected: boolean; path: string }>("get_reader_status");
-export const getTagStatus = callable<[], { uid: string | null; uri: string | null }>("get_tag_status");
+export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");
+export const getTagStatus = callable<[], TagStatus>("get_tag_status");
 export const setRunningGame = callable<[appid: number | null], void>("set_running_game");
+export const setTagKey = callable<[uid: string, key_a: string, key_b: string], boolean>("set_tag_key");
+export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: string }>("get_tag_key");
+export const listTagKeys = callable<[], string[]>("list_tag_keys");
+export const getSectorInfo = callable<[uid?: string], SectorInfo[]>("get_sector_info");
+export const lockSector = callable<[uid: string, sector: number, key_a: string, key_b: string], boolean>("lock_sector");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

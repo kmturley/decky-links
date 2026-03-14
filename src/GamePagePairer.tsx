@@ -177,13 +177,19 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
 
     (async () => {
       const reader = await getReaderStatus();
+      
+      // Provide detailed error messages
       if (!reader.connected) {
-        setStatusMessage("Reader not detected. Configure in Decky Links settings");
+        if (!reader.path) {
+          setStatusMessage("NFC reader not configured. Go to Decky Links settings to set device path.");
+        } else {
+          setStatusMessage("NFC reader not detected. Check USB connection and device path in settings.");
+        }
         return;
       }
 
       if (!launchTarget) {
-        setStatusMessage("Unable to determine launch target.");
+        setStatusMessage("Unable to determine launch target. Make sure a game is running.");
         return;
       }
 
@@ -191,7 +197,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
       const ok = await startPairing(launchTarget);
       if (!ok) {
         setPairingToastSuppressed(false);
-        setStatusMessage("Failed to initiate pairing.");
+        setStatusMessage("Failed to initiate pairing. Check reader status in settings.");
       } else {
         setStatusMessage("Pairing mode active – tap a tag");
       }

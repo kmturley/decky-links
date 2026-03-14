@@ -30,6 +30,13 @@ def _make_decky_mock():
 
 _mock_decky      = _make_decky_mock()
 _mock_ndef_mod   = MagicMock()
+# provide minimal UriRecord class and decoder for tests
+class _StubUriRecord:
+    def __init__(self, uri):
+        self.uri = uri
+
+_mock_ndef_mod.UriRecord = _StubUriRecord
+_mock_ndef_mod.message_decoder = lambda data: []
 _mock_serial_mod = types.ModuleType("serial")
 _mock_serial_mod.Serial = MagicMock()
 _mock_serial_tools_mod = types.ModuleType("serial.tools")
@@ -81,6 +88,7 @@ def plugin(tmp_path):
     """
     # Import after mocks are in place
     from main import Plugin, PluginState, SettingsManager
+    from nfc.key_manager import KeyManager
 
     p = Plugin()
 
@@ -91,6 +99,7 @@ def plugin(tmp_path):
         "polling_interval": 0.5,
         "auto_launch":      True,
         "auto_close":       False,
+        "reader_type":      "pn532_uart",
     }
     mock_settings        = MagicMock(spec=SettingsManager)
     mock_settings.get    = lambda k: _settings.get(k)
@@ -98,8 +107,15 @@ def plugin(tmp_path):
     mock_settings.settings = _settings
     p.settings = mock_settings
 
-    # Hardware mocks
+    # Key manager for custom Mifare Classic keys
+    p.key_manager = KeyManager()
+
+    # Hardware mocks — we now use a generic Reader interface
     p.reader = MagicMock()
+    # ensure the convenience helper exists; tests patch read_uid explicitly when
+    # they need to simulate a UID
+    p.reader.read_uid = MagicMock()
+    # existing code occasionally references p.uart; keep a dummy for now
     p.uart   = MagicMock()
 
     # Plugin state
@@ -109,6 +125,11 @@ def plugin(tmp_path):
     p.running_game_id = None
     p.current_tag_uid = None
     p.current_tag_uri = None
+    p.current_tag_meta = {}
+    
+    # Tag classification cache (added in code review fixes)
+    p._tag_classification_cache = {}
+    p._tag_cache_max_size = 128
 
     return p
 

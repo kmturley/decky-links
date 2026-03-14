@@ -148,7 +148,10 @@ function isAppStillRunning(appId: string): boolean {
 async function terminateSteamApp(appId: string, launchUri?: string): Promise<boolean> {
   // @ts-ignore
   const terminate = window.SteamClient?.Apps?.TerminateApp;
-  if (typeof terminate !== "function") return false;
+  if (typeof terminate !== "function") {
+    console.warn(`[ Decky Links ] TerminateApp not available on SteamClient.Apps`);
+    return false;
+  }
 
   const rungameid = extractRungameidFromUri(launchUri ?? null);
   const targetId = String(rungameid ?? appId);
@@ -158,7 +161,7 @@ async function terminateSteamApp(appId: string, launchUri?: string): Promise<boo
     (terminate as any).call((window as any).SteamClient.Apps, targetId, true);
     console.info(`[ Decky Links ] TerminateApp invoked with args=${JSON.stringify([targetId, true])}`);
   } catch (e) {
-    console.debug(`[ Decky Links ] TerminateApp failed for args=${JSON.stringify([targetId, true])}:`, e);
+    console.error(`[ Decky Links ] TerminateApp call failed for args=${JSON.stringify([targetId, true])}:`, e);
     return false;
   }
 
@@ -166,10 +169,12 @@ async function terminateSteamApp(appId: string, launchUri?: string): Promise<boo
   for (let i = 0; i < 6; i++) {
     await sleep(500);
     if (!isAppStillRunning(appId)) {
+      console.info(`[ Decky Links ] App ${appId} terminated successfully after ${(i + 1) * 500}ms`);
       return true;
     }
   }
 
+  console.warn(`[ Decky Links ] App ${appId} did not terminate within 3000ms timeout`);
   return false;
 }
 
@@ -252,6 +257,18 @@ export function startBackgroundManager(): () => void {
 
         if (uri.startsWith(STEAM_RUN_PREFIX) || uri.startsWith(STEAM_RUNGAMEID_PREFIX)) {
           console.info(`[ Decky Links ] Launching Steam URI: ${uri}`);
+          // Set backend state BEFORE launch to prevent race condition
+          // This ensures the backend knows a game is launching before the frontend triggers it
+          if (uriAppId) {
+            setRunningGame(parseInt(uriAppId))
+              .then(() => {
+                console.info(`[ Decky Links ] Backend state updated to game ${uriAppId}`);
+              })
+              .catch((e) => {
+                console.error(`[ Decky Links ] Failed to update backend state: ${e}`);
+              });
+          }
+          // Now launch the game after backend is ready
           launchSteamUri(uri);
           return;
         }
@@ -353,7 +370,9 @@ export function startBackgroundManager(): () => void {
         console.error("[ Decky Links ] Polling loop error:", e);
       }
 
-      await sleep(500);
+      if (active) {
+        await sleep(500);
+      }
     }
   };
   pollLoop();

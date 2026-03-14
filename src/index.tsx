@@ -21,12 +21,15 @@ import {
   startPairing,
   notifySubscribers,
   settingsRef,
+  type Settings,
 } from "./shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // (the rest of the file remains unchanged)
 
 
+import { KeyManagementPanel } from "./KeyManagementPanel";
+import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget } from "./lib/steamIds";
@@ -66,13 +69,15 @@ async function triggerPairing() {
   notifySubscribers();
 }
 
-async function triggerUpdateSetting(key: string, value: any) {
+async function triggerUpdateSetting(key: keyof Settings, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
     toaster.toast({ title: "Settings Error", body: `Invalid value for ${key}.`, critical: true });
     return;
   }
-  sharedState.settings = { ...sharedState.settings, [key]: value };
+  if (sharedState.settings) {
+    sharedState.settings = { ...sharedState.settings, [key]: value };
+  }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
 }
@@ -164,6 +169,10 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
       </PanelSection>
+
+      <KeyManagementPanel />
+
+      <SectorManagementPanel tagUid={state.tagUid || undefined} />
     </PanelSection>
   );
 };

@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "build": "rollup -c",
-    "deploy": "rsync -rtv --no-perms --no-owner --no-group --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r --rsh='ssh' ./ deck@steamdeck.local:~/homebrew/plugins/decky-links --exclude .git --exclude node_modules --exclude .venv",
+    "debug": "ssh deck@steamdeck.local && journalctl | grep PluginLoader",
+    "debug2": "ssh deck@steamdeck.local && cat \"$(ls -t ~/homebrew/logs/decky-links/*.log | head -n 1)\"",
+    "deploy": "rsync -rtv --no-perms --no-owner --no-group --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r --rsh='ssh' ./ deck@steamdeck.local:~/homebrew/plugins/decky-links --exclude .git --exclude node_modules --exclude .venv --exclude .pytest_cache --exclude __pycache__ --exclude .vscode --exclude dist --exclude out --exclude tests --exclude '*.pyc'",
     "stop": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl stop plugin_loader\" && ssh deck@steamdeck.local \"echo 'ssap' | sudo -S chown -R deck:deck /home/deck/homebrew/plugins/\"",
     "start": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl start plugin_loader\"",
     "watch": "rollup -c -w",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "PYTHONPATH=. .venv/bin/pytest -q"
   },
   "repository": {
     "type": "git",
