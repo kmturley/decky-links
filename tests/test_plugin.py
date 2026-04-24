@@ -276,10 +276,10 @@ class TestNoGameStacking:
 
     @pytest.mark.asyncio
     async def test_auto_launch_disabled_prevents_any_launch(self, plugin, mock_decky):
-        plugin.settings.get = lambda k: {
+        plugin.settings.get = lambda k, d=None: {
             "auto_launch": False,
             "polling_interval": 0.5,
-        }.get(k)
+        }.get(k, d)
         uid = _make_uid()
 
         with patch.object(plugin, "_read_ndef_uri", return_value="https://example.com"), \
@@ -420,7 +420,7 @@ class TestReaderInit:
             open(fake_path, "w").close()
             p.settings = MagicMock()
             # also ensure reader_type is correct so _init_reader succeeds
-            p.settings.get = lambda k: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else 115200)
+            p.settings.get = lambda k, d=None: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else (d if d is not None else 115200))
 
             await p._init_reader()
             assert p.reader is mock_reader
@@ -440,7 +440,7 @@ class TestReaderInit:
             fake_path = str(tmp_path / "dev2")
             open(fake_path, "w").close()
             p.settings = MagicMock()
-            p.settings.get = lambda k: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else 115200)
+            p.settings.get = lambda k, d=None: fake_path if k == "device_path" else ("pn532_uart" if k == "reader_type" else (d if d is not None else 115200))
 
             await p._init_reader()
             assert p.reader is None
@@ -484,8 +484,8 @@ class TestReaderInit:
         # force settings for reader type resolution
         fake_path = str(tmp_path / "dev")
         open(fake_path, "w").close()
-        plugin.settings.get = lambda k: fake_path if k == "device_path" else (
-            "pn532_uart" if k == "reader_type" else 115200)
+        plugin.settings.get = lambda k, d=None: fake_path if k == "device_path" else (
+            "pn532_uart" if k == "reader_type" else (d if d is not None else 115200))
 
         # patch factory to return a fake reader
         fake_reader = MagicMock()
@@ -498,20 +498,20 @@ class TestReaderInit:
     async def test_init_reader_unknown_type_leaves_none(self, plugin, tmp_path):
         fake_path = str(tmp_path / "dev")
         open(fake_path, "w").close()
-        plugin.settings.get = lambda k: fake_path if k == "device_path" else (
-            "no-such" if k == "reader_type" else 115200)
+        plugin.settings.get = lambda k, d=None: fake_path if k == "device_path" else (
+            "no-such" if k == "reader_type" else (d if d is not None else 115200))
         await plugin._init_reader()
         assert plugin.reader is None
 
     @pytest.mark.asyncio
     async def test_create_reader_unknown(self, plugin):
-        plugin.settings.get = lambda k: "nope" if k == "reader_type" else "/dev/null"
+        plugin.settings.get = lambda k, d=None: "nope" if k == "reader_type" else ("/dev/null" if k == "device_path" else d)
         assert await plugin._create_reader() is None
 
     @pytest.mark.asyncio
     async def test_create_reader_nfcpy_success(self, plugin, monkeypatch):
         # nfcpy backend now exists and should be created successfully
-        plugin.settings.get = lambda k: "nfcpy" if k == "reader_type" else "/dev/null"
+        plugin.settings.get = lambda k, d=None: "nfcpy" if k == "reader_type" else ("/dev/null" if k == "device_path" else d)
         reader = await plugin._create_reader()
         # Should create nfcpy reader
         assert reader is not None

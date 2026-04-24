@@ -6,17 +6,22 @@ import { useState, useEffect } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface Settings {
-    device_path: string;
-    baudrate: number;
-    polling_interval: number;
     auto_launch: boolean;
     auto_close: boolean;
-    reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
+    sources: {
+        nfc: {
+            device_path: string;
+            baudrate: number;
+            polling_interval: number;
+            reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
+        };
+    };
 }
 
 export interface ReaderStatus {
     connected: boolean;
-    path: string;
+    path?: string;
+    source_type?: SourceType;
 }
 
 export interface TagStatus {
@@ -31,6 +36,24 @@ export interface SectorInfo {
     locked: boolean;
     readable: boolean;
     writable: boolean;
+}
+
+export enum SourceType {
+    NFC = "nfc",
+    STORAGE = "storage",
+    CAMERA = "camera",
+    MQTT = "mqtt",
+    FILE_WATCH = "file_watch",
+}
+
+export enum SourceEventKind {
+    CONNECTED = "connected",
+    DISCONNECTED = "disconnected",
+}
+
+export enum MediaEventKind {
+    LOAD = "load",
+    UNLOAD = "unload",
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,9 +72,17 @@ export interface SharedState {
   pairing: boolean;
 }
 
+export type SettingKey =
+  | "auto_launch"
+  | "auto_close"
+  | "device_path"
+  | "baudrate"
+  | "polling_interval"
+  | "reader_type";
+
 export const sharedState: SharedState = {
   settings: null,
-  readerStatus: { connected: false, path: "" },
+  readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
   tagUid: null,
   tagUri: null,
   activeAppId: null,
@@ -89,7 +120,7 @@ export function useSharedState(): SharedState {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const getSettings = callable<[], Settings>("get_settings");
-export const setSetting = callable<[key: keyof Settings, value: any], boolean>("set_setting");
+export const setSetting = callable<[key: SettingKey, value: any], boolean>("set_setting");
 export const startPairing = callable<[uri: string], boolean>("start_pairing");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");

@@ -21,7 +21,7 @@ import {
   startPairing,
   notifySubscribers,
   settingsRef,
-  type Settings,
+  type SettingKey,
 } from "./shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,14 +69,27 @@ async function triggerPairing() {
   notifySubscribers();
 }
 
-async function triggerUpdateSetting(key: keyof Settings, value: any) {
+async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
     toaster.toast({ title: "Settings Error", body: `Invalid value for ${key}.`, critical: true });
     return;
   }
   if (sharedState.settings) {
-    sharedState.settings = { ...sharedState.settings, [key]: value };
+    if (key === "auto_launch" || key === "auto_close") {
+      sharedState.settings = { ...sharedState.settings, [key]: value };
+    } else {
+      sharedState.settings = {
+        ...sharedState.settings,
+        sources: {
+          ...sharedState.settings.sources,
+          nfc: {
+            ...sharedState.settings.sources.nfc,
+            [key]: value,
+          },
+        },
+      };
+    }
   }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
@@ -108,13 +121,16 @@ const Content: FC = () => {
 
   if (!state.settings) return null;
 
+  const nfcSettings = state.settings.sources.nfc;
+  const sourceLabel = state.readerStatus.source_type ? state.readerStatus.source_type.toUpperCase() : "NFC";
+
   return (
     <PanelSection>
       <PanelSection title="Status">
         <StatusRow
           icon={<FaMicrochip />}
-          label="Reader"
-          value={state.readerStatus.connected ? state.readerStatus.path.split('/').pop() || state.readerStatus.path : "Not Found"}
+          label={sourceLabel}
+          value={state.readerStatus.connected ? (state.readerStatus.path?.split('/').pop() || state.readerStatus.path || "Connected") : "Not Found"}
           active={state.readerStatus.connected}
         />
         <StatusRow
@@ -163,8 +179,18 @@ const Content: FC = () => {
         </PanelSectionRow>
         <PanelSectionRow>
           <TextField
-            label="Device Path"
-            value={state.settings.device_path}
+            label="Reader Type"
+            value={nfcSettings.reader_type}
+            onChange={(e) => triggerUpdateSetting("reader_type", e.target.value)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Sources">
+        <PanelSectionRow>
+          <TextField
+            label="NFC Device Path"
+            value={nfcSettings.device_path}
             onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
           />
         </PanelSectionRow>

@@ -13,6 +13,7 @@ import {
   removeEventListener,
   toaster,
   pairingToastsSuppressed,
+  SourceType,
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { extractComparableAppIdFromRungameid } from "./lib/steamIds";
@@ -227,9 +228,13 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
-  const statusListener = addEventListener<[data: { connected: boolean, path: string }]>("reader_status", (data) => {
-    if (!data || typeof data.connected !== "boolean" || typeof data.path !== "string") return;
-    sharedState.readerStatus = data;
+  const statusListener = addEventListener<[data: { connected: boolean, path?: string, source_type?: string }]>("reader_status", (data) => {
+    if (!data || typeof data.connected !== "boolean") return;
+    sharedState.readerStatus = {
+      connected: data.connected,
+      path: data.path,
+      source_type: data.source_type as SourceType | undefined,
+    };
     notifySubscribers();
   });
 
@@ -360,7 +365,8 @@ export function startBackgroundManager(): () => void {
         if (
           active &&
           (sharedState.readerStatus.connected !== reader.connected ||
-            sharedState.readerStatus.path !== reader.path)
+            sharedState.readerStatus.path !== reader.path ||
+            sharedState.readerStatus.source_type !== reader.source_type)
         ) {
           sharedState.readerStatus = reader;
           notifySubscribers();
