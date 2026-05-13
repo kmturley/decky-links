@@ -578,7 +578,7 @@ class TestReaderFactory:
         await plugin._main()
         plugin.settings.set("reader_type", "pn532_uart")
         
-        reader = await plugin._create_reader()
+        reader = await plugin.nfc_source._create_reader()
         
         assert reader is not None
         assert reader.__class__.__name__ == "PN532UARTReader"
@@ -593,7 +593,7 @@ class TestReaderFactory:
         plugin.settings.set("reader_type", "acr122u")
         
         with patch('nfc.acr122u_backend.ACR122UReader'):
-            reader = await plugin._create_reader()
+            reader = await plugin.nfc_source._create_reader()
             assert reader is not None
 
     @pytest.mark.asyncio
@@ -606,7 +606,7 @@ class TestReaderFactory:
         plugin.settings.set("reader_type", "proxmark")
         
         with patch('nfc.proxmark_backend.ProxmarkReader'):
-            reader = await plugin._create_reader()
+            reader = await plugin.nfc_source._create_reader()
             assert reader is not None
 
     @pytest.mark.asyncio
@@ -618,7 +618,7 @@ class TestReaderFactory:
         await plugin._main()
         plugin.settings.set("reader_type", "unknown")
         
-        reader = await plugin._create_reader()
+        reader = await plugin.nfc_source._create_reader()
         
         assert reader is None
 

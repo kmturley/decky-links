@@ -3,6 +3,7 @@ import {
   getSettings,
   getReaderStatus,
   getTagStatus,
+  getSourceStatuses,
   setRunningGame,
   sharedState,
   settingsRef,
@@ -208,6 +209,11 @@ export function startBackgroundManager(): () => void {
       tagUidRef.current = null;
     }
 
+    const statuses = await getSourceStatuses();
+    if (active) {
+      sharedState.sourceStatuses = statuses;
+    }
+
     notifySubscribers();
   };
   init();
@@ -333,6 +339,7 @@ export function startBackgroundManager(): () => void {
   // polling loop omitted for brevity
 
   const pollLoop = async () => {
+    let sourcePollTick = 0;
     while (active) {
       try {
         // 1. Poll Game Status
@@ -370,6 +377,17 @@ export function startBackgroundManager(): () => void {
         ) {
           sharedState.readerStatus = reader;
           notifySubscribers();
+        }
+
+        // 4. Poll Source Statuses every 10 iterations (~5s)
+        sourcePollTick++;
+        if (sourcePollTick >= 10) {
+          sourcePollTick = 0;
+          const statuses = await getSourceStatuses();
+          if (active) {
+            sharedState.sourceStatuses = statuses;
+            notifySubscribers();
+          }
         }
 
       } catch (e) {

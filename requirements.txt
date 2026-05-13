@@ -1,1 +1,5 @@
 cryptography
+pyudev  # Linux-only; StorageSource degrades gracefully when not available
+pyzbar  # QR decoding; CameraSource degrades gracefully when not available
+Pillow  # image handling for pyzbar input frames
+paho-mqtt  # MqttSource; degrades gracefully when not available

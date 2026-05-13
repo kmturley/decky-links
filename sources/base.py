@@ -20,6 +20,7 @@ class SourceType(Enum):
     STORAGE = "storage"
     CAMERA = "camera"
     MQTT = "mqtt"
+    SERIAL = "serial"
     FILE_WATCH = "file_watch"
 
 

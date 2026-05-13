@@ -9,19 +9,22 @@ import {
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
 import { FC, ReactNode } from "react";
-import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag } from "react-icons/fa";
+import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag, FaHdd, FaCamera, FaWifi, FaPlug, FaFolderOpen } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
 import {
   useSharedState,
   toaster,
   setSetting,
+  setSourceSetting,
   sharedState,
   cancelPairing,
   startPairing,
   notifySubscribers,
   settingsRef,
+  SourceType,
   type SettingKey,
+  type SourceStatus,
 } from "./shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +72,26 @@ async function triggerPairing() {
   notifySubscribers();
 }
 
+async function triggerUpdateSourceSetting(sourceType: string, key: string, value: any) {
+  const ok = await setSourceSetting(sourceType, key, value);
+  if (!ok) {
+    toaster.toast({ title: "Settings Error", body: `Invalid value for ${sourceType}.${key}.`, critical: true });
+    return;
+  }
+  if (sharedState.settings) {
+    const sources = sharedState.settings.sources as any;
+    sharedState.settings = {
+      ...sharedState.settings,
+      sources: {
+        ...sources,
+        [sourceType]: { ...(sources[sourceType] ?? {}), [key]: value },
+      },
+    };
+  }
+  settingsRef.current = sharedState.settings;
+  notifySubscribers();
+}
+
 async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
@@ -93,6 +116,18 @@ async function triggerUpdateSetting(key: SettingKey, value: any) {
   }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
+}
+
+function sourceIcon(sourceType: string): ReactNode {
+  switch (sourceType) {
+    case SourceType.NFC: return <FaMicrochip />;
+    case SourceType.STORAGE: return <FaHdd />;
+    case SourceType.CAMERA: return <FaCamera />;
+    case SourceType.MQTT: return <FaWifi />;
+    case SourceType.SERIAL: return <FaPlug />;
+    case SourceType.FILE_WATCH: return <FaFolderOpen />;
+    default: return <FaCircle />;
+  }
 }
 
 const StatusRow: FC<{ icon: ReactNode; label: string; value: string; active: boolean }> = ({ icon, label, value, active }) => (
@@ -124,15 +159,31 @@ const Content: FC = () => {
   const nfcSettings = state.settings.sources.nfc;
   const sourceLabel = state.readerStatus.source_type ? state.readerStatus.source_type.toUpperCase() : "NFC";
 
+  const mqttSettings = state.settings.sources.mqtt;
+  const serialSettings = state.settings.sources.serial;
+  const fileWatchSettings = state.settings.sources.file_watch;
+
   return (
     <PanelSection>
       <PanelSection title="Status">
-        <StatusRow
-          icon={<FaMicrochip />}
-          label={sourceLabel}
-          value={state.readerStatus.connected ? (state.readerStatus.path?.split('/').pop() || state.readerStatus.path || "Connected") : "Not Found"}
-          active={state.readerStatus.connected}
-        />
+        {state.sourceStatuses.length > 0 ? (
+          state.sourceStatuses.map((src: SourceStatus) => (
+            <StatusRow
+              key={src.source_id}
+              icon={sourceIcon(src.source_type)}
+              label={src.source_type.toUpperCase()}
+              value={src.active ? src.source_id.split(":").pop() || "Active" : "Inactive"}
+              active={src.active}
+            />
+          ))
+        ) : (
+          <StatusRow
+            icon={<FaMicrochip />}
+            label={sourceLabel}
+            value={state.readerStatus.connected ? (state.readerStatus.path?.split('/').pop() || state.readerStatus.path || "Connected") : "Not Found"}
+            active={state.readerStatus.connected}
+          />
+        )}
         <StatusRow
           icon={<FaHashtag />}
           label="Tag"
@@ -194,6 +245,36 @@ const Content: FC = () => {
             onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
           />
         </PanelSectionRow>
+        {mqttSettings && (
+          <PanelSectionRow>
+            <ToggleField
+              label="MQTT Trigger"
+              description={`Broker: ${mqttSettings.broker_host}:${mqttSettings.broker_port}`}
+              checked={mqttSettings.enabled}
+              onChange={(v: boolean) => triggerUpdateSourceSetting("mqtt", "enabled", v)}
+            />
+          </PanelSectionRow>
+        )}
+        {serialSettings && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Serial Trigger"
+              description={`Port: ${serialSettings.port}`}
+              checked={serialSettings.enabled}
+              onChange={(v: boolean) => triggerUpdateSourceSetting("serial", "enabled", v)}
+            />
+          </PanelSectionRow>
+        )}
+        {fileWatchSettings && (
+          <PanelSectionRow>
+            <ToggleField
+              label="File Watch Trigger"
+              description={fileWatchSettings.watch_dir || "No directory set"}
+              checked={fileWatchSettings.enabled}
+              onChange={(v: boolean) => triggerUpdateSourceSetting("file_watch", "enabled", v)}
+            />
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       <KeyManagementPanel />

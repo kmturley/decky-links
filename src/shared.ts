@@ -15,7 +15,18 @@ export interface Settings {
             polling_interval: number;
             reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
         };
+        storage?: { enabled: boolean };
+        camera?: { device: string; poll_interval: number };
+        mqtt?: { enabled: boolean; broker_host: string; broker_port: number; topic: string; secret: string };
+        serial?: { enabled: boolean; port: string; baudrate: number };
+        file_watch?: { enabled: boolean; watch_dir: string; poll_interval: number };
     };
+}
+
+export interface SourceStatus {
+    source_id: string;
+    source_type: SourceType;
+    active: boolean;
 }
 
 export interface ReaderStatus {
@@ -43,6 +54,7 @@ export enum SourceType {
     STORAGE = "storage",
     CAMERA = "camera",
     MQTT = "mqtt",
+    SERIAL = "serial",
     FILE_WATCH = "file_watch",
 }
 
@@ -70,6 +82,7 @@ export interface SharedState {
   tagUri: string | null;
   activeAppId: string | null;
   pairing: boolean;
+  sourceStatuses: SourceStatus[];
 }
 
 export type SettingKey =
@@ -87,6 +100,7 @@ export const sharedState: SharedState = {
   tagUri: null,
   activeAppId: null,
   pairing: false,
+  sourceStatuses: [],
 };
 
 // These refs are updated from BackgroundManager and read by various
@@ -131,6 +145,8 @@ export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: strin
 export const listTagKeys = callable<[], string[]>("list_tag_keys");
 export const getSectorInfo = callable<[uid?: string], SectorInfo[]>("get_sector_info");
 export const lockSector = callable<[uid: string, sector: number, key_a: string, key_b: string], boolean>("lock_sector");
+export const getSourceStatuses = callable<[], SourceStatus[]>("get_source_statuses");
+export const setSourceSetting = callable<[source_type: string, key: string, value: any], boolean>("set_source_setting");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

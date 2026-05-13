@@ -32,10 +32,9 @@ from sources.base import (
 )
 
 try:
-    from nfc.reader import PN532UARTReader, ACR122UReader
+    from nfc.reader import PN532UARTReader
 except ImportError:
     PN532UARTReader = None
-    ACR122UReader = None
 
 
 class NfcSource(MediaSource):
