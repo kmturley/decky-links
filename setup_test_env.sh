@@ -3,11 +3,10 @@ set -e
 
 echo "Setting up Python virtual environment for NFC testing..."
 python3 -m venv .venv
-source .venv/bin/activate
 
 echo "Installing requirements..."
-pip install -r requirements.txt
-pip install -r tests/requirements.txt
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r tests/requirements.txt
 
 echo ""
 echo "Setup complete! You can run the test script with:"
