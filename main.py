@@ -1,5 +1,16 @@
 import os
 import sys
+
+# Bootstrap sys.path before any local package imports.
+# The Decky CLI builds backend/src/ → backend/out/ → bin/ inside the zip.
+_plugin_dir = os.path.dirname(os.path.abspath(__file__))
+for _p in (
+    os.path.join(_plugin_dir, "bin"),
+    os.path.join(_plugin_dir, "py_modules"),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 import asyncio
 import time
 import json
@@ -27,16 +38,7 @@ from sources.mqtt_source import MqttSource
 from sources.serial_source import SerialSource
 from sources.file_watch_source import FileWatchSource
 
-# Add vendored modules to path
 import decky
-py_modules_path = os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules")
-if py_modules_path not in sys.path:
-    sys.path.insert(0, py_modules_path)
-
-# Add plugin directory to path so nfc module can be imported
-plugin_dir = decky.DECKY_PLUGIN_DIR
-if plugin_dir not in sys.path:
-    sys.path.insert(0, plugin_dir)
 
 from nfc.key_manager import KeyManager
 from nfc.signature_manager import SignatureManager
