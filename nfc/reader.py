@@ -156,7 +156,10 @@ class PN532UARTReader(Reader):
                     self.logger.error(f"SAM configuration failed: {e}")
                 self.close()
                 return False
-            
+
+            # Brief settle time — some PN532 modules briefly glitch the serial
+            # line immediately after SAM configuration before accepting polls.
+            await asyncio.sleep(0.5)
             return True
             # firmware fetch failed
         except Exception as e:

@@ -74,6 +74,9 @@ class NfcSource(MediaSource):
 
         # Effective device path (may differ from settings when auto-detected)
         self._effective_path: Optional[str] = None
+        # Last path that produced a successful connection — prefer this over
+        # auto-detecting a different port after a transient USB disconnect.
+        self._last_good_path: Optional[str] = None
 
         # Pairing state (set by plugin)
         self.is_pairing: bool = False
@@ -115,7 +118,7 @@ class NfcSource(MediaSource):
         if sys.platform == "darwin":
             patterns = ["/dev/cu.usbserial-*", "/dev/cu.usbmodem*"]
         else:
-            patterns = ["/dev/ttyACM*", "/dev/ttyUSB*"]
+            patterns = ["/dev/ttyUSB*", "/dev/ttyACM*"]
         for pattern in patterns:
             matches = sorted(glob.glob(pattern))
             if matches:
@@ -131,7 +134,15 @@ class NfcSource(MediaSource):
         """Initialise the NFC reader hardware."""
         path = self._settings.get("device_path", "")
         if not os.path.exists(path):
-            path = self._find_serial_port() or ""
+            if self._last_good_path:
+                # We had a working connection before. Wait for that exact
+                # device to reappear instead of jumping to a different port
+                # (which could be a completely different device, e.g. ttyACM0).
+                if not os.path.exists(self._last_good_path):
+                    return False
+                path = self._last_good_path
+            else:
+                path = self._find_serial_port() or ""
         if not path:
             return False
         self._effective_path = path
@@ -154,6 +165,7 @@ class NfcSource(MediaSource):
                 f"{self._settings.get('reader_type')}"
             )
         self._reader = reader
+        self._last_good_path = self._effective_path
         return True
 
     async def stop(self) -> None:

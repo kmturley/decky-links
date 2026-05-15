@@ -377,6 +377,71 @@ class TestReaderInit:
         assert source._reader is None
 
     @pytest.mark.asyncio
+    async def test_nfc_source_start_records_last_good_path(self, mock_decky, tmp_path):
+        """start() stores _last_good_path after a successful connection."""
+        from sources.nfc_source import NfcSource
+        fake_path = str(tmp_path / "dev")
+        open(fake_path, "w").close()
+        settings = {"device_path": fake_path, "reader_type": "pn532_uart", "baudrate": 115200}
+        source = NfcSource(settings, logger=mock_decky.logger)
+
+        mock_reader = MagicMock()
+        mock_reader.connect = AsyncMock(return_value=True)
+        with patch.object(source, "_create_reader", return_value=mock_reader):
+            await source.start()
+        assert source._last_good_path == fake_path
+
+    @pytest.mark.asyncio
+    async def test_nfc_source_start_failure_does_not_set_last_good_path(self, mock_decky, tmp_path):
+        """_last_good_path is not updated when connect() fails."""
+        from sources.nfc_source import NfcSource
+        fake_path = str(tmp_path / "dev")
+        open(fake_path, "w").close()
+        settings = {"device_path": fake_path, "reader_type": "pn532_uart", "baudrate": 115200}
+        source = NfcSource(settings, logger=mock_decky.logger)
+
+        mock_reader = MagicMock()
+        mock_reader.connect = AsyncMock(return_value=False)
+        with patch.object(source, "_create_reader", return_value=mock_reader):
+            await source.start()
+        assert source._last_good_path is None
+
+    @pytest.mark.asyncio
+    async def test_nfc_source_reconnect_prefers_last_good_path(self, mock_decky, tmp_path):
+        """After a USB glitch, start() retries the last good path, not auto-detect."""
+        from sources.nfc_source import NfcSource
+        good_path = str(tmp_path / "ttyUSB0")
+        other_path = str(tmp_path / "ttyACM0")
+        open(good_path, "w").close()
+        open(other_path, "w").close()
+
+        settings = {"device_path": "/dev/nonexistent", "reader_type": "pn532_uart", "baudrate": 115200}
+        source = NfcSource(settings, logger=mock_decky.logger)
+        source._last_good_path = good_path  # simulate a prior successful connection
+
+        mock_reader = MagicMock()
+        mock_reader.connect = AsyncMock(return_value=True)
+        with patch.object(source, "_create_reader", return_value=mock_reader):
+            ok = await source.start()
+
+        assert ok is True
+        assert source._effective_path == good_path
+
+    @pytest.mark.asyncio
+    async def test_nfc_source_waits_for_last_good_path_not_auto_detects(self, mock_decky, tmp_path):
+        """When last_good_path is gone and configured path missing, return False (don't auto-detect)."""
+        from sources.nfc_source import NfcSource
+        other_path = str(tmp_path / "ttyACM0")
+        open(other_path, "w").close()  # a different device is present
+
+        settings = {"device_path": "/dev/nonexistent", "reader_type": "pn532_uart", "baudrate": 115200}
+        source = NfcSource(settings, logger=mock_decky.logger)
+        source._last_good_path = "/dev/nonexistent"  # last good path also gone (USB glitch)
+
+        ok = await source.start()
+        assert ok is False  # must NOT auto-detect ttyACM0
+
+    @pytest.mark.asyncio
     async def test_nfc_source_create_reader_unknown_type(self, plugin):
         plugin.nfc_source._settings["reader_type"] = "no-such"
         result = await plugin.nfc_source._create_reader()
