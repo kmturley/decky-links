@@ -409,6 +409,15 @@ class Plugin:
                     "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
                 })
+                # If a tag was present when the reader disconnected, clear it
+                # so the frontend doesn't keep showing the old tag as active.
+                if self.current_tag_uid:
+                    self.current_tag_uid = None
+                    self.current_tag_uri = None
+                    self.current_tag_meta = None
+                    await decky.emit("tag_removed", {
+                        "source_type": event.source_type.value,
+                    })
 
         statuses = await self.get_source_statuses()
         await decky.emit("source_statuses", statuses)
