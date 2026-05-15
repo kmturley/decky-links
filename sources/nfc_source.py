@@ -72,6 +72,9 @@ class NfcSource(MediaSource):
         self.current_tag_uri: Optional[str] = None
         self.current_tag_meta: Optional[Dict[str, Any]] = None
 
+        # Effective device path (may differ from settings when auto-detected)
+        self._effective_path: Optional[str] = None
+
         # Pairing state (set by plugin)
         self.is_pairing: bool = False
         self.pairing_uri: Optional[str] = None
@@ -82,7 +85,7 @@ class NfcSource(MediaSource):
 
     @property
     def source_id(self) -> str:
-        device = self._settings.get("device_path", "unknown")
+        device = self._effective_path or self._settings.get("device_path", "unknown")
         return f"nfc:{device}"
 
     @property
@@ -102,11 +105,36 @@ class NfcSource(MediaSource):
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
+    def _find_serial_port(self) -> Optional[str]:
+        """Return the first available USB serial port, or None.
+
+        Used as a fallback when the configured device_path doesn't exist —
+        covers macOS (/dev/cu.usbserial-*) and Linux (/dev/ttyUSB*, /dev/ttyACM*).
+        """
+        import glob
+        if sys.platform == "darwin":
+            patterns = ["/dev/cu.usbserial-*", "/dev/cu.usbmodem*"]
+        else:
+            patterns = ["/dev/ttyUSB*", "/dev/ttyACM*"]
+        for pattern in patterns:
+            matches = sorted(glob.glob(pattern))
+            if matches:
+                if self._logger:
+                    self._logger.info(
+                        f"NfcSource: auto-detected serial port {matches[0]!r} "
+                        f"(configured {self._settings.get('device_path')!r} not found)"
+                    )
+                return matches[0]
+        return None
+
     async def start(self) -> bool:
         """Initialise the NFC reader hardware."""
         path = self._settings.get("device_path", "")
         if not os.path.exists(path):
+            path = self._find_serial_port() or ""
+        if not path:
             return False
+        self._effective_path = path
 
         reader = await self._create_reader()
         if not reader:
@@ -263,7 +291,7 @@ class NfcSource(MediaSource):
     async def _create_reader(self):
         """Return a reader instance based on configured settings."""
         rtype = self._settings.get("reader_type", "pn532_uart")
-        path = self._settings.get("device_path", "")
+        path = self._effective_path or self._settings.get("device_path", "")
         baud = int(self._settings.get("baudrate", 115200))
 
         if rtype == "pn532_uart":
