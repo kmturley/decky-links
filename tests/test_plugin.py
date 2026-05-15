@@ -1010,3 +1010,107 @@ class TestSectorInfoRPC:
         with patch.object(plugin.nfc_source, "_classify_tag", return_value={"type": "mifare-classic"}):
             result = await plugin.get_sector_info()
         assert result == []
+
+
+# ── _handle_source_event() ────────────────────────────────────────────────────
+
+class TestHandleSourceEvent:
+
+    @pytest.mark.asyncio
+    async def test_nfc_connected_sets_state_ready(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = PluginState.IDLE
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.READY
+
+    @pytest.mark.asyncio
+    async def test_nfc_connected_emits_reader_status_true(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = __import__("main").PluginState.IDLE
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
+        await plugin._handle_source_event(event)
+        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "reader_status"]
+        assert len(reader_calls) == 1
+        assert reader_calls[0].args[1]["connected"] is True
+        assert reader_calls[0].args[1]["source_type"] == "nfc"
+
+    @pytest.mark.asyncio
+    async def test_storage_connected_does_not_change_state(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = PluginState.IDLE
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_storage_connected_does_not_emit_reader_status(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "reader_status" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_nfc_disconnected_sets_state_idle(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = PluginState.READY
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_nfc_disconnected_emits_reader_status_false(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
+        await plugin._handle_source_event(event)
+        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "reader_status"]
+        assert len(reader_calls) == 1
+        assert reader_calls[0].args[1]["connected"] is False
+
+    @pytest.mark.asyncio
+    async def test_storage_disconnected_does_not_change_state(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = PluginState.READY
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.READY
+
+    @pytest.mark.asyncio
+    async def test_storage_disconnected_does_not_emit_reader_status(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "reader_status" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_connected_event_emits_source_statuses(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        for source_type in [SourceType.NFC, SourceType.STORAGE, SourceType.MQTT]:
+            mock_decky.emit.reset_mock()
+            event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=source_type, source_id=f"{source_type.value}:test")
+            await plugin._handle_source_event(event)
+            emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+            assert "source_statuses" in emitted, f"Missing source_statuses for {source_type}"
+
+    @pytest.mark.asyncio
+    async def test_disconnected_event_emits_source_statuses(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "source_statuses" in emitted
+
+    @pytest.mark.asyncio
+    async def test_source_statuses_payload_is_list(self, plugin, mock_decky):
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.NFC, source_id="nfc:test")
+        await plugin._handle_source_event(event)
+        ss_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "source_statuses"]
+        assert len(ss_calls) == 1
+        assert isinstance(ss_calls[0].args[1], list)

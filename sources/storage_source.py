@@ -108,6 +108,9 @@ class StorageSource(MediaSource):
     def is_active(self) -> bool:
         return self._monitor is not None
 
+    def has_media(self) -> bool:
+        return len(self._active_media) > 0
+
     # ── Poll ───────────────────────────────────────────────────────────
 
     async def poll(self) -> Optional[PluginEvent]:

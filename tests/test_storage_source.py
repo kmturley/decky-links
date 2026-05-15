@@ -558,3 +558,63 @@ class TestIntegration:
         first = await src.poll()
         assert first is queued
         assert src._monitor.poll.call_count == 0
+
+
+# ── has_media() ───────────────────────────────────────────────────────────────
+
+class TestHasMedia:
+
+    def test_has_media_false_when_no_active_media(self):
+        src = _make_source()
+        assert src.has_media() is False
+
+    def test_has_media_false_when_monitor_running_but_no_payload(self):
+        src = _make_source()
+        src._monitor = MagicMock()
+        assert src.has_media() is False
+
+    def test_has_media_true_when_device_with_payload_present(self):
+        src = _make_source()
+        src._active_media["/dev/sdb1"] = "steam://run/12345"
+        assert src.has_media() is True
+
+    def test_has_media_true_for_multiple_devices(self):
+        src = _make_source()
+        src._active_media["/dev/sdb1"] = "steam://run/1"
+        src._active_media["/dev/sdc1"] = "steam://run/2"
+        assert src.has_media() is True
+
+    def test_has_media_false_after_device_entry_removed(self):
+        src = _make_source()
+        src._active_media["/dev/sdb1"] = "steam://run/12345"
+        del src._active_media["/dev/sdb1"]
+        assert src.has_media() is False
+
+    def test_has_media_independent_of_is_active(self):
+        # udev monitor up (is_active True) but no payload device found
+        src = _make_source()
+        src._monitor = MagicMock()
+        assert src.is_active() is True
+        assert src.has_media() is False
+
+    @pytest.mark.asyncio
+    async def test_has_media_false_after_stop(self):
+        src = _make_source()
+        src._monitor = MagicMock()
+        src._active_media["/dev/sdb1"] = "steam://run/12345"
+        assert src.has_media() is True
+        await src.stop()
+        assert src.has_media() is False
+
+    def test_has_media_tracks_load_unload_cycle(self, tmp_path):
+        from sources.base import MediaEventKind
+        src = _make_source()
+        (tmp_path / "decky-links.json").write_text(json.dumps({
+            "version": 1, "uri": "steam://run/42",
+        }))
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            src._handle_device_added("/dev/sdb1")
+        assert src.has_media() is True
+
+        src._handle_device_removed("/dev/sdb1")
+        assert src.has_media() is False

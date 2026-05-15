@@ -124,6 +124,15 @@ class MediaSource(ABC):
     def is_active(self) -> bool:
         """Return ``True`` if the source believes it is currently usable."""
 
+    def has_media(self) -> bool:
+        """Return True when physical media is actively present.
+
+        Defaults to ``is_active()``.  Override in sources where the source
+        can be "active" (infrastructure running) without media being present —
+        e.g. StorageSource whose udev monitor is always up on Linux.
+        """
+        return self.is_active()
+
     @abstractmethod
     async def poll(self) -> Optional[PluginEvent]:
         """Perform one poll cycle.

@@ -290,3 +290,53 @@ class TestSetSourceSetting:
         p, _ = _make_plugin_with_sources(tmp_path)
         result = await p.set_source_setting("mqtt", "broker_port", "1883")
         assert result is False
+
+
+# ── get_source_statuses() — has_media() for StorageSource ────────────────────
+
+def _make_plugin_with_storage(tmp_path):
+    """Like _make_plugin_with_sources but registers a StorageSource as well."""
+    from sources.storage_source import StorageSource
+    p, settings = _make_plugin_with_sources(tmp_path)
+    storage = StorageSource({}, logger=MagicMock())
+    p.storage_source = storage
+    p.source_manager.register(storage)
+    return p, storage
+
+
+class TestGetSourceStatusesHasMedia:
+
+    @pytest.mark.asyncio
+    async def test_storage_udev_running_but_no_payload_reports_inactive(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()  # udev monitor running
+        result = await p.get_source_statuses()
+        storage_entry = next(e for e in result if e["source_type"] == "storage")
+        assert storage_entry["active"] is False
+
+    @pytest.mark.asyncio
+    async def test_storage_with_active_media_reports_active(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()
+        storage._active_media["/dev/sdb1"] = "steam://run/12345"
+        result = await p.get_source_statuses()
+        storage_entry = next(e for e in result if e["source_type"] == "storage")
+        assert storage_entry["active"] is True
+
+    @pytest.mark.asyncio
+    async def test_storage_after_media_removal_reports_inactive(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()
+        storage._active_media["/dev/sdb1"] = "steam://run/12345"
+        del storage._active_media["/dev/sdb1"]
+        result = await p.get_source_statuses()
+        storage_entry = next(e for e in result if e["source_type"] == "storage")
+        assert storage_entry["active"] is False
+
+    @pytest.mark.asyncio
+    async def test_non_storage_sources_use_is_active_via_has_media(self, tmp_path):
+        p, _ = _make_plugin_with_sources(tmp_path)
+        p.mqtt_source._active = True
+        result = await p.get_source_statuses()
+        mqtt_entry = next(e for e in result if e["source_type"] == "mqtt")
+        assert mqtt_entry["active"] is True

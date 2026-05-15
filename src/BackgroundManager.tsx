@@ -244,6 +244,12 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
+  const sourceStatusesListener = addEventListener<[data: any[]]>("source_statuses", (data) => {
+    if (!Array.isArray(data)) return;
+    sharedState.sourceStatuses = data;
+    notifySubscribers();
+  });
+
   const uriListener = addEventListener<[data: { uri: string | null, uid: string }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     const normalizedUid = data.uid.toUpperCase();
@@ -409,6 +415,7 @@ export function startBackgroundManager(): () => void {
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
+    removeEventListener("source_statuses", sourceStatusesListener);
     stopBackgroundManagerFn = null;
   };
 

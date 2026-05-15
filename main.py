@@ -390,22 +390,27 @@ class Plugin:
             decky.logger.info(
                 f"Source connected: {event.source_type.value} ({event.source_id})"
             )
-            self._set_state(PluginState.READY)
-            await decky.emit("reader_status", {
-                "connected": True,
-                "path": self.settings.get("device_path"),
-                "source_type": event.source_type.value,
-            })
+            if event.source_type == SourceType.NFC:
+                self._set_state(PluginState.READY)
+                await decky.emit("reader_status", {
+                    "connected": True,
+                    "path": self.settings.get("device_path"),
+                    "source_type": event.source_type.value,
+                })
 
         elif event.kind == SourceEventKind.DISCONNECTED:
             decky.logger.info(
                 f"Source disconnected: {event.source_type.value} ({event.source_id})"
             )
-            self._set_state(PluginState.IDLE)
-            await decky.emit("reader_status", {
-                "connected": False,
-                "source_type": event.source_type.value,
-            })
+            if event.source_type == SourceType.NFC:
+                self._set_state(PluginState.IDLE)
+                await decky.emit("reader_status", {
+                    "connected": False,
+                    "source_type": event.source_type.value,
+                })
+
+        statuses = await self.get_source_statuses()
+        await decky.emit("source_statuses", statuses)
 
     async def _handle_media_event(self, event: MediaEvent):
         """Handle media interaction events (tag tap, floppy insert, etc.)."""
@@ -1157,7 +1162,7 @@ class Plugin:
             result.append({
                 "source_id": source.source_id,
                 "source_type": source.source_type.value,
-                "active": source.is_active(),
+                "active": source.has_media(),
             })
         return result
 
