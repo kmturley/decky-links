@@ -146,7 +146,7 @@ class SettingsManager:
     def _get_default_device_path(self):
         if sys.platform == "darwin":
             return "/dev/cu.usbserial-1440"
-        return "/dev/ttyUSB0"
+        return "/dev/ttyACM0"
 
     def load(self):
         try:

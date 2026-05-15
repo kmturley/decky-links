@@ -115,7 +115,7 @@ class NfcSource(MediaSource):
         if sys.platform == "darwin":
             patterns = ["/dev/cu.usbserial-*", "/dev/cu.usbmodem*"]
         else:
-            patterns = ["/dev/ttyUSB*", "/dev/ttyACM*"]
+            patterns = ["/dev/ttyACM*", "/dev/ttyUSB*"]
         for pattern in patterns:
             matches = sorted(glob.glob(pattern))
             if matches:

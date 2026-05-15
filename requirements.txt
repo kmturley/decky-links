@@ -1,5 +1,6 @@
 cryptography
-pyudev  # Linux-only; StorageSource degrades gracefully when not available
-pyzbar  # QR decoding; CameraSource degrades gracefully when not available
-Pillow  # image handling for pyzbar input frames
-paho-mqtt  # MqttSource; degrades gracefully when not available
+pyserial  # serial port access for PN532 UART reader
+pyudev    # Linux-only; StorageSource degrades gracefully when not available
+pyzbar    # QR decoding; CameraSource degrades gracefully when not available
+Pillow    # image handling for pyzbar input frames
+paho-mqtt # MqttSource; degrades gracefully when not available
