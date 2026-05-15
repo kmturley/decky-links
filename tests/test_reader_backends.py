@@ -581,22 +581,26 @@ class TestPN532UARTConnectBlocking:
         sys.modules["serial"] = serial_mock
         return serial_mock, uart_instance
 
-    def _make_pn532_mock(self, firmware=(1, 6, 7, 0), sam_ok=True):
+    def _make_pn532_mock(self, init_raises=None):
+        """Return a mocked adafruit_pn532.uart module.
+
+        init_raises: if set, PN532_UART() constructor raises this exception,
+        simulating firmware-not-found or SAM failure during __init__.
+        """
         import sys
         pn532_uart_mod = MagicMock()
-        reader_instance = MagicMock()
-        reader_instance.firmware_version = firmware
-        if not sam_ok:
-            reader_instance.SAM_configuration.side_effect = Exception("SAM failed")
-        pn532_uart_mod.PN532_UART.return_value = reader_instance
+        if init_raises:
+            pn532_uart_mod.PN532_UART.side_effect = init_raises
+        else:
+            reader_instance = MagicMock()
+            pn532_uart_mod.PN532_UART.return_value = reader_instance
         sys.modules["adafruit_pn532.uart"] = pn532_uart_mod
-        return pn532_uart_mod, reader_instance
+        return pn532_uart_mod
 
     def test_connect_blocking_success(self):
-        """Should return True and store _reader when firmware version is present."""
-        import sys, time
+        """Should return True and store _reader when PN532_UART init succeeds."""
         serial_mock, uart_instance = self._make_serial_mock()
-        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=(1, 6, 7, 0))
+        pn532_mod = self._make_pn532_mock()
 
         reader = self._make_reader()
 
@@ -604,12 +608,13 @@ class TestPN532UARTConnectBlocking:
             result = reader._connect_blocking()
 
         assert result is True
-        assert reader._reader is pn532_instance
+        assert reader._reader is pn532_mod.PN532_UART.return_value
 
-    def test_connect_blocking_no_firmware_returns_false(self):
-        """Should return False (and close) when firmware_version is falsy."""
+    def test_connect_blocking_firmware_not_detected_returns_false(self):
+        """Should return False when PN532_UART.__init__ raises (firmware not detected)."""
         serial_mock, uart_instance = self._make_serial_mock()
-        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=None)
+        # The real PN532_UART raises RuntimeError if firmware_version returns None
+        self._make_pn532_mock(init_raises=RuntimeError("Failed to detect the PN532"))
 
         reader = self._make_reader()
 
@@ -634,9 +639,10 @@ class TestPN532UARTConnectBlocking:
         assert result is False
 
     def test_connect_blocking_sam_exception_returns_false(self):
-        """Should return False when SAM_configuration raises."""
+        """Should return False when PN532_UART.__init__ raises (SAM config failure)."""
         serial_mock, uart_instance = self._make_serial_mock()
-        pn532_mod, pn532_instance = self._make_pn532_mock(sam_ok=False)
+        # SAM_configuration is called inside PN532_UART.__init__ — failure propagates
+        self._make_pn532_mock(init_raises=Exception("SAM failed"))
 
         reader = self._make_reader()
 
@@ -733,7 +739,7 @@ class TestPN532UARTConnectBlocking:
         import threading
 
         serial_mock, uart_instance = self._make_serial_mock()
-        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=(1, 6, 7, 0))
+        pn532_mod = self._make_pn532_mock()
 
         cancel_calls = []
 
@@ -761,7 +767,7 @@ class TestPN532UARTConnectBlocking:
         import threading
 
         serial_mock, uart_instance = self._make_serial_mock()
-        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=None)
+        self._make_pn532_mock(init_raises=RuntimeError("Failed to detect the PN532"))
 
         cancel_calls = []
 

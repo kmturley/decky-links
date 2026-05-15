@@ -117,9 +117,12 @@ class PN532UARTReader(Reader):
 
         asyncio.wait_for cannot cancel a running thread on Python 3.9, so we
         use threading.Timer to force-close the serial port when the deadline
-        expires.  Closing the port causes any blocking adafruit_pn532 call
-        (firmware_version, SAM_configuration) to raise immediately, so the
-        thread exits within milliseconds of the deadline rather than 30 seconds.
+        expires.  Closing the port causes the adafruit_pn532 I/O loops to
+        raise within one poll cycle (~10 ms) rather than blocking for 30 s.
+
+        The timer must start BEFORE PN532_UART() is constructed because the
+        constructor itself calls _wakeup() → SAM_configuration() and reads
+        firmware_version — all of which can block on the wrong device.
         """
         import serial
         import time
@@ -130,7 +133,7 @@ class PN532UARTReader(Reader):
 
         def _on_timeout():
             timed_out[0] = True
-            self.close()  # unblocks any pending serial I/O in the adafruit library
+            self.close()  # closing the port causes in_waiting/write to raise
 
         timer = threading.Timer(5.0, _on_timeout)
         try:
@@ -140,19 +143,11 @@ class PN532UARTReader(Reader):
                 timeout=0.1,
                 write_timeout=0.5,
             )
-            self._reader = PN532_UART(self.uart, debug=False)
+            # Start timer BEFORE PN532_UART.__init__ — the constructor calls
+            # _wakeup() which runs SAM_configuration + firmware_version and
+            # can block for 30 s on a wrong/unresponsive device without this.
             timer.start()
-
-            version = self._reader.firmware_version
-            if timed_out[0]:
-                return False
-            if not version:
-                if self.logger:
-                    self.logger.error("Failed to retrieve firmware version")
-                self.close()
-                return False
-
-            self._reader.SAM_configuration()
+            self._reader = PN532_UART(self.uart, debug=False)
             if timed_out[0]:
                 return False
 
