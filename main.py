@@ -406,6 +406,7 @@ class Plugin:
                 self._set_state(PluginState.IDLE)
                 await decky.emit("reader_status", {
                     "connected": False,
+                    "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
                 })
 
@@ -448,7 +449,8 @@ class Plugin:
         # Audio feedback (Spec §11)
         self._play_sound("scan.flac")
 
-        # Emit tag_detected event
+        # Emit tag_detected immediately — matches old _handle_scan behavior where
+        # the UID appeared in the UI as soon as the card was read.
         await decky.emit("tag_detected", {
             "uid": uid_hex,
             "source_type": event.source_type.value,
@@ -462,36 +464,28 @@ class Plugin:
         if event.source_type == SourceType.NFC and self.current_tag_meta:
             await decky.emit("tag_metadata", self.current_tag_meta)
 
-        # Emit URI detected
-        await decky.emit("uri_detected", {
-            "uri": uri,
-            "uid": uid_hex,
-            "source_type": event.source_type.value,
-        })
-
-        # No URI — play error sound (Spec §12)
+        # No URI — play error sound and emit null so frontend clears any stale URI
         if not uri:
             decky.logger.info(f"No URI found on media {uid_hex}")
             self._play_sound("error.flac")
             self.current_tag_uri = None
+            await decky.emit("uri_detected", {"uri": None, "uid": uid_hex})
             self._set_state(PluginState.READY)
             return
 
-        # Allowlist check (Spec §4)
+        # Allowlist check (Spec §4) — emit null URI so frontend knows it's blocked
         if not self._validate_uri(uri):
             decky.logger.warning(f"URI blocked by allowlist: {uri}")
             self._play_sound("error.flac")
             self.current_tag_uri = None
-            await decky.emit("uri_detected", {
-                "uri": None,
-                "uid": uid_hex,
-                "blocked": True,
-                "source_type": event.source_type.value,
-            })
+            await decky.emit("uri_detected", {"uri": None, "uid": uid_hex, "blocked": True})
             self._set_state(PluginState.READY)
             return
 
         decky.logger.info(f"URI found on media {uid_hex}: {uri}")
+
+        # Emit valid URI once — matches old code where uri_detected fired only with final URI
+        await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 
         # Handle pairing mode
         if self.is_pairing and event.source_type == SourceType.NFC:

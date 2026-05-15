@@ -182,6 +182,12 @@ class NfcSource(MediaSource):
             except Exception:
                 pass
             self._uart = None
+        # Reset tag state so the same card is re-detected after reconnect
+        self._last_uid_hex = None
+        self._missing_count = 0
+        self.current_tag_uid = None
+        self.current_tag_uri = None
+        self.current_tag_meta = None
 
     def is_active(self) -> bool:
         """Check if reader is connected and usable."""
@@ -204,7 +210,9 @@ class NfcSource(MediaSource):
             if self._logger:
                 self._logger.error(f"NfcSource: poll error: {e}")
                 self._logger.error(traceback.format_exc())
-            # Mark reader as dead so SourceManager will attempt reconnect
+            # Mark reader as dead so SourceManager will attempt reconnect.
+            # Reset last_uid so the same card is re-detected after reconnect.
+            self._last_uid_hex = None
             self._reader = None
             if self._uart:
                 try:
@@ -223,14 +231,25 @@ class NfcSource(MediaSource):
                 self._last_uid_hex = uid_hex
                 self.current_tag_uid = uid_hex
 
-                # Classify tag
+                # Classify tag (needed to choose ntag vs mifare read path)
                 try:
                     self.current_tag_meta = self._classify_tag(uid)
                 except Exception:
                     self.current_tag_meta = None
 
-                # Read URI from NDEF
-                uri = self._read_ndef_uri()
+                # Read NDEF records once and derive both URI and record list.
+                # _read_ndef_uri() would call _read_ndef_records() internally,
+                # then we'd call it again — two full tag reads for the same data.
+                try:
+                    records = self._read_ndef_records()
+                except Exception:
+                    records = []
+
+                uri = None
+                for record in records:
+                    if hasattr(record, "uri") and record.__class__.__name__.endswith("UriRecord"):
+                        uri = record.uri
+                        break
                 self.current_tag_uri = uri
 
                 # Build payload with NFC-specific data
@@ -238,19 +257,14 @@ class NfcSource(MediaSource):
                 if self.current_tag_meta:
                     payload["tag_meta"] = self.current_tag_meta
 
-                # Read all NDEF records for the payload
-                try:
-                    records = self._read_ndef_records()
-                    serializable_records = []
-                    for record in records:
-                        rec_dict = {}
-                        for attr in ['type', 'name', 'uri', 'text', 'language', 'encoding']:
-                            if hasattr(record, attr):
-                                rec_dict[attr] = getattr(record, attr)
-                        serializable_records.append(rec_dict)
-                    payload["ndef_records"] = serializable_records
-                except Exception:
-                    payload["ndef_records"] = []
+                serializable_records = []
+                for record in records:
+                    rec_dict = {}
+                    for attr in ['type', 'name', 'uri', 'text', 'language', 'encoding']:
+                        if hasattr(record, attr):
+                            rec_dict[attr] = getattr(record, attr)
+                    serializable_records.append(rec_dict)
+                payload["ndef_records"] = serializable_records
 
                 if self._logger:
                     self._logger.info(f"NfcSource: new tag {uid_hex}, uri={uri}")
