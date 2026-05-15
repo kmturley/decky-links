@@ -2,14 +2,11 @@ import os
 import sys
 
 # Bootstrap sys.path before any local package imports.
-# The Decky CLI builds backend/src/ → backend/out/ → bin/ inside the zip.
+# build.sh copies sources/ and nfc/ into py_modules/ alongside pip packages.
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
-for _p in (
-    os.path.join(_plugin_dir, "bin"),
-    os.path.join(_plugin_dir, "py_modules"),
-):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+_py_modules = os.path.join(_plugin_dir, "py_modules")
+if _py_modules not in sys.path:
+    sys.path.insert(0, _py_modules)
 
 import asyncio
 import time
