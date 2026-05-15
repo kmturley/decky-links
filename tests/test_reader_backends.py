@@ -566,6 +566,248 @@ class TestProxmarkBackend:
         assert reader._connected is False
 
 
+class TestPN532UARTConnectBlocking:
+    """Tests for PN532UARTReader._connect_blocking() timeout and error paths."""
+
+    def _make_reader(self):
+        from nfc.reader import PN532UARTReader
+        return PN532UARTReader("/dev/ttyUSB0", 115200)
+
+    def _make_serial_mock(self):
+        import sys
+        serial_mock = MagicMock()
+        uart_instance = MagicMock()
+        serial_mock.Serial.return_value = uart_instance
+        sys.modules["serial"] = serial_mock
+        return serial_mock, uart_instance
+
+    def _make_pn532_mock(self, firmware=(1, 6, 7, 0), sam_ok=True):
+        import sys
+        pn532_uart_mod = MagicMock()
+        reader_instance = MagicMock()
+        reader_instance.firmware_version = firmware
+        if not sam_ok:
+            reader_instance.SAM_configuration.side_effect = Exception("SAM failed")
+        pn532_uart_mod.PN532_UART.return_value = reader_instance
+        sys.modules["adafruit_pn532.uart"] = pn532_uart_mod
+        return pn532_uart_mod, reader_instance
+
+    def test_connect_blocking_success(self):
+        """Should return True and store _reader when firmware version is present."""
+        import sys, time
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=(1, 6, 7, 0))
+
+        reader = self._make_reader()
+
+        with patch("time.sleep"):  # skip the 0.5s settle
+            result = reader._connect_blocking()
+
+        assert result is True
+        assert reader._reader is pn532_instance
+
+    def test_connect_blocking_no_firmware_returns_false(self):
+        """Should return False (and close) when firmware_version is falsy."""
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=None)
+
+        reader = self._make_reader()
+
+        with patch("time.sleep"):
+            result = reader._connect_blocking()
+
+        assert result is False
+        assert reader._reader is None
+
+    def test_connect_blocking_serial_exception_returns_false(self):
+        """Should return False when Serial() raises an exception."""
+        import sys
+        serial_mock = MagicMock()
+        serial_mock.Serial.side_effect = Exception("port busy")
+        sys.modules["serial"] = serial_mock
+
+        reader = self._make_reader()
+
+        with patch("time.sleep"):
+            result = reader._connect_blocking()
+
+        assert result is False
+
+    def test_connect_blocking_sam_exception_returns_false(self):
+        """Should return False when SAM_configuration raises."""
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod, pn532_instance = self._make_pn532_mock(sam_ok=False)
+
+        reader = self._make_reader()
+
+        with patch("time.sleep"):
+            result = reader._connect_blocking()
+
+        assert result is False
+
+    def test_connect_blocking_timer_fires_returns_false(self):
+        """When the threading.Timer fires before firmware_version returns, result is False."""
+        import sys, threading
+
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod = MagicMock()
+        pn532_instance = MagicMock()
+
+        reader = self._make_reader()
+
+        def _slow_firmware(inst):
+            # Simulate timeout firing during the firmware_version property access
+            inst.timed_out[0] = True
+
+        # Patch Timer so the callback fires immediately when start() is called
+        real_timer_init = threading.Timer.__init__
+
+        class ImmediateTimer:
+            def __init__(self, interval, fn):
+                self._fn = fn
+
+            def start(self):
+                # Mark timed_out via the reader's uart close path
+                reader.uart = MagicMock()
+                reader.uart.close = MagicMock()
+                # Simulate what _on_timeout() does
+                reader._reader = None  # close() clears _reader
+                if reader.uart:
+                    reader.uart.close()
+                    reader.uart = None
+
+            def cancel(self):
+                pass
+
+        pn532_instance.firmware_version = (1, 6, 7, 0)
+        pn532_mod.PN532_UART.return_value = pn532_instance
+        sys.modules["adafruit_pn532.uart"] = pn532_mod
+
+        with patch("threading.Timer", ImmediateTimer), patch("time.sleep"):
+            # After ImmediateTimer.start() runs, timed_out[0] stays False but
+            # _reader is None — the real scenario checks timed_out[0].
+            # Use a simpler approach: patch timed_out list via a real Timer that
+            # fires immediately by using a 0-second interval.
+            pass  # The real test is below using a side-effect approach
+
+        # Simpler, more direct test: manually invoke _connect_blocking and
+        # manipulate the internal timed_out flag via a side-effect on firmware_version
+        pn532_instance2 = MagicMock()
+        pn532_mod2 = MagicMock()
+        pn532_mod2.PN532_UART.return_value = pn532_instance2
+        sys.modules["adafruit_pn532.uart"] = pn532_mod2
+
+        reader2 = self._make_reader()
+        _timed_out_ref = []
+
+        def _firmware_with_timeout():
+            # Simulate the timer firing during this property access
+            if _timed_out_ref:
+                _timed_out_ref[0][0] = True
+            return (1, 6, 7, 0)
+
+        # We need access to the internal timed_out list; use a patched Timer
+        captured_fn = []
+
+        class CapturingTimer:
+            def __init__(self, interval, fn):
+                captured_fn.append(fn)
+
+            def start(self):
+                # Fire the timeout callback immediately
+                captured_fn[0]()
+
+            def cancel(self):
+                pass
+
+        pn532_instance2.firmware_version = (1, 6, 7, 0)
+
+        with patch("threading.Timer", CapturingTimer), patch("time.sleep"):
+            result2 = reader2._connect_blocking()
+
+        # Timer fired immediately (before timed_out check) — result should be False
+        assert result2 is False
+
+    def test_connect_blocking_timer_cancelled_on_success(self):
+        """timer.cancel() must be called on the success path."""
+        import threading
+
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=(1, 6, 7, 0))
+
+        cancel_calls = []
+
+        class TrackingTimer:
+            def __init__(self, interval, fn):
+                pass
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                cancel_calls.append(1)
+
+        reader = self._make_reader()
+
+        with patch("threading.Timer", TrackingTimer), patch("time.sleep"):
+            result = reader._connect_blocking()
+
+        assert result is True
+        # cancel() is called in the try block AND the finally block
+        assert len(cancel_calls) >= 1
+
+    def test_connect_blocking_timer_cancelled_on_failure(self):
+        """timer.cancel() must also be called when connect fails (finally block)."""
+        import threading
+
+        serial_mock, uart_instance = self._make_serial_mock()
+        pn532_mod, pn532_instance = self._make_pn532_mock(firmware=None)
+
+        cancel_calls = []
+
+        class TrackingTimer:
+            def __init__(self, interval, fn):
+                pass
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                cancel_calls.append(1)
+
+        reader = self._make_reader()
+
+        with patch("threading.Timer", TrackingTimer), patch("time.sleep"):
+            result = reader._connect_blocking()
+
+        assert result is False
+        assert len(cancel_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_connect_dispatches_to_blocking(self):
+        """async connect() should delegate to _connect_blocking via asyncio.to_thread."""
+        reader = self._make_reader()
+
+        with patch("os.path.exists", return_value=True), \
+             patch.object(reader, "_connect_blocking", return_value=True) as mock_blocking:
+            result = await reader.connect()
+
+        assert result is True
+        mock_blocking.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_returns_false_if_device_missing(self):
+        """async connect() should return False immediately if device path doesn't exist."""
+        reader = self._make_reader()
+
+        with patch("os.path.exists", return_value=False), \
+             patch.object(reader, "_connect_blocking") as mock_blocking:
+            result = await reader.connect()
+
+        assert result is False
+        mock_blocking.assert_not_called()
+
+
 class TestReaderFactory:
     """Tests for reader factory with multiple backends."""
 
