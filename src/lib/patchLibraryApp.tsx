@@ -1,5 +1,6 @@
 import { routerHook } from "@decky/api";
 import GamePagePairer from "../GamePagePairer";
+import ViewedAppReporter from "../ViewedAppReporter";
 
 // simple route patch that wraps the entire tree and injects our pairer
 // component at a fixed position.  this avoids any DOM hunting and ensures the
@@ -19,6 +20,9 @@ export default function patchLibraryApp() {
       const patchedChildren = (
         <>
           {tree}
+          {/* Renders nothing; tells the Quick Access panel which game is on
+              screen so "Pair Current Game" works without one running. */}
+          <ViewedAppReporter />
           <div style={{ position: "absolute", top: 40, right: 15, zIndex: 10000 }}>
             <GamePagePairer embedded />
           </div>

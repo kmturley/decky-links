@@ -75,12 +75,24 @@ export enum MediaEventKind {
 // import them.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** A game the user is currently *looking at* (its detail page), which may or
+ * may not be running. Published by the library route patch so the Quick Access
+ * panel can offer to pair it without a game having to be launched first. */
+export interface ViewedApp {
+  appId: string;
+  /** Fully resolved launch URI, e.g. steam://run/… or steam://rungameid/… */
+  launchTarget: string;
+  name?: string;
+}
+
 export interface SharedState {
   settings: Settings | null;
   readerStatus: ReaderStatus;
   tagUid: string | null;
   tagUri: string | null;
   activeAppId: string | null;
+  /** Game detail page currently open, or null when not on one. */
+  viewedApp: ViewedApp | null;
   pairing: boolean;
   sourceStatuses: SourceStatus[];
 }
@@ -99,6 +111,7 @@ export const sharedState: SharedState = {
   tagUid: null,
   tagUri: null,
   activeAppId: null,
+  viewedApp: null,
   pairing: false,
   sourceStatuses: [],
 };
@@ -109,6 +122,21 @@ export const sharedState: SharedState = {
 export const activeAppIdRef = { current: null as string | null };
 export const tagUidRef = { current: null as string | null };
 export const settingsRef = { current: null as any };
+export const viewedAppRef = { current: null as ViewedApp | null };
+
+/** Publish (or clear) the game detail page currently on screen.
+ *
+ * Called by the library route patch. Skips the notify when nothing actually
+ * changed, so navigating within the same app page doesn't churn the panel. */
+export function setViewedApp(app: ViewedApp | null) {
+  const prev = sharedState.viewedApp;
+  if (prev?.appId === app?.appId && prev?.launchTarget === app?.launchTarget) {
+    return;
+  }
+  sharedState.viewedApp = app;
+  viewedAppRef.current = app;
+  notifySubscribers();
+}
 
 // Subscription system used by the old useSharedState hook.
 type Listener = () => void;

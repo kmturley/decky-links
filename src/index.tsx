@@ -42,6 +42,30 @@ function getMainRunningApp() {
   return typeof appRaw === "function" ? (appRaw as any)() : appRaw;
 }
 
+/** The game "Pair Current Game" should target.
+ *
+ * A running game wins; otherwise fall back to the detail page the user is
+ * looking at. Pairing a card for a game you are browsing is the common case —
+ * requiring it to be running first made the button useless most of the time.
+ * Returns null when neither is available, which also drives the disabled state.
+ */
+function resolvePairTarget(): { uri: string; label: string } | null {
+  const app = getMainRunningApp();
+  if (app && app.appid && app.appid !== "0") {
+    const uri = resolveRungameidTarget(String(app.appid));
+    if (uri) {
+      return { uri, label: app.display_name || `App ${app.appid}` };
+    }
+  }
+
+  const viewed = sharedState.viewedApp;
+  if (viewed?.launchTarget) {
+    return { uri: viewed.launchTarget, label: viewed.name || `App ${viewed.appId}` };
+  }
+
+  return null;
+}
+
 async function triggerPairing() {
   if (sharedState.pairing) {
     await cancelPairing();
@@ -50,17 +74,18 @@ async function triggerPairing() {
     return;
   }
 
-  const app = getMainRunningApp();
-  if (!app || !app.appid || app.appid === "0") {
-    toaster.toast({ title: "Pairing Error", body: "No active game detected to pair.", critical: true });
+  const target = resolvePairTarget();
+  if (!target) {
+    // The button is disabled in this state, so this is a safety net only.
+    toaster.toast({
+      title: "Pairing Error",
+      body: "Open a game's page or start a game first.",
+      critical: true,
+    });
     return;
   }
 
-  const uri = resolveRungameidTarget(String(app.appid));
-  if (!uri) {
-    toaster.toast({ title: "Pairing Error", body: "Invalid app ID.", critical: true });
-    return;
-  }
+  const uri = target.uri;
   console.info(`[ Decky Links ] Starting pairing for: ${uri}`);
   const ok = await startPairing(uri);
   if (!ok) {
@@ -163,6 +188,15 @@ const Content: FC = () => {
   const serialSettings = state.settings.sources.serial;
   const fileWatchSettings = state.settings.sources.file_watch;
 
+  // Recomputed each render: sharedState.viewedApp changes trigger a re-render
+  // via notifySubscribers(), so this stays in step with what's on screen.
+  const pairTarget = resolvePairTarget();
+  const gameStatusValue = state.activeAppId
+    ? `Playing ${state.activeAppId}`
+    : state.viewedApp
+      ? `Viewing ${state.viewedApp.name || state.viewedApp.appId}`
+      : "Not Playing";
+
   return (
     <PanelSection>
       <PanelSection title="Status">
@@ -199,16 +233,25 @@ const Content: FC = () => {
         <StatusRow
           icon={<FaGamepad />}
           label="Game"
-          value={state.activeAppId ? `Playing ${state.activeAppId}` : "Not Playing"}
-          active={!!state.activeAppId}
+          value={gameStatusValue}
+          active={!!state.activeAppId || !!state.viewedApp}
         />
         <ButtonItem
           layout="below"
           onClick={triggerPairing}
-          disabled={!state.readerStatus.connected}
+          disabled={!state.readerStatus.connected || !pairTarget}
         >
-          {state.pairing ? "Cancel Pairing" : "Pair Current Game"}
+          {state.pairing
+            ? "Cancel Pairing"
+            : pairTarget
+              ? `Pair ${pairTarget.label}`
+              : "Pair Current Game"}
         </ButtonItem>
+        {!state.pairing && state.readerStatus.connected && !pairTarget && (
+          <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
+            Open a game's page to pair it.
+          </div>
+        )}
       </PanelSection>
 
       <PanelSection title="Settings">
