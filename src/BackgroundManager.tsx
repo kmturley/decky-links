@@ -17,7 +17,7 @@ import {
   SourceType,
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
-import { extractComparableAppIdFromRungameid } from "./lib/steamIds";
+import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -35,20 +35,6 @@ function toSignedInt32String(id: string): string {
 function getMainRunningApp() {
   const appRaw = Router.MainRunningApp;
   return typeof appRaw === "function" ? (appRaw as any)() : appRaw;
-}
-
-function parseSteamAppIdFromUri(uri: string | null): string | null {
-  if (!uri) {
-    return null;
-  }
-  if (uri.startsWith(STEAM_RUN_PREFIX)) {
-    return uri.replace(STEAM_RUN_PREFIX, "").split("/")[0] || null;
-  }
-  if (uri.startsWith(STEAM_RUNGAMEID_PREFIX)) {
-    const value = uri.replace(STEAM_RUNGAMEID_PREFIX, "").split("/")[0] || null;
-    return value ? extractComparableAppIdFromRungameid(value) : null;
-  }
-  return null;
 }
 
 function extractRungameidFromUri(uri: string | null): string | null {

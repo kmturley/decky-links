@@ -875,9 +875,13 @@ class Plugin:
         return True
 
     async def get_reader_status(self):
+        # Polled twice a second by the frontend, and reached before _main()
+        # finishes (or at all, if _main raised), so it must never throw —
+        # an exception here becomes a steady stream of RPC errors.
+        reader = self.nfc_source.reader if self.nfc_source else None
         return {
-            "connected": self.nfc_source.reader is not None,
-            "path":      self.settings.get("device_path"),
+            "connected": reader is not None,
+            "path":      self.settings.get("device_path") if self.settings else None,
             "source_type": SourceType.NFC.value,
         }
 
@@ -909,7 +913,16 @@ class Plugin:
         uid_hex = uid.hex().upper()
         self.current_tag_uid = uid_hex
         self.current_tag_uri = uri
-        self.current_tag_meta = self.nfc_source._classify_tag(uid) if uid else None
+        # Classification needs a live reader; without one this is still a useful
+        # debug helper, just without metadata.
+        if uid and self.nfc_source and self.nfc_source.reader:
+            try:
+                self.current_tag_meta = self.nfc_source._classify_tag(uid)
+            except Exception as e:
+                decky.logger.warning(f"simulate_tag: classification failed: {e}")
+                self.current_tag_meta = None
+        else:
+            self.current_tag_meta = None
         await decky.emit("tag_detected", {"uid": uid_hex})
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 

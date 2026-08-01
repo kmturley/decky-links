@@ -35,7 +35,7 @@ import { KeyManagementPanel } from "./KeyManagementPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
-import { resolveRungameidTarget } from "./lib/steamIds";
+import { resolveRungameidTarget, isSameLaunchTarget } from "./lib/steamIds";
 
 function getMainRunningApp() {
   const appRaw = Router.MainRunningApp;
@@ -191,6 +191,13 @@ const Content: FC = () => {
   // Recomputed each render: sharedState.viewedApp changes trigger a re-render
   // via notifySubscribers(), so this stays in step with what's on screen.
   const pairTarget = resolvePairTarget();
+
+  // A card on the reader that already points at this game needs no rewrite.
+  // Compared by app id rather than string: the card may hold steam://run/400
+  // while the button would write steam://rungameid/400 — same game.
+  const alreadyPaired = !!(
+    state.tagUid && pairTarget && isSameLaunchTarget(state.tagUri, pairTarget.uri)
+  );
   const gameStatusValue = state.activeAppId
     ? `Playing ${state.activeAppId}`
     : state.viewedApp
@@ -239,17 +246,28 @@ const Content: FC = () => {
         <ButtonItem
           layout="below"
           onClick={triggerPairing}
-          disabled={!state.readerStatus.connected || !pairTarget}
+          // Never disable while pairing — the button is the only way to cancel.
+          disabled={
+            !state.readerStatus.connected ||
+            (!state.pairing && (!pairTarget || alreadyPaired))
+          }
         >
           {state.pairing
             ? "Cancel Pairing"
-            : pairTarget
-              ? `Pair ${pairTarget.label}`
-              : "Pair Current Game"}
+            : alreadyPaired
+              ? "Already Paired"
+              : pairTarget
+                ? `Pair ${pairTarget.label}`
+                : "Pair Current Game"}
         </ButtonItem>
         {!state.pairing && state.readerStatus.connected && !pairTarget && (
           <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
             Open a game's page to pair it.
+          </div>
+        )}
+        {!state.pairing && alreadyPaired && (
+          <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
+            This card already launches {pairTarget?.label}.
           </div>
         )}
       </PanelSection>
