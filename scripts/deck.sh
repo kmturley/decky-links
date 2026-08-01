@@ -80,18 +80,33 @@ echo
 echo "── python ──"
 python3 -V
 echo
+# -type d matters: a leftover "Decky Links.zip" sits alongside the extracted
+# "Decky-Links" directory and sorts first (space < '-'), so a plain glob picks
+# the archive and every check below silently inspects a path inside nothing.
+plugin_dir=$(find "$HOME/homebrew/plugins" -maxdepth 1 -type d -iname "*decky*link*" 2>/dev/null | head -1)
+
 echo "── plugin dir ──"
-ls -d "$HOME"/homebrew/plugins/*[Dd]ecky*[Ll]ink* 2>/dev/null || echo "  not installed"
+if [ -n "$plugin_dir" ]; then
+    echo "  $plugin_dir"
+else
+    echo "  not installed"
+fi
 echo
 echo "── log dirs ──"
 ls -1 "$HOME"/homebrew/logs/ 2>/dev/null || echo "  none"
 echo
+echo "── python extension tags in py_modules (must match the python above) ──"
+if [ -n "$plugin_dir" ]; then
+    find "$plugin_dir/py_modules" -name "*.cpython-*.so" -printf "%f\n" 2>/dev/null \
+        | sed 's/.*\(cpython-[0-9]*\).*/  \1/' | sort -u || echo "  none found"
+fi
+echo
 echo "── mach-o contamination check (should be empty) ──"
-find "$HOME"/homebrew/plugins/*[Dd]ecky*[Ll]ink*/py_modules \
-     \( -name "*darwin*.so" -o -name "*.dylib" \) 2>/dev/null || true
+if [ -n "$plugin_dir" ]; then
+    find "$plugin_dir/py_modules" \( -name "*darwin*.so" -o -name "*.dylib" \) 2>/dev/null || true
+fi
 echo
 echo "── import check ──"
-plugin_dir=$(ls -d "$HOME"/homebrew/plugins/*[Dd]ecky*[Ll]ink* 2>/dev/null | head -1)
 if [ -n "$plugin_dir" ]; then
     PYTHONPATH="$plugin_dir/py_modules" python3 - <<'PY'
 for mod in ("serial", "ndef", "adafruit_pn532.uart", "cryptography", "pyudev", "paho.mqtt.client"):
@@ -101,6 +116,8 @@ for mod in ("serial", "ndef", "adafruit_pn532.uart", "cryptography", "pyudev", "
     except Exception as e:
         print(f"  FAIL {mod}: {type(e).__name__}: {e}")
 PY
+else
+    echo "  skipped — plugin not installed"
 fi
 REMOTE
 }
