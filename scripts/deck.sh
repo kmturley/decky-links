@@ -118,10 +118,25 @@ else
     echo "  not installed"
 fi
 echo
-echo "── plugin process user (must be root to mount disks) ──"
-ps -eo user:16,pid,args 2>/dev/null | grep -i "[D]ecky Links" | head -3 || true
+echo "── plugin process (user must be root to mount disks) ──"
+ps -eo user:16,pid,args 2>/dev/null | grep -i "[D]ecky Links" | head -3 || echo "  not running"
 if [ -n "$plugin_dir" ]; then
     echo "  plugin.json flags: $(grep -A4 '"flags"' "$plugin_dir/plugin.json" 2>/dev/null | tr -d ' \n')"
+
+    # A deploy only copies files; the running process keeps executing the code
+    # it was spawned with — and its uid is fixed at spawn, so a "root" flag
+    # cannot take effect without a restart. Compare the two directly.
+    pid=$(pgrep -f "Decky Links" 2>/dev/null | head -1)
+    src_mtime=$(stat -c %Y "$plugin_dir/main.py" 2>/dev/null)
+    if [ -n "$pid" ] && [ -n "$src_mtime" ]; then
+        proc_start=$(stat -c %Y "/proc/$pid" 2>/dev/null)
+        echo "  main.py deployed: $(date -d @$src_mtime '+%F %T' 2>/dev/null)"
+        echo "  process started:  $(date -d @$proc_start '+%F %T' 2>/dev/null)"
+        if [ -n "$proc_start" ] && [ "$src_mtime" -gt "$proc_start" ]; then
+            echo "  *** STALE: deployed files are NEWER than the running process."
+            echo "      The old code is still running. Run: pnpm deck:restart"
+        fi
+    fi
 fi
 echo
 echo "── log dirs ──"

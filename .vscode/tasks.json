@@ -104,7 +104,12 @@
             "group": "none",
             "dependsOn": [
                 "copyzip",
-                "extractzip"
+                "extractzip",
+                // Decky's file watcher does not reliably pick up a deploy that
+                // rm -rf's the directory out from under it, and the uid a plugin
+                // runs as is fixed when its process spawns — so a "root" flag
+                // only takes effect after a real restart, never a hot reload.
+                "restartdecky"
             ],
             "problemMatcher": []
         },

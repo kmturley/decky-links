@@ -289,7 +289,13 @@ class Plugin:
     # --- Lifecycle ---
 
     async def _main(self):
-        decky.logger.info("Decky Links starting...")
+        # euid is the ground truth for the plugin.json "root" flag: it is fixed
+        # when this process spawns, so a deploy without a loader restart leaves
+        # it stale. Mounting storage media fails outright when this is not 0.
+        decky.logger.info(
+            f"Decky Links starting... (euid={os.geteuid()}, "
+            f"{'root — storage mounts available' if os.geteuid() == 0 else 'unprivileged — storage mounts will fail'})"
+        )
         self.settings = SettingsManager(
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
         )
