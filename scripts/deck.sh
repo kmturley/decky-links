@@ -80,6 +80,18 @@ echo
 echo "── USB serial adapters ──"
 lsusb 2>/dev/null | grep -iE "ch34|cp210|ftdi|prolific|acr|pn53" || echo "  none matched"
 echo
+echo "── serial port identity (for the trigger registry key) ──"
+# A stable key needs a serial number; CH340 bridges often have none, in which
+# case we must fall back to the physical port path (ID_PATH / location).
+for dev in /dev/ttyUSB* /dev/ttyACM*; do
+    [ -e "$dev" ] || continue
+    echo "  $dev"
+    udevadm info --query=property --name="$dev" 2>/dev/null \
+        | grep -E "^(ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT|ID_SERIAL|ID_PATH|ID_USB_INTERFACE_NUM)=" \
+        | sed 's/^/      /'
+done
+[ -e /dev/ttyUSB0 ] || [ -e /dev/ttyACM0 ] || echo "  no serial devices present"
+echo
 echo "── block devices ──"
 lsblk -o NAME,PATH,SIZE,TYPE,RM,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null || echo "  lsblk unavailable"
 echo
@@ -94,7 +106,8 @@ for dev in /dev/sd? /dev/sr? /dev/fd?; do
     # size is in 512-byte sectors; 0 means the drive is present but has no media
     echo "  $dev  sectors=$size removable=$removable$([ "$size" = "0" ] && echo '  <-- NO MEDIA INSERTED')"
     udevadm info --query=property --name="$dev" 2>/dev/null \
-        | grep -E "^(ID_BUS|ID_TYPE|ID_FS_TYPE|ID_MODEL|ID_VENDOR)=" | sed 's/^/      /'
+        | grep -E "^(ID_BUS|ID_TYPE|ID_FS_TYPE|ID_FS_UUID|ID_MODEL|ID_VENDOR|ID_SERIAL|ID_SERIAL_SHORT|ID_PATH)=" \
+        | sed 's/^/      /'
 done
 [ "$found_removable" = "0" ] && echo "  none present"
 echo
