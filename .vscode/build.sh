@@ -4,6 +4,14 @@ set -euo pipefail
 CLI_LOCATION="$(pwd)/cli"
 echo "Building plugin in $(pwd)"
 
+# Must match the Python that decky-loader runs plugins with on the Deck.
+# SteamOS ships 3.13.5 as of 2026-07. Native extensions are tagged with the
+# interpreter version (e.g. _cffi_backend.cpython-313-x86_64-linux-gnu.so) and
+# will NOT load under a different one, so a mismatch here silently disables
+# cryptography, Pillow and pyzbar on-device.
+# Check with: ssh deck@steamdeck.local python3 -V   (or `pnpm deck:status`)
+DECK_PYTHON="${DECK_PYTHON:-3.13}"
+
 # ---------------------------------------------------------------------------
 # Python dependencies
 #
@@ -17,7 +25,7 @@ echo "Building plugin in $(pwd)"
 # is what broke NFC detection previously. Run pip inside a linux/amd64
 # container so the wheels always match the target.
 # ---------------------------------------------------------------------------
-echo "Installing Linux x86_64 Python dependencies into py_modules/..."
+echo "Installing Linux x86_64 Python ${DECK_PYTHON} dependencies into py_modules/..."
 rm -rf py_modules
 mkdir -p py_modules
 # py_modules/ is gitignored apart from this tracked placeholder, which keeps the
@@ -29,13 +37,23 @@ docker run --rm \
     --platform linux/amd64 \
     -v "$(pwd)":/plugin \
     -w /plugin \
-    python:3.11-slim \
+    "python:${DECK_PYTHON}-slim" \
     pip install -r requirements.txt --target=./py_modules --upgrade
 
 # Guard: fail loudly rather than shipping macOS binaries to the Deck again.
 if find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) | grep -q .; then
     echo "ERROR: macOS binaries found in py_modules/ — refusing to build." >&2
     find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) >&2
+    exit 1
+fi
+
+# Guard: every version-tagged extension must match the Deck's interpreter.
+# abi3 wheels are version-independent and are correctly ignored here.
+expected_tag="cpython-${DECK_PYTHON//./}"
+if mismatched=$(find py_modules -name "*.cpython-*.so" ! -name "*${expected_tag}*" | grep .); then
+    echo "ERROR: extensions built for the wrong Python (expected ${expected_tag}):" >&2
+    echo "$mismatched" >&2
+    echo "Set DECK_PYTHON to the Deck's version (ssh deck@… python3 -V)." >&2
     exit 1
 fi
 
