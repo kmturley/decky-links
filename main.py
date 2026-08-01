@@ -128,13 +128,14 @@ class SettingsManager:
                 },
                 "storage": {
                     "enabled": True,
-                    # Per-category switches. Floppy and optical are collectible
-                    # media people deliberately attach; USB sticks and memory
-                    # cards usually hold the user's own data, so we leave them
-                    # alone unless asked. See DriveKind in storage_source.py.
+                    # Per-category switches, off unless the drive exists to be a
+                    # trigger. A floppy drive on a Steam Deck is there on
+                    # purpose; optical, USB and card readers are general storage
+                    # holding the user's own data. Must stay in step with
+                    # DEFAULT_DRIVE_KINDS in storage_source.py.
                     "drive_kinds": {
                         "floppy": True,
-                        "optical": True,
+                        "optical": False,
                         "usb": False,
                         "flash": False,
                     },

@@ -1790,6 +1790,20 @@ class TestTargetedPairing:
         assert plugin.pairing_source_id is None
 
 
+class TestDriveKindDefaults:
+
+    def test_plugin_defaults_match_the_source(self, tmp_path):
+        """The default settings dict in main.py and DEFAULT_DRIVE_KINDS in
+        storage_source.py are the same policy written twice. A source created
+        from a settings blob never consults its own defaults, so a drift here
+        is silent: the panel would show a category on that the source treats
+        as off."""
+        from main import SettingsManager
+        from sources.storage_source import DEFAULT_DRIVE_KINDS
+        defaults = SettingsManager(str(tmp_path / "s.json")).settings
+        assert defaults["sources"]["storage"]["drive_kinds"] == DEFAULT_DRIVE_KINDS
+
+
 # ── The registry keeps a medium's drive category ─────────────────────────────
 
 class TestDriveKindPersistence:

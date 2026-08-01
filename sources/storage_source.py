@@ -50,12 +50,13 @@ class DriveKind:
     USB = "usb"
 
 
-# Floppies and optical discs are collectible media people deliberately attach;
-# USB sticks and memory cards usually hold the user's own data and should be
-# left alone unless asked for.
+# Off by default unless the drive exists to be a trigger. A floppy drive on a
+# Steam Deck is there on purpose; optical, USB and card readers are general
+# storage holding the user's own data, and mounting those uninvited is both a
+# surprise and a delay. Every category is one toggle away in the panel.
 DEFAULT_DRIVE_KINDS = {
     DriveKind.FLOPPY: True,
-    DriveKind.OPTICAL: True,
+    DriveKind.OPTICAL: False,
     DriveKind.USB: False,
     DriveKind.FLASH: False,
 }

@@ -653,16 +653,14 @@ class TestDriveKinds:
         from sources.storage_source import DriveKind
         assert self._classify({}) == DriveKind.USB
 
-    def test_floppy_and_optical_are_on_by_default(self):
+    def test_only_floppy_is_on_by_default(self):
+        """A floppy drive on a Steam Deck was attached to be a trigger. Every
+        other category is general storage holding the user's own data, and
+        mounting it uninvited is both a surprise and a delay."""
         from sources.storage_source import StorageSource, DriveKind
         src = StorageSource({}, logger=MagicMock())
         assert src._drive_kind_enabled(DriveKind.FLOPPY) is True
-        assert src._drive_kind_enabled(DriveKind.OPTICAL) is True
-
-    def test_usb_and_flash_are_off_by_default(self):
-        """Someone's thumb drive is their data, not a game trigger."""
-        from sources.storage_source import StorageSource, DriveKind
-        src = StorageSource({}, logger=MagicMock())
+        assert src._drive_kind_enabled(DriveKind.OPTICAL) is False
         assert src._drive_kind_enabled(DriveKind.USB) is False
         assert src._drive_kind_enabled(DriveKind.FLASH) is False
 

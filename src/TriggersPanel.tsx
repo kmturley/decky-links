@@ -156,9 +156,13 @@ export function mediaStateFor(
     return { text: `Empty ${row.noun}`, action: target ? "Pair" : null, dim: false };
   }
   if (target && isSameLaunchTarget(medium.uri, target.uri)) {
-    return { text: `${target.label} ✓`, action: null, dim: false };
+    // No button and no tick: the absent button already says "nothing to do
+    // here", and the row names the game it is paired to.
+    return { text: target.label, action: null, dim: false };
   }
-  return { text: launchTargetName(medium.uri), action: target ? "Re-pair" : null, dim: false };
+  // "Pair", not "Re-pair" — the action is identical either way, and the row
+  // already shows what would be overwritten.
+  return { text: launchTargetName(medium.uri), action: target ? "Pair" : null, dim: false };
 }
 
 const MediaRow: FC<{
@@ -194,6 +198,9 @@ const MediaRow: FC<{
         icon={icon}
         label={state.text}
         layout="inline"
+        // Without this the button stretches to fill the row and overhangs the
+        // panel's right padding, which every other control respects.
+        childrenContainerWidth="min"
         bottomSeparator="standard"
         onClick={() => void pairRow(row, target!)}
       >
@@ -221,7 +228,7 @@ export const TriggersPanel: FC<{
         <Field
           icon={<FaGamepad />}
           label={target ? target.label : "No game selected"}
-          description={target ? "Pair buttons target this game" : "Open a game to pair"}
+          description={target ? "Game to be paired" : "Open a game to pair"}
           bottomSeparator="thick"
           focusable={false}
           highlightOnFocus={false}
@@ -240,30 +247,36 @@ export const TriggersPanel: FC<{
         </PanelSectionRow>
       )}
 
-      {TRIGGER_ROWS.map((row) => {
+      {/* Flattened deliberately: a wrapper element between PanelSection and
+          PanelSectionRow sits in the middle of Steam's own child selectors, so
+          rows inside one lose the panel's horizontal padding and run to the
+          edge of the screen. Keys go on the rows themselves instead. */}
+      {TRIGGER_ROWS.flatMap((row) => {
         const status = statusFor(row, statuses);
         const enabled = isRowEnabled(row, status);
         const connected = isRowConnected(row, status);
-        return (
-          <div key={row.key}>
-            <PanelSectionRow>
-              <ToggleField
-                label={row.label}
-                checked={enabled}
-                bottomSeparator={enabled ? "none" : "standard"}
-                onChange={(v: boolean) => void toggleRow(row, v, status)}
-              />
-            </PanelSectionRow>
-            {enabled && (
-              <MediaRow
-                row={row}
-                medium={mediumFor(row, media)}
-                connected={connected}
-                target={target}
-              />
-            )}
-          </div>
-        );
+        const rows = [
+          <PanelSectionRow key={row.key}>
+            <ToggleField
+              label={row.label}
+              checked={enabled}
+              bottomSeparator={enabled ? "none" : "standard"}
+              onChange={(v: boolean) => void toggleRow(row, v, status)}
+            />
+          </PanelSectionRow>,
+        ];
+        if (enabled) {
+          rows.push(
+            <MediaRow
+              key={`${row.key}-media`}
+              row={row}
+              medium={mediumFor(row, media)}
+              connected={connected}
+              target={target}
+            />,
+          );
+        }
+        return rows;
       })}
     </PanelSection>
   );
