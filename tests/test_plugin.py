@@ -1560,3 +1560,51 @@ class TestPairingUriSync:
         assert plugin.current_tag_uri is None
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "uri_detected" not in emitted
+
+
+# ── Media problems reported to the panel ─────────────────────────────────────
+
+class TestUnreadableMediaReporting:
+    """A blank disk and an unreadable one both carry no URI, but only one of
+    them is the user's problem to fix — the panel has to tell them apart."""
+
+    def _storage_event(self, payload):
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.STORAGE,
+            source_id="storage:udev",
+            media_id="/dev/sda",
+            uri="",
+            payload=payload,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unreadable_media_is_flagged(self, plugin, mock_decky):
+        event = self._storage_event({"unreadable": True, "error": "Format it as FAT."})
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(event)
+
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert calls["uri_detected"]["unreadable"] is True
+        assert calls["uri_detected"]["blank"] is False
+        assert calls["uri_detected"]["error"] == "Format it as FAT."
+
+    @pytest.mark.asyncio
+    async def test_blank_media_is_not_flagged_as_unreadable(self, plugin, mock_decky):
+        event = self._storage_event({"blank": True, "mountpoint": "/tmp/x"})
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(event)
+
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert calls["uri_detected"]["unreadable"] is False
+        assert calls["uri_detected"]["blank"] is True
+
+    @pytest.mark.asyncio
+    async def test_storage_media_does_not_clear_the_nfc_tag_uri(self, plugin, mock_decky):
+        """current_tag_* is the NFC view; an unreadable floppy must not wipe it."""
+        plugin.current_tag_uri = "steam://rungameid/400"
+        event = self._storage_event({"unreadable": True})
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(event)
+        assert plugin.current_tag_uri == "steam://rungameid/400"

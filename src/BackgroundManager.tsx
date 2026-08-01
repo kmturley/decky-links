@@ -226,6 +226,7 @@ export function startBackgroundManager(): () => void {
     // Absent source_type means NFC: that is the only source that predates the
     // field, and every other one sets it explicitly.
     sharedState.tagSourceType = (data.source_type as SourceType) ?? SourceType.NFC;
+    sharedState.mediaProblem = null;
     tagUidRef.current = data.uid;
     notifySubscribers();
   });
@@ -234,6 +235,7 @@ export function startBackgroundManager(): () => void {
     sharedState.tagUid = null;
     sharedState.tagUri = null;
     sharedState.tagSourceType = null;
+    sharedState.mediaProblem = null;
     tagUidRef.current = null;
     notifySubscribers();
   });
@@ -254,13 +256,26 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
-  const uriListener = addEventListener<[data: { uri: string | null, uid: string, paired?: boolean }]>("uri_detected", (data) => {
+  const uriListener = addEventListener<[data: {
+    uri: string | null, uid: string, paired?: boolean,
+    blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
+  }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
-    const normalizedUid = data.uid.toUpperCase();
+    // A storage media_id is a device node, whose case is meaningful.
+    const normalizedUid = sharedState.tagSourceType === SourceType.STORAGE
+      ? data.uid
+      : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
 
     sharedState.tagUri = uri;
     sharedState.tagUid = normalizedUid;
+    sharedState.mediaProblem = uri
+      ? null
+      : data.unreadable
+        ? { kind: "unreadable", error: data.error }
+        : data.blocked
+          ? { kind: "blocked" }
+          : { kind: "blank" };
     tagUidRef.current = normalizedUid;
     notifySubscribers();
 

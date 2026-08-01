@@ -21,6 +21,7 @@ import {
 
 const RETRY_DELAY_MS = 500;
 const MODAL_CLOSE_DELAY_MS = 1500;
+const MODAL_ERROR_CLOSE_DELAY_MS = 4000;
 const MODAL_WAITING_TEXT = "Waiting for media…";
 
 // Helper lifted from protondb plugin; used to watch for fullscreen mode so we
@@ -222,6 +223,23 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     })();
   }, [modalVisible, launchTarget]);
 
+  // A medium was presented — say so immediately. Mounting a floppy takes
+  // several seconds, during which an unchanged "insert a disk" prompt looks
+  // like the insert was simply not noticed.
+  useEffect(() => {
+    if (!modalVisible) return;
+    const listener = addEventListener<[data: { uid: string; source_type?: string }]>(
+      "tag_detected",
+      (data) => {
+        if (!data?.uid) return;
+        const noun = mediumNoun(data.source_type ?? "nfc");
+        const label = data.uid.replace(/^\/dev\//, "");
+        setStatusMessage(`Writing to ${noun} ${label}…`);
+      }
+    );
+    return () => removeEventListener("tag_detected", listener);
+  }, [modalVisible]);
+
   // listen for pairing results so we can show status and close the modal
   useEffect(() => {
     const listener = addEventListener<[data: { success: boolean; uid: string; error?: string; source_type?: string }]>(
@@ -237,9 +255,11 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
             : `Pairing failed: ${data.error || "unknown"}`
         );
         clearTimer(modalCloseTimerRef);
-        modalCloseTimerRef.current = window.setTimeout(() => {
-          void closeModal();
-        }, MODAL_CLOSE_DELAY_MS);
+        modalCloseTimerRef.current = window.setTimeout(
+          () => { void closeModal(); },
+          // A failure needs long enough to actually read.
+          data.success ? MODAL_CLOSE_DELAY_MS : MODAL_ERROR_CLOSE_DELAY_MS,
+        );
       }
     );
     return () => {

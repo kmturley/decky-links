@@ -539,10 +539,24 @@ class Plugin:
 
         # No URI — play error sound and emit null so frontend clears any stale URI
         if not uri:
-            decky.logger.info(f"No URI found on media {uid_hex}")
+            # Distinguish "blank, ready to pair" from "we could not read this at
+            # all". Both produce no URI, but only one of them is the user's
+            # problem to fix, and a disk that says nothing is indistinguishable
+            # from a broken plugin.
+            unreadable = bool(event.payload.get("unreadable"))
+            decky.logger.info(
+                f"{'Unreadable media' if unreadable else 'No URI found on media'} {uid_hex}"
+            )
             self._play_sound("error.flac")
-            self.current_tag_uri = None
-            await decky.emit("uri_detected", {"uri": None, "uid": uid_hex})
+            if is_nfc:
+                self.current_tag_uri = None
+            await decky.emit("uri_detected", {
+                "uri":   None,
+                "uid":   uid_hex,
+                "blank": not unreadable,
+                "unreadable": unreadable,
+                "error": event.payload.get("error"),
+            })
             self._set_state(PluginState.READY)
             return
 

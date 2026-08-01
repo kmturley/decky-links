@@ -307,13 +307,22 @@ class TestHandleDeviceAdded:
         assert src._our_mounts["/dev/sdb1"] == str(tmp_path)
 
     @pytest.mark.asyncio
-    async def test_no_mount_and_mount_fails_returns_none(self):
+    async def test_failed_mount_reports_unreadable_media(self):
+        """A disk that is physically in the drive but says nothing at all is
+        indistinguishable from a broken plugin. Report it so the panel can
+        explain why nothing happened."""
+        from sources.base import MediaEventKind
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=True):
                 with patch.object(src, "_mount_device", AsyncMock(return_value=None)):
                     event = await src._handle_device_added("/dev/sdb1")
-        assert event is None
+        assert event is not None
+        assert event.kind == MediaEventKind.LOAD
+        assert event.uri == ""
+        assert event.payload["unreadable"] is True
+        assert "FAT" in event.payload["error"]
+        assert event.payload.get("blank") is None, "unreadable is not the same as blank"
 
     @pytest.mark.asyncio
     async def test_fixed_disk_is_never_mounted(self):

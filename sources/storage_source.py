@@ -268,7 +268,21 @@ class StorageSource(MediaSource):
                     f"The most likely cause is an unformatted disk — format it with "
                     f"a FAT filesystem (mkfs.vfat). Not retrying until it is ejected."
                 )
-            return None
+            # Still report it. A disk that is physically in the drive but says
+            # nothing at all is indistinguishable from a broken plugin; the
+            # panel needs to be able to say *why* nothing happened.
+            self._active_media[devnode] = ""
+            return MediaEvent(
+                kind=MediaEventKind.LOAD,
+                source_type=SourceType.STORAGE,
+                source_id=self.source_id,
+                media_id=devnode,
+                uri="",
+                payload={
+                    "unreadable": True,
+                    "error": "No readable filesystem — format the disk as FAT.",
+                },
+            )
 
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
         payload = self._read_payload(payload_path)

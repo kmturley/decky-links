@@ -36,7 +36,7 @@ import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget, isSameLaunchTarget } from "./lib/steamIds";
-import { sourceIcon } from "./lib/sourceIcons";
+import { sourceIcon, mediumNoun, presentMediaVerb, joinWithOr } from "./lib/sourceIcons";
 
 function getMainRunningApp() {
   const appRaw = Router.MainRunningApp;
@@ -197,26 +197,42 @@ const Content: FC = () => {
   // Enabling the button without a medium meant pressing it just armed pairing
   // and waited, which reads as a no-op. The game-page icon still supports the
   // press-then-tap flow for when you want to arm it deliberately.
-  const cardPresent = !!state.tagUid;
+  const mediaPresent = !!state.tagUid;
   const isStorage = state.tagSourceType === SourceType.STORAGE;
-  const mediumNoun = isStorage ? "disk" : "card";
+  const noun = mediumNoun(state.tagSourceType ?? SourceType.NFC);
+
+  // Everything the panel says about media is phrased from what is actually
+  // connected. With only a floppy drive plugged in, telling the user to tap a
+  // card is simply wrong.
+  const pairableSources = state.sourceStatuses.filter((s) => s.can_pair && s.active);
+  const presentVerbs = joinWithOr(pairableSources.map((s) => presentMediaVerb(s.source_type)));
+  const waitingLabel = pairableSources.length > 0
+    ? `Waiting for ${joinWithOr(pairableSources.map((s) => mediumNoun(s.source_type)))}`
+    : "No Device Connected";
+
   const pairBlockedReason = !pairTarget
     ? "Open a game's page to pair it."
-    : !cardPresent
-      ? "Present a card or insert a disk to pair it."
-      : alreadyPaired
-        ? `This ${mediumNoun} already launches ${pairTarget.label}.`
-        : null;
+    : pairableSources.length === 0
+      ? "Connect an NFC reader or a disk drive to pair."
+      : state.mediaProblem?.kind === "unreadable"
+        ? state.mediaProblem.error || `This ${noun} could not be read.`
+        : !mediaPresent
+          ? `To pair, ${presentVerbs}.`
+          : alreadyPaired
+            ? `This ${noun} already launches ${pairTarget.label}.`
+            : null;
 
   const pairLabel = state.pairing
     ? "Cancel Pairing"
     : alreadyPaired
       ? "Already Paired"
-      : !cardPresent
-        ? "Waiting for Card"
-        : pairTarget
-          ? `Pair ${pairTarget.label}`
-          : "Pair Current Game";
+      : state.mediaProblem?.kind === "unreadable"
+        ? `Unreadable ${noun.charAt(0).toUpperCase()}${noun.slice(1)}`
+        : !mediaPresent
+          ? waitingLabel
+          : pairTarget
+            ? `Pair ${pairTarget.label}`
+            : "Pair Current Game";
 
   return (
     <PanelSection>
@@ -258,7 +274,14 @@ const Content: FC = () => {
         <StatusRow
           icon={<FaLink />}
           label="Url"
-          value={state.tagUri ?? "Empty"}
+          value={
+            state.tagUri
+              ?? (state.mediaProblem?.kind === "unreadable"
+                    ? "Unreadable"
+                    : state.mediaProblem?.kind === "blocked"
+                      ? "Blocked"
+                      : "Empty")
+          }
           active={!!state.tagUri}
         />
         <StatusRow

@@ -98,6 +98,9 @@ export interface SharedState {
   /** Which source is presenting the current medium — an NFC tag and a floppy
    *  both land in tagUid, but only one of them has sectors to manage. */
   tagSourceType: SourceType | null;
+  /** Why the current medium carries no URI. "blank" is ready to pair;
+   *  "unreadable" is the user's problem to fix and must say so. */
+  mediaProblem: { kind: "blank" | "unreadable" | "blocked"; error?: string } | null;
   activeAppId: string | null;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
@@ -119,6 +122,7 @@ export const sharedState: SharedState = {
   tagUid: null,
   tagUri: null,
   tagSourceType: null,
+  mediaProblem: null,
   activeAppId: null,
   viewedApp: null,
   pairing: false,
