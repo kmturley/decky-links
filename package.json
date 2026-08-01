@@ -14,7 +14,9 @@
     "stop": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl stop plugin_loader\" && ssh deck@steamdeck.local \"echo 'ssap' | sudo -S chown -R deck:deck /home/deck/homebrew/plugins/\"",
     "start": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl start plugin_loader\"",
     "watch": "rollup -c -w",
-    "test": ".venv/bin/pytest -q"
+    "test": ".venv/bin/pytest -q",
+    "deck:udev": "./scripts/deck.sh udev",
+    "deck:mount-test": "./scripts/deck.sh mount-test"
   },
   "repository": {
     "type": "git",

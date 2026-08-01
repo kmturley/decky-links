@@ -6,6 +6,8 @@
 #   ./scripts/deck.sh follow     Stream the plugin log live
 #   ./scripts/deck.sh loader     Stream the decky plugin_loader journal
 #   ./scripts/deck.sh status     Reader/device/plugin state snapshot
+#   ./scripts/deck.sh udev       Watch block-device udev events live
+#   ./scripts/deck.sh mount-test /dev/sdX   Try StorageSource's read-only mount
 #   ./scripts/deck.sh restart    Restart plugin_loader (reloads the plugin)
 #   ./scripts/deck.sh shell      Interactive SSH session
 #
@@ -77,6 +79,30 @@ echo
 echo "── USB serial adapters ──"
 lsusb 2>/dev/null | grep -iE "ch34|cp210|ftdi|prolific|acr|pn53" || echo "  none matched"
 echo
+echo "── block devices ──"
+lsblk -o NAME,PATH,SIZE,TYPE,RM,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null || echo "  lsblk unavailable"
+echo
+echo "── removable block devices (floppy/USB/optical) ──"
+found_removable=0
+for dev in /dev/sd? /dev/sr? /dev/fd?; do
+    [ -b "$dev" ] || continue
+    found_removable=1
+    name=$(basename "$dev")
+    size=$(cat "/sys/class/block/$name/size" 2>/dev/null || echo "?")
+    removable=$(cat "/sys/class/block/$name/removable" 2>/dev/null || echo "?")
+    # size is in 512-byte sectors; 0 means the drive is present but has no media
+    echo "  $dev  sectors=$size removable=$removable$([ "$size" = "0" ] && echo '  <-- NO MEDIA INSERTED')"
+    udevadm info --query=property --name="$dev" 2>/dev/null \
+        | grep -E "^(ID_BUS|ID_TYPE|ID_FS_TYPE|ID_MODEL|ID_VENDOR)=" | sed 's/^/      /'
+done
+[ "$found_removable" = "0" ] && echo "  none present"
+echo
+echo "── all USB devices ──"
+lsusb 2>/dev/null || echo "  lsusb unavailable"
+echo
+echo "── mounted filesystems of interest ──"
+grep -E "^/dev/(sd|sr|fd|mmcblk)" /proc/mounts 2>/dev/null || echo "  none mounted"
+echo
 echo "── python ──"
 python3 -V
 echo
@@ -122,6 +148,49 @@ fi
 REMOTE
 }
 
+cmd_udev() {
+    echo "Watching block-device udev events. Plug in the drive, then insert/eject a disk."
+    echo "Ctrl-C to stop."
+    echo
+    echo "What to look for: a drive being plugged in emits 'add'. Inserting a disk into"
+    echo "an already-connected drive usually emits 'change', NOT 'add' — StorageSource"
+    echo "must handle both or media insertion goes unnoticed."
+    echo
+    remote "echo '$DECK_PASS' | sudo -S udevadm monitor --udev --subsystem-match=block --property" 2>&1
+}
+
+cmd_mount_test() {
+    local dev="${1:-}"
+    if [ -z "$dev" ]; then
+        echo "usage: ./scripts/deck.sh mount-test /dev/sdX" >&2
+        exit 1
+    fi
+    echo "Attempting the same read-only mount StorageSource performs on $dev ..."
+    remote "echo '$DECK_PASS' | sudo -S bash -s" <<REMOTE
+dev="$dev"
+tmp=\$(mktemp -d /tmp/decky-links-XXXXXX)
+echo "── device state ──"
+name=\$(basename "\$dev")
+echo "  sectors: \$(cat /sys/class/block/\$name/size 2>/dev/null)"
+echo "── mount attempt ──"
+if mount -o ro "\$dev" "\$tmp" 2>&1; then
+    echo "  mounted at \$tmp"
+    echo "── contents ──"
+    ls -la "\$tmp" 2>&1 | head -20
+    echo "── decky-links.json ──"
+    if [ -f "\$tmp/decky-links.json" ]; then
+        cat "\$tmp/decky-links.json"
+    else
+        echo "  NOT PRESENT — StorageSource needs this file at the filesystem root"
+    fi
+    umount "\$tmp"
+else
+    echo "  mount FAILED (see error above)"
+fi
+rmdir "\$tmp" 2>/dev/null
+REMOTE
+}
+
 cmd_restart() {
     remote "echo '$DECK_PASS' | sudo -S systemctl restart plugin_loader" \
         && echo "plugin_loader restarted"
@@ -132,6 +201,8 @@ case "${1:-logs}" in
     follow)  cmd_follow ;;
     loader)  cmd_loader ;;
     status)  cmd_status ;;
+    udev)    cmd_udev ;;
+    mount-test) cmd_mount_test "${2:-}" ;;
     restart) cmd_restart ;;
     shell)   exec "${SSH[@]}" ;;
     *)

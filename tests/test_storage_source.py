@@ -618,3 +618,113 @@ class TestHasMedia:
 
         src._handle_device_removed("/dev/sdb1")
         assert src.has_media() is False
+
+
+# ── Media-change handling ────────────────────────────────────────────────────
+
+class TestMediaChangeEvents:
+    """Inserting a disk into an already-connected drive emits 'change'.
+
+    A USB floppy or card reader stays enumerated while its media comes and
+    goes, so 'add'/'remove' alone never fire for the disk itself.
+    """
+
+    def _source(self, tmp_path):
+        from sources.storage_source import StorageSource
+        src = StorageSource(settings={}, logger=None)
+        src._monitor = MagicMock()
+        return src
+
+    @pytest.mark.asyncio
+    async def test_change_with_media_emits_load(self, tmp_path, monkeypatch):
+        from sources.base import MediaEventKind
+        src = self._source(tmp_path)
+
+        device = MagicMock()
+        device.device_node = "/dev/sdb"
+        device.action = "change"
+        src._monitor.poll.return_value = device
+
+        monkeypatch.setattr(src, "_has_media", lambda d: True)
+        monkeypatch.setattr(src, "_find_mount_point", lambda d: "/mnt/floppy")
+        monkeypatch.setattr(
+            src, "_read_payload",
+            lambda p: {"version": 1, "uri": "steam://rungameid/400", "title": "", "icon": ""},
+        )
+
+        event = await src.poll()
+        assert event is not None
+        assert event.kind == MediaEventKind.LOAD
+        assert event.media_id == "/dev/sdb"
+        assert event.uri == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_change_without_media_emits_unload(self, tmp_path, monkeypatch):
+        from sources.base import MediaEventKind
+        src = self._source(tmp_path)
+        src._active_media["/dev/sdb"] = "steam://rungameid/400"
+
+        device = MagicMock()
+        device.device_node = "/dev/sdb"
+        device.action = "change"
+        src._monitor.poll.return_value = device
+
+        monkeypatch.setattr(src, "_has_media", lambda d: False)
+
+        event = await src.poll()
+        assert event is not None
+        assert event.kind == MediaEventKind.UNLOAD
+        assert event.media_id == "/dev/sdb"
+
+    @pytest.mark.asyncio
+    async def test_change_with_no_state_change_is_ignored(self, tmp_path, monkeypatch):
+        """Repeated change events for unchanged media must not re-fire."""
+        src = self._source(tmp_path)
+        src._active_media["/dev/sdb"] = "steam://rungameid/400"
+
+        device = MagicMock()
+        device.device_node = "/dev/sdb"
+        device.action = "change"
+        src._monitor.poll.return_value = device
+        monkeypatch.setattr(src, "_has_media", lambda d: True)
+
+        assert await src.poll() is None
+
+    @pytest.mark.asyncio
+    async def test_add_without_media_is_ignored(self, tmp_path, monkeypatch):
+        """A drive plugged in empty must not trigger a doomed mount."""
+        src = self._source(tmp_path)
+
+        device = MagicMock()
+        device.device_node = "/dev/sdb"
+        device.action = "add"
+        src._monitor.poll.return_value = device
+
+        monkeypatch.setattr(src, "_has_media", lambda d: False)
+        called = []
+        monkeypatch.setattr(src, "_handle_device_added", lambda d: called.append(d))
+
+        assert await src.poll() is None
+        assert called == []
+
+    def test_has_media_reads_sysfs_size(self, tmp_path, monkeypatch):
+        from sources.storage_source import StorageSource
+        src = StorageSource(settings={}, logger=None)
+
+        sysfs = tmp_path / "sys" / "class" / "block" / "sdb"
+        sysfs.mkdir(parents=True)
+        (sysfs / "size").write_text("2880\n")   # a 1.44MB floppy
+
+        import builtins
+        real_open = builtins.open
+
+        def fake_open(path, *a, **k):
+            if str(path) == "/sys/class/block/sdb/size":
+                return real_open(sysfs / "size", *a, **k)
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        assert src._has_media("/dev/sdb") is True
+
+        (sysfs / "size").write_text("0\n")      # drive present, no disk
+        assert src._has_media("/dev/sdb") is False

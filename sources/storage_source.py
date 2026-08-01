@@ -137,16 +137,54 @@ class StorageSource(MediaSource):
             return None
 
         action = device.action
+        has_media = self._has_media(devnode)
         if self._logger:
             self._logger.info(
-                f"StorageSource: udev event action={action} devnode={devnode}"
+                f"StorageSource: udev event action={action} devnode={devnode} "
+                f"media={has_media}"
             )
 
         if action == "add":
+            # A drive can appear with no disk in it (USB floppy, card reader).
+            # Mounting that just fails noisily; wait for the media-change event.
+            if not has_media:
+                if self._logger:
+                    self._logger.info(
+                        f"StorageSource: {devnode} added without media — "
+                        f"waiting for a disk"
+                    )
+                return None
             return self._handle_device_added(devnode)
+
         if action == "remove":
             return self._handle_device_removed(devnode)
+
+        if action == "change":
+            # Inserting or ejecting a disk in an already-connected drive emits
+            # 'change', not 'add'/'remove'. Without this branch a floppy drive
+            # left plugged in never reports anything at all.
+            if has_media and devnode not in self._active_media:
+                return self._handle_device_added(devnode)
+            if not has_media and devnode in self._active_media:
+                return self._handle_device_removed(devnode)
+            return None
+
         return None
+
+    def _has_media(self, devnode: str) -> bool:
+        """True when the drive actually holds media.
+
+        Reads the block device's size in 512-byte sectors from sysfs; an empty
+        drive reports 0. This is how a floppy or card reader with no disk is
+        distinguished from one with a disk in it.
+        """
+        name = os.path.basename(devnode)
+        try:
+            with open(f"/sys/class/block/{name}/size", "r") as f:
+                return int(f.read().strip()) > 0
+        except (OSError, ValueError):
+            # Unknown — assume media is present and let the mount decide.
+            return True
 
     # ── Device handling ────────────────────────────────────────────────
 
@@ -165,11 +203,24 @@ class StorageSource(MediaSource):
                 self._our_mounts[devnode] = mountpoint
 
         if not mountpoint:
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: {devnode} has media but could not be mounted "
+                    f"— check the filesystem is readable and the plugin runs as root"
+                )
             return None
 
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
         payload = self._read_payload(payload_path)
         if payload is None:
+            if self._logger:
+                # Silent rejection here is the most likely reason a working disk
+                # appears to do nothing, so name the exact file we wanted.
+                self._logger.info(
+                    f"StorageSource: {devnode} mounted at {mountpoint} but no valid "
+                    f"{PAYLOAD_FILENAME} at its root — ignoring. Expected JSON with "
+                    f'{{"version": 1, "uri": "steam://rungameid/..."}}'
+                )
             if mounted_by_us:
                 self._unmount_device(mountpoint)
                 self._our_mounts.pop(devnode, None)
@@ -287,12 +338,20 @@ class StorageSource(MediaSource):
     # ── Startup scan ───────────────────────────────────────────────────
 
     def _scan_existing_devices(self) -> None:
-        """Buffer LOAD events for any already-mounted block devices with a payload."""
+        """Buffer LOAD events for media already present when the plugin starts.
+
+        Covers two cases: filesystems the system has already mounted, and — the
+        common one in SteamOS game mode, which auto-mounts nothing — a disk
+        sitting in a drive that we have to mount ourselves.
+        """
+        seen = set()
+
+        # 1. Already-mounted filesystems.
         try:
             with open("/proc/mounts", "r") as f:
                 mounts = f.readlines()
         except OSError:
-            return
+            mounts = []
 
         for line in mounts:
             parts = line.split()
@@ -301,6 +360,7 @@ class StorageSource(MediaSource):
             devnode, mountpoint = parts[0], parts[1]
             if not self._is_relevant_device(devnode):
                 continue
+            seen.add(devnode)
 
             payload = self._read_payload(os.path.join(mountpoint, PAYLOAD_FILENAME))
             if payload is None:
@@ -320,3 +380,30 @@ class StorageSource(MediaSource):
                 uri=uri,
                 payload={k: v for k, v in payload.items() if k != "uri"},
             ))
+
+        # 2. Unmounted drives that currently hold media. Without this, a disk
+        # already in the drive at startup stays invisible until it is ejected
+        # and reinserted, because no udev event will ever fire for it.
+        if not self._context:
+            return
+        try:
+            for device in self._context.list_devices(subsystem="block"):
+                devnode = device.device_node
+                if not devnode or devnode in seen:
+                    continue
+                if not self._is_relevant_device(devnode):
+                    continue
+                if not self._has_media(devnode):
+                    continue
+                event = self._handle_device_added(devnode)
+                if event is not None:
+                    if self._logger:
+                        self._logger.info(
+                            f"StorageSource: media already inserted in {devnode}"
+                        )
+                    self._pending.append(event)
+        except Exception as e:
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: startup device scan failed: {e}"
+                )
