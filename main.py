@@ -35,7 +35,7 @@ from sources import (
     SourceManager,
 )
 from sources.nfc_source import NfcSource
-from sources.storage_source import StorageSource
+from sources.storage_source import StorageSource, DEFAULT_DRIVE_KINDS
 from sources.camera_source import CameraSource
 from sources.mqtt_source import MqttSource
 from sources.serial_source import SerialSource
@@ -120,6 +120,7 @@ class SettingsManager:
             "auto_close": False,
             "sources": {
                 "nfc": {
+                    "enabled": True,
                     "device_path": self._get_default_device_path(),
                     "baudrate": 115200,
                     "polling_interval": 0.5,
@@ -294,6 +295,8 @@ class Plugin:
         self.current_tag_uri = None
         self.running_game_id = None
         self.is_pairing = False
+        self.pairing_uri = None
+        self.pairing_source_id = None
         # source_id -> active medium. One entry per source; the authoritative
         # record of what is currently presented anywhere.
         self._active_media = {}
@@ -325,6 +328,7 @@ class Plugin:
         self.state           = PluginState.IDLE
         self.is_pairing      = False
         self.pairing_uri     = None
+        self.pairing_source_id = None
         self.running_game_id = None
         self.current_tag_uid = None
         self.current_tag_uri = None
@@ -511,6 +515,7 @@ class Plugin:
             if had_media:
                 await decky.emit("tag_removed", {
                     "source_type": event.source_type.value,
+                    "source_id": event.source_id,
                 })
 
             # IDLE only when nothing at all is left to trigger with. Losing the
@@ -560,6 +565,7 @@ class Plugin:
             "source_type": event.source_type.value,
             "media_id":    uid_hex,
             "uri":         uri,
+            "drive_kind":  event.payload.get("drive_kind"),
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
         }
 
@@ -580,10 +586,19 @@ class Plugin:
         # A blank tag — the normal case when pairing a new card — carries no URI,
         # so deferring this until after the `if not uri: return` guard below made
         # pairing impossible for exactly the tags users want to pair.
-        if self.is_pairing and self._pairable_source(event.source_id) is not None:
+        armed_for_this_source = (
+            not self.pairing_source_id or self.pairing_source_id == event.source_id
+        )
+        if (
+            self.is_pairing
+            and armed_for_this_source
+            and self._pairable_source(event.source_id) is not None
+        ):
             await decky.emit("tag_detected", {
                 "uid": uid_hex,
                 "source_type": event.source_type.value,
+                "source_id": event.source_id,
+                "drive_kind": event.payload.get("drive_kind"),
             })
             await self._handle_pairing(uid_hex, source_id=event.source_id)
             return
@@ -593,6 +608,8 @@ class Plugin:
         await decky.emit("tag_detected", {
             "uid": uid_hex,
             "source_type": event.source_type.value,
+            "source_id": event.source_id,
+            "drive_kind": event.payload.get("drive_kind"),
         })
 
         # Emit NDEF records if available (NFC-specific)
@@ -735,6 +752,7 @@ class Plugin:
             self.current_tag_meta = None
         await decky.emit("tag_removed", {
             "source_type": event.source_type.value,
+            "source_id": event.source_id,
         })
 
         # Spec §6.6: card removed while READY → state stays READY.
@@ -831,6 +849,7 @@ class Plugin:
             decky.logger.warning("Pairing triggered but no URI set!")
             self.is_pairing = False
             self.pairing_uri = None
+            self.pairing_source_id = None
             return
 
         source = self._pairable_source(source_id)
@@ -840,6 +859,7 @@ class Plugin:
             )
             self.is_pairing = False
             self.pairing_uri = None
+            self.pairing_source_id = None
             await decky.emit("pairing_result", {
                 "success": False,
                 "uid":     media_id,
@@ -852,6 +872,7 @@ class Plugin:
         pairing_uri = self.pairing_uri
         self.is_pairing = False
         self.pairing_uri = None
+        self.pairing_source_id = None
 
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
@@ -1010,13 +1031,27 @@ class Plugin:
             self.nfc_source._reader = None  # force reconnect on next poll
         return True
 
-    async def start_pairing(self, uri):
+    async def start_pairing(self, uri, source_id: Optional[str] = None):
+        """Arm pairing. With `source_id`, only that trigger may be written.
+
+        The panel offers a Pair button per trigger, so it says which one it
+        means. Without a target, any writable source wins — the game-page
+        link button arms everything and lets the user choose by presenting a
+        medium.
+        """
         if not self._validate_uri(uri):
             decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
             return False
-        decky.logger.info(f"UI requested pairing for URI: {uri}")
+        if source_id and self._pairable_source(source_id) is None:
+            decky.logger.warning(f"Pairing target {source_id!r} cannot be written to")
+            return False
+        decky.logger.info(
+            f"UI requested pairing for URI: {uri}"
+            + (f" on {source_id}" if source_id else " on any trigger")
+        )
         self.is_pairing  = True
         self.pairing_uri = uri
+        self.pairing_source_id = source_id
         # Re-arm every source so media already in place — a card resting on the
         # reader, a disk already in the drive — is picked up on the next poll,
         # instead of requiring the user to remove and re-present it.
@@ -1030,6 +1065,7 @@ class Plugin:
     async def cancel_pairing(self):
         self.is_pairing  = False
         self.pairing_uri = None
+        self.pairing_source_id = None
         return True
 
     async def get_reader_status(self):
@@ -1513,7 +1549,7 @@ class Plugin:
             return []
         result = []
         for source in self.source_manager.sources:
-            result.append({
+            entry = {
                 "source_id": source.source_id,
                 "source_type": source.source_type.value,
                 # The row tracks the hardware, not the media: ejecting a floppy
@@ -1526,7 +1562,21 @@ class Plugin:
                 # instead of asking specifically about the NFC reader.
                 "can_pair": source.can_write(),
                 "enabled": source.is_enabled(),
-            })
+            }
+            # Storage is one source covering several kinds of drive, and the
+            # panel shows a row per kind — so it needs presence per kind, not
+            # just "some drive is attached".
+            if hasattr(source, "drive_kinds_present"):
+                settings = self.settings.get_source_settings("storage") or {}
+                configured = settings.get("drive_kinds") or {}
+                entry["drive_kinds"] = {
+                    kind: {
+                        "present": present,
+                        "enabled": bool(configured.get(kind, DEFAULT_DRIVE_KINDS.get(kind, False))),
+                    }
+                    for kind, present in source.drive_kinds_present().items()
+                }
+            result.append(entry)
         return result
 
     async def set_source_setting(self, source_type: str, key: str, value):
@@ -1534,7 +1584,7 @@ class Plugin:
         # storage and camera joined the list when sources gained an explicit
         # on/off switch — a disabled source idles instead of retrying forever,
         # so the switch has to be reachable from the panel.
-        ALLOWED_SOURCE_TYPES = {"mqtt", "serial", "file_watch", "storage", "camera"}
+        ALLOWED_SOURCE_TYPES = {"nfc", "mqtt", "serial", "file_watch", "storage", "camera"}
         if source_type not in ALLOWED_SOURCE_TYPES:
             decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
             return False

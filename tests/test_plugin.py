@@ -1712,3 +1712,102 @@ class TestSourceEnablement:
         SettingsManager.__init__(sm, "/nonexistent/settings.json")
         assert sm.settings["sources"]["camera"]["enabled"] is False
         assert sm.settings["sources"]["storage"]["enabled"] is True
+
+
+# ── Targeted pairing — one Pair button per trigger ───────────────────────────
+
+class TestTargetedPairing:
+    """The panel offers a Pair button per trigger, so it must say which one it
+    means. With a tag on the reader and a disk in the drive, an untargeted
+    pair would write to whichever arrived first."""
+
+    def _with_storage(self, plugin):
+        """The fixture only wires an NFC source; these tests need a second
+        trigger to target."""
+        from sources.storage_source import StorageSource
+        storage = StorageSource({}, logger=MagicMock())
+        plugin.storage_source = storage
+        return storage
+
+    def _storage_load(self):
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.STORAGE,
+            source_id="storage:udev",
+            media_id="/dev/sda",
+            uri="",
+            payload={"blank": True, "drive_kind": "floppy"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_targeting_one_trigger_ignores_media_from_another(self, plugin, mock_decky):
+        self._with_storage(plugin)
+        plugin.nfc_source = _mock_nfc_source()
+        assert await plugin.start_pairing("steam://run/1", source_id="nfc:/dev/ttyUSB0")
+
+        with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock) as mock_pair, \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(self._storage_load())
+
+        mock_pair.assert_not_called()
+        assert plugin.is_pairing is True, "still armed, waiting for the right trigger"
+
+    @pytest.mark.asyncio
+    async def test_targeting_one_trigger_accepts_its_own_media(self, plugin, mock_decky):
+        self._with_storage(plugin)
+        assert await plugin.start_pairing("steam://run/1", source_id="storage:udev")
+
+        with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock) as mock_pair, \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(self._storage_load())
+
+        mock_pair.assert_called_once_with("/dev/sda", source_id="storage:udev")
+
+    @pytest.mark.asyncio
+    async def test_untargeted_pairing_accepts_any_trigger(self, plugin, mock_decky):
+        self._with_storage(plugin)
+        """The game-page link button arms everything and lets the user choose
+        by presenting a medium."""
+        assert await plugin.start_pairing("steam://run/1")
+
+        with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock) as mock_pair, \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(self._storage_load())
+
+        mock_pair.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unwritable_target_is_rejected(self, plugin):
+        assert await plugin.start_pairing("steam://run/1", source_id="camera:/dev/video0") is False
+        assert plugin.is_pairing is False
+
+    @pytest.mark.asyncio
+    async def test_cancelling_clears_the_target(self, plugin):
+        self._with_storage(plugin)
+        await plugin.start_pairing("steam://run/1", source_id="storage:udev")
+        await plugin.cancel_pairing()
+        assert plugin.pairing_source_id is None
+
+
+# ── Drive categories reach the panel ─────────────────────────────────────────
+
+class TestDriveKindStatus:
+
+    @pytest.mark.asyncio
+    async def test_storage_status_reports_presence_per_category(self, plugin, tmp_path):
+        from sources.storage_source import StorageSource
+        storage = StorageSource({"drive_kinds": {"floppy": True, "usb": False}},
+                                logger=MagicMock())
+        storage._monitor = MagicMock()
+        storage._drives["/dev/sda"] = "floppy"
+        plugin.storage_source = storage
+        plugin.source_manager.register(storage)
+        plugin.settings.get_source_settings = lambda t: (
+            {"drive_kinds": {"floppy": True, "usb": False}} if t == "storage" else {}
+        )
+
+        statuses = await plugin.get_source_statuses()
+        entry = next(e for e in statuses if e["source_type"] == "storage")
+        assert entry["drive_kinds"]["floppy"] == {"present": True, "enabled": True}
+        assert entry["drive_kinds"]["usb"] == {"present": False, "enabled": False}

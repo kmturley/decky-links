@@ -208,8 +208,16 @@ class TestSetSourceSetting:
     @pytest.mark.asyncio
     async def test_unknown_source_type_rejected(self, tmp_path):
         p, _ = _make_plugin_with_sources(tmp_path)
-        result = await p.set_source_setting("nfc", "enabled", True)
+        result = await p.set_source_setting("teleporter", "enabled", True)
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_nfc_can_be_switched_off(self, tmp_path):
+        """NFC was the one source with no enabled key, so it scanned for a
+        reader whether or not the user wanted it to."""
+        p, settings = _make_plugin_with_sources(tmp_path)
+        assert await p.set_source_setting("nfc", "enabled", False) is True
+        assert settings["sources"]["nfc"]["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_unknown_key_rejected(self, tmp_path):
@@ -324,7 +332,7 @@ class TestGetSourceStatusesHasMedia:
     async def test_drive_with_disk_reports_active_with_media(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
         storage._monitor = MagicMock()
-        storage._drives.add("/dev/sda")
+        storage._drives["/dev/sda"] = "floppy"
         storage._active_media["/dev/sda"] = "steam://run/12345"
         result = await p.get_source_statuses()
         entry = next(e for e in result if e["source_type"] == "storage")
@@ -335,7 +343,7 @@ class TestGetSourceStatusesHasMedia:
     async def test_drive_stays_active_after_disk_ejected(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
         storage._monitor = MagicMock()
-        storage._drives.add("/dev/sda")
+        storage._drives["/dev/sda"] = "floppy"
         storage._active_media["/dev/sda"] = "steam://run/12345"
         del storage._active_media["/dev/sda"]
         result = await p.get_source_statuses()
@@ -347,8 +355,8 @@ class TestGetSourceStatusesHasMedia:
     async def test_unplugging_the_drive_reports_inactive(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
         storage._monitor = MagicMock()
-        storage._drives.add("/dev/sda")
-        storage._drives.discard("/dev/sda")
+        storage._drives["/dev/sda"] = "floppy"
+        storage._drives.pop("/dev/sda", None)
         result = await p.get_source_statuses()
         entry = next(e for e in result if e["source_type"] == "storage")
         assert entry["active"] is False
@@ -396,7 +404,7 @@ class TestGetSourceStatusesCanPair:
     async def test_a_connected_floppy_is_pairable_without_any_nfc_reader(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
         storage._monitor = MagicMock()
-        storage._drives.add("/dev/sda")
+        storage._drives["/dev/sda"] = "floppy"
         result = await p.get_source_statuses()
         pairable = [e for e in result if e["can_pair"] and e["active"]]
         assert [e["source_type"] for e in pairable] == ["storage"]

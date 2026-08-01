@@ -23,6 +23,24 @@ export interface Settings {
     };
 }
 
+/** A medium currently presented on some trigger. Keyed by source_id, because
+ *  a tag on the reader and a disk in the drive are simultaneously present and
+ *  each needs its own row and its own Pair button. */
+export interface ActiveMedium {
+    source_id: string;
+    source_type: SourceType;
+    media_id: string;
+    uri: string | null;
+    drive_kind?: string | null;
+    problem?: "blank" | "unreadable" | "blocked" | null;
+    error?: string;
+}
+
+export interface DriveKindStatus {
+    present: boolean;
+    enabled: boolean;
+}
+
 export interface SourceStatus {
     source_id: string;
     source_type: SourceType;
@@ -36,6 +54,9 @@ export interface SourceStatus {
      *  retrying its hardware forever, so "off" and "not plugged in" are
      *  different things and must look different. */
     enabled?: boolean;
+    /** Storage only: one source covers several kinds of drive, and the panel
+     *  shows a row per kind. */
+    drive_kinds?: Record<string, DriveKindStatus>;
 }
 
 export interface ReaderStatus {
@@ -105,6 +126,10 @@ export interface SharedState {
   /** Why the current medium carries no URI. "blank" is ready to pair;
    *  "unreadable" is the user's problem to fix and must say so. */
   mediaProblem: { kind: "blank" | "unreadable" | "blocked"; error?: string } | null;
+  /** Every medium presented anywhere, keyed by source_id. The single tagUid
+   *  slot above cannot express "a tag AND a disk are both here", which is
+   *  exactly what the Triggers list has to show. */
+  activeMedia: Record<string, ActiveMedium>;
   activeAppId: string | null;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
@@ -127,6 +152,7 @@ export const sharedState: SharedState = {
   tagUri: null,
   tagSourceType: null,
   mediaProblem: null,
+  activeMedia: {},
   activeAppId: null,
   viewedApp: null,
   pairing: false,
@@ -180,7 +206,9 @@ export function useSharedState(): SharedState {
 
 export const getSettings = callable<[], Settings>("get_settings");
 export const setSetting = callable<[key: SettingKey, value: any], boolean>("set_setting");
-export const startPairing = callable<[uri: string], boolean>("start_pairing");
+// source_id targets one trigger; omitted, any writable trigger may claim it.
+export const startPairing = callable<[uri: string, source_id?: string], boolean>("start_pairing");
+export const getActiveMedia = callable<[], ActiveMedium[]>("get_active_media");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");
 export const getTagStatus = callable<[], TagStatus>("get_tag_status");

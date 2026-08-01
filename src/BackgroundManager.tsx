@@ -4,6 +4,7 @@ import {
   getReaderStatus,
   getTagStatus,
   getSourceStatuses,
+  getActiveMedia,
   setRunningGame,
   sharedState,
   settingsRef,
@@ -214,12 +215,27 @@ export function startBackgroundManager(): () => void {
       sharedState.sourceStatuses = statuses;
     }
 
+    // Seed the per-source view: media already presented before the panel was
+    // ever opened would otherwise be invisible until it is removed and
+    // re-presented.
+    const media = await getActiveMedia();
+    if (active) {
+      sharedState.activeMedia = Object.fromEntries(
+        (media ?? []).map((m) => [m.source_id, {
+          ...m,
+          problem: m.uri ? null : ("blank" as const),
+        }]),
+      );
+    }
+
     notifySubscribers();
   };
   init();
 
   // event listeners
-  const tagListener = addEventListener<[data: { uid: string, source_type?: string }]>("tag_detected", (data) => {
+  const tagListener = addEventListener<[data: {
+    uid: string, source_type?: string, source_id?: string, drive_kind?: string,
+  }]>("tag_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     sharedState.tagUid = data.uid;
     sharedState.tagUri = null;
@@ -227,15 +243,36 @@ export function startBackgroundManager(): () => void {
     // field, and every other one sets it explicitly.
     sharedState.tagSourceType = (data.source_type as SourceType) ?? SourceType.NFC;
     sharedState.mediaProblem = null;
+    // Per-source record, so a tag and a disk can be present at once and each
+    // gets its own row and Pair button in the Triggers list.
+    if (data.source_id) {
+      sharedState.activeMedia = {
+        ...sharedState.activeMedia,
+        [data.source_id]: {
+          source_id: data.source_id,
+          source_type: (data.source_type as SourceType) ?? SourceType.NFC,
+          media_id: data.uid,
+          uri: null,
+          drive_kind: data.drive_kind ?? null,
+          problem: null,
+        },
+      };
+    }
     tagUidRef.current = data.uid;
     notifySubscribers();
   });
 
-  const removeListener = addEventListener("tag_removed", () => {
+  const removeListener = addEventListener<[data?: { source_id?: string }]>("tag_removed", (data) => {
     sharedState.tagUid = null;
     sharedState.tagUri = null;
     sharedState.tagSourceType = null;
     sharedState.mediaProblem = null;
+    if (data?.source_id) {
+      const { [data.source_id]: _gone, ...rest } = sharedState.activeMedia;
+      sharedState.activeMedia = rest;
+    } else {
+      sharedState.activeMedia = {};
+    }
     tagUidRef.current = null;
     notifySubscribers();
   });
@@ -257,7 +294,7 @@ export function startBackgroundManager(): () => void {
   });
 
   const uriListener = addEventListener<[data: {
-    uri: string | null, uid: string, paired?: boolean,
+    uri: string | null, uid: string, paired?: boolean, source_id?: string,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
@@ -269,13 +306,31 @@ export function startBackgroundManager(): () => void {
 
     sharedState.tagUri = uri;
     sharedState.tagUid = normalizedUid;
-    sharedState.mediaProblem = uri
+    const problem = uri
       ? null
       : data.unreadable
-        ? { kind: "unreadable", error: data.error }
+        ? ({ kind: "unreadable", error: data.error } as const)
         : data.blocked
-          ? { kind: "blocked" }
-          : { kind: "blank" };
+          ? ({ kind: "blocked" } as const)
+          : ({ kind: "blank" } as const);
+    sharedState.mediaProblem = problem;
+
+    // uri_detected does not always carry source_id (the pairing sync path
+    // emits it by media id), so fall back to matching the medium we already
+    // recorded for this uid.
+    const key = data.source_id
+      ?? Object.values(sharedState.activeMedia).find((m) => m.media_id === data.uid)?.source_id;
+    if (key && sharedState.activeMedia[key]) {
+      sharedState.activeMedia = {
+        ...sharedState.activeMedia,
+        [key]: {
+          ...sharedState.activeMedia[key],
+          uri,
+          problem: problem?.kind ?? null,
+          error: problem?.kind === "unreadable" ? data.error : undefined,
+        },
+      };
+    }
     tagUidRef.current = normalizedUid;
     notifySubscribers();
 

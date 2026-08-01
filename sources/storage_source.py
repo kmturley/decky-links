@@ -87,7 +87,7 @@ class StorageSource(MediaSource):
         self._pending: deque = deque() # buffered events (startup scan)
         self._our_mounts: Dict[str, str] = {}  # devnode → tmpdir we created
         self._active_media: Dict[str, str] = {}  # devnode → URI (needed for UNLOAD)
-        self._drives: set = set()        # drives present, with or without a disk
+        self._drives: Dict[str, str] = {}  # devnode → DriveKind, disk or no disk
         self._unmountable: set = set()   # media that already failed to mount
 
     @property
@@ -148,6 +148,18 @@ class StorageSource(MediaSource):
     def has_media(self) -> bool:
         return len(self._active_media) > 0
 
+    def drive_kinds_present(self) -> Dict[str, bool]:
+        """Which categories of drive are currently attached.
+
+        Reported for every category, enabled or not: a user who has switched
+        USB storage off should still be able to see that a stick is plugged in,
+        or the toggle is undiscoverable.
+        """
+        present = {kind: False for kind in DEFAULT_DRIVE_KINDS}
+        for kind in self._drives.values():
+            present[kind] = True
+        return present
+
     def has_drive(self) -> bool:
         """True when a storage drive is connected, disk or no disk.
 
@@ -200,7 +212,7 @@ class StorageSource(MediaSource):
             return None
 
         if action == "add":
-            self._drives.add(devnode)
+            self._note_drive(devnode)
             # A drive can appear with no disk in it (USB floppy, card reader).
             # Mounting that just fails noisily; wait for the media-change event.
             if not has_media:
@@ -213,7 +225,7 @@ class StorageSource(MediaSource):
             return await self._handle_device_added(devnode)
 
         if action == "remove":
-            self._drives.discard(devnode)
+            self._drives.pop(devnode, None)
             self._unmountable.discard(devnode)
             return await self._handle_device_removed(devnode)
 
@@ -221,7 +233,7 @@ class StorageSource(MediaSource):
             # Inserting or ejecting a disk in an already-connected drive emits
             # 'change', not 'add'/'remove'. Without this branch a floppy drive
             # left plugged in never reports anything at all.
-            self._drives.add(devnode)
+            self._note_drive(devnode)
             if has_media and devnode not in self._active_media:
                 return await self._handle_device_added(devnode)
             if not has_media and devnode in self._active_media:
@@ -229,6 +241,18 @@ class StorageSource(MediaSource):
             return None
 
         return None
+
+    def _note_drive(self, devnode: str) -> None:
+        """Record a connected drive and its category.
+
+        Gated on removability so the Deck's internal NVMe partitions — which
+        emit `change` events of their own — never appear as attached drives.
+        """
+        if devnode in self._drives:
+            return
+        if not self._is_removable(devnode):
+            return
+        self._drives[devnode] = self.classify_drive(devnode)
 
     def _has_media(self, devnode: str) -> bool:
         """True when the drive actually holds media.
@@ -358,6 +382,7 @@ class StorageSource(MediaSource):
                 payload={
                     "unreadable": True,
                     "error": "No readable filesystem — format the disk as FAT.",
+                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
                 },
             )
 
@@ -380,7 +405,11 @@ class StorageSource(MediaSource):
                 source_id=self.source_id,
                 media_id=devnode,
                 uri="",
-                payload={"blank": True, "mountpoint": mountpoint},
+                payload={
+                    "blank": True,
+                    "mountpoint": mountpoint,
+                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
+                },
             )
 
         uri = payload.get("uri", "")
@@ -394,7 +423,10 @@ class StorageSource(MediaSource):
             source_id=self.source_id,
             media_id=devnode,
             uri=uri,
-            payload={k: v for k, v in payload.items() if k != "uri"},
+            payload={
+                **{k: v for k, v in payload.items() if k != "uri"},
+                "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
+            },
         )
 
     async def _handle_device_removed(self, devnode: str) -> Optional[MediaEvent]:
