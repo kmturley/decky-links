@@ -1169,22 +1169,22 @@ class Plugin:
                 sig_record.signature
             )
             
-            # Without cryptography the manager verifies with a symmetric HMAC whose
-            # "public" key is the secret — a pass there proves possession of the
-            # secret, not authenticity. Flag it so callers can't conflate the two.
-            insecure = not getattr(self.signature_manager, "crypto_available", False)
-            if insecure:
-                decky.logger.warning(
-                    "Signature checked with the insecure HMAC fallback "
-                    "(cryptography unavailable) — result is not forgery-resistant."
+            # Without cryptography, verification is impossible and the manager
+            # fails closed (always False). Distinguish that from a genuine
+            # mismatch so the UI can say "can't check" rather than "forged".
+            unavailable = not getattr(self.signature_manager, "crypto_available", False)
+            if unavailable:
+                decky.logger.error(
+                    "Signature could not be verified: cryptography is unavailable. "
+                    "Reporting invalid rather than assuming authenticity."
                 )
 
-            decky.logger.info(f"Signature verification: {valid} (insecure={insecure})")
+            decky.logger.info(f"Signature verification: {valid}")
             return {
                 "valid": valid,
                 "key_id": sig_record.key_id,
                 "algorithm": sig_record.algorithm,
-                "insecure": insecure,
+                "unverifiable": unavailable,
             }
         except Exception as e:
             decky.logger.error(f"Failed to verify signature: {e}")

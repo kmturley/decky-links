@@ -6,10 +6,6 @@ ECDSA (Elliptic Curve Digital Signature Algorithm) with SHA-256.
 
 import os
 import json
-import base64
-import hashlib
-import hmac
-import secrets
 from typing import Optional, Tuple
 
 try:
@@ -34,17 +30,16 @@ class SignatureManager:
         self.crypto_available = CRYPTO_AVAILABLE
         self.logger = logger
         
-        # The HMAC fallback below is NOT equivalent to ECDSA: its "public" key is
-        # byte-identical to its private key, so anyone who obtains the exported
-        # public key can forge signatures. It exists only so the plugin stays
-        # functional when cryptography is missing — never treat its results as a
-        # real authenticity guarantee. Say so loudly rather than degrading quietly.
+        # Signing requires cryptography. There is deliberately no fallback: the
+        # previous symmetric-HMAC substitute used a "public" key byte-identical
+        # to the private one, so publishing it let anyone forge signatures, and
+        # it was indistinguishable from real ECDSA to callers. Signing now fails
+        # closed instead of quietly degrading.
         if not self.crypto_available and self.logger:
             self.logger.error(
-                "cryptography library not installed — falling back to a SYMMETRIC "
-                "HMAC scheme. Signatures are NOT forgery-resistant and the exported "
-                "'public key' is the secret. Do not publish it. Install cryptography "
-                "for real ECDSA signing."
+                "cryptography library not installed — signing and verification "
+                "are DISABLED. Verification returns False rather than risk "
+                "reporting an unverified record as authentic."
             )
         
         if keys_path:
@@ -56,21 +51,6 @@ class SignatureManager:
                 "cryptography is not installed; signing features are disabled"
             )
 
-    def _serialize_fallback_key(self, label: str, raw_key: bytes) -> str:
-        encoded = base64.b64encode(raw_key).decode("ascii")
-        return f"-----BEGIN {label}-----\n{encoded}\n-----END {label}-----"
-
-    def _load_fallback_key(self, pem: str, label: str) -> bytes:
-        begin = f"-----BEGIN {label}-----"
-        end = f"-----END {label}-----"
-        if not isinstance(pem, str) or begin not in pem or end not in pem:
-            raise ValueError(f"Invalid {label.lower()} format")
-        payload = pem.replace(begin, "").replace(end, "").strip()
-        try:
-            return base64.b64decode(payload.encode("ascii"), validate=True)
-        except Exception as e:
-            raise ValueError(f"Invalid {label.lower()} encoding") from e
-
     def generate_key_pair(self, key_id: str) -> Tuple[str, str]:
         """Generate new ECDSA key pair.
         
@@ -80,24 +60,20 @@ class SignatureManager:
         Returns:
             Tuple of (public_key_pem, private_key_pem)
         """
-        if self.crypto_available:
-            private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
-            public_key = private_key.public_key()
+        self._require_crypto()
+        private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        public_key = private_key.public_key()
 
-            private_pem = private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
-            ).decode('utf-8')
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        ).decode('utf-8')
 
-            public_pem = public_key.public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ).decode('utf-8')
-        else:
-            raw_key = secrets.token_bytes(32)
-            public_pem = self._serialize_fallback_key("PUBLIC KEY", raw_key)
-            private_pem = self._serialize_fallback_key("PRIVATE KEY", raw_key)
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode('utf-8')
         
         self.signing_keys[key_id] = {
             'private_key': private_pem,
@@ -120,32 +96,28 @@ class SignatureManager:
         Raises:
             ValueError: If keys are invalid or use weak algorithms
         """
-        if self.crypto_available:
-            public_key = serialization.load_pem_public_key(
-                public_key_pem.encode('utf-8'),
-                default_backend()
+        self._require_crypto()
+        public_key = serialization.load_pem_public_key(
+            public_key_pem.encode('utf-8'),
+            default_backend()
+        )
+
+        if not isinstance(public_key, ec.EllipticCurvePublicKey):
+            raise ValueError("Only ECDSA keys are supported")
+
+        if public_key.curve.name not in ("secp256r1", "secp384r1", "secp521r1"):
+            raise ValueError(f"Weak curve: {public_key.curve.name}. Use secp256r1 or stronger.")
+
+        if private_key_pem:
+            private_key = serialization.load_pem_private_key(
+                private_key_pem.encode('utf-8'),
+                password=None,
+                backend=default_backend()
             )
-
-            if not isinstance(public_key, ec.EllipticCurvePublicKey):
+            if not isinstance(private_key, ec.EllipticCurvePrivateKey):
                 raise ValueError("Only ECDSA keys are supported")
-
-            if public_key.curve.name not in ("secp256r1", "secp384r1", "secp521r1"):
-                raise ValueError(f"Weak curve: {public_key.curve.name}. Use secp256r1 or stronger.")
-
-            if private_key_pem:
-                private_key = serialization.load_pem_private_key(
-                    private_key_pem.encode('utf-8'),
-                    password=None,
-                    backend=default_backend()
-                )
-                if not isinstance(private_key, ec.EllipticCurvePrivateKey):
-                    raise ValueError("Only ECDSA keys are supported")
-                if private_key.curve.name not in ("secp256r1", "secp384r1", "secp521r1"):
-                    raise ValueError(f"Weak curve: {private_key.curve.name}. Use secp256r1 or stronger.")
-        else:
-            self._load_fallback_key(public_key_pem, "PUBLIC KEY")
-            if private_key_pem:
-                self._load_fallback_key(private_key_pem, "PRIVATE KEY")
+            if private_key.curve.name not in ("secp256r1", "secp384r1", "secp521r1"):
+                raise ValueError(f"Weak curve: {private_key.curve.name}. Use secp256r1 or stronger.")
         
         self.signing_keys[key_id] = {
             'public_key': public_key_pem,
@@ -197,16 +169,13 @@ class SignatureManager:
         if not private_key_pem:
             raise ValueError(f"Private key not available for {key_id}")
         
-        if self.crypto_available:
-            private_key = serialization.load_pem_private_key(
-                private_key_pem.encode('utf-8'),
-                password=None,
-                backend=default_backend()
-            )
-            return private_key.sign(data, ec.ECDSA(hashes.SHA256()))
-
-        raw_key = self._load_fallback_key(private_key_pem, "PRIVATE KEY")
-        return hmac.new(raw_key, data, hashlib.sha256).digest()
+        self._require_crypto()
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+        return private_key.sign(data, ec.ECDSA(hashes.SHA256()))
 
     def verify_signature(self, key_id: str, data: bytes, signature: bytes) -> bool:
         """Verify signature using public key.
@@ -223,24 +192,26 @@ class SignatureManager:
             return False
         
         public_key_pem = self.signing_keys[key_id]['public_key']
-        if self.crypto_available:
-            public_key = serialization.load_pem_public_key(
-                public_key_pem.encode('utf-8'),
-                default_backend()
-            )
 
-            try:
-                public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
-                return True
-            except Exception:
-                return False
+        if not self.crypto_available:
+            # Fail closed. Returning True without real verification would be far
+            # worse than refusing — callers treat True as proof of authenticity.
+            if self.logger:
+                self.logger.error(
+                    "Cannot verify signature: cryptography is not installed."
+                )
+            return False
+
+        public_key = serialization.load_pem_public_key(
+            public_key_pem.encode('utf-8'),
+            default_backend()
+        )
 
         try:
-            raw_key = self._load_fallback_key(public_key_pem, "PUBLIC KEY")
-        except ValueError:
+            public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
+            return True
+        except Exception:
             return False
-        expected = hmac.new(raw_key, data, hashlib.sha256).digest()
-        return hmac.compare_digest(expected, signature)
 
     def load(self):
         """Load keys from file."""
