@@ -60,6 +60,17 @@ function canSkipLaunch(currentAppId: string | null, uriAppId: string | null): bo
   return !!(currentAppId && uriAppId && String(currentAppId) === String(uriAppId));
 }
 
+/** True when the user is already looking at this game's detail page.
+ *
+ * Executing a steam:// URL is not free: Steam tears down and rebuilds UI around
+ * it, which closes the Quick Access menu. Navigating to a page that is already
+ * open is pure cost, so check before issuing the command rather than after.
+ */
+function isAlreadyViewing(uriAppId: string | null): boolean {
+  const viewed = sharedState.viewedApp;
+  return !!(viewed && uriAppId && String(viewed.appId) === String(uriAppId));
+}
+
 function launchViaSteamClientUri(uri: string): boolean {
   if (cachedSteamUriLauncher) {
     try {
@@ -250,7 +261,7 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
-  const uriListener = addEventListener<[data: { uri: string | null, uid: string }]>("uri_detected", (data) => {
+  const uriListener = addEventListener<[data: { uri: string | null, uid: string, paired?: boolean }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     const normalizedUid = data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
@@ -259,6 +270,14 @@ export function startBackgroundManager(): () => void {
     sharedState.tagUid = normalizedUid;
     tagUidRef.current = normalizedUid;
     notifySubscribers();
+
+    // Emitted by the backend right after writing a tag, purely so the panel
+    // stops showing "Url: Empty". Pairing must not also launch the game --
+    // the user pressed a button that only promised to write the card.
+    if (data.paired) {
+      console.info(`[ Decky Links ] Tag paired with ${uri}; updating display only.`);
+      return;
+    }
 
     if (uri) {
       const currentSettings = settingsRef.current;
@@ -297,6 +316,14 @@ export function startBackgroundManager(): () => void {
 
       // Auto-launch disabled: surface the linked game by opening details page.
       if (uriAppId) {
+        if (isAlreadyViewing(uriAppId)) {
+          console.info(`[ Decky Links ] Already viewing game ${uriAppId}. Skipping redundant navigation.`);
+          return;
+        }
+        if (canSkipLaunch(activeAppIdRef.current, uriAppId)) {
+          console.info(`[ Decky Links ] Game ${uriAppId} is already running. Skipping redundant navigation.`);
+          return;
+        }
         const detailsUri = `steam://open/games/details/${uriAppId}`;
         console.info(`[ Decky Links ] Auto-launch disabled. Opening game details: ${detailsUri}`);
         executeSteamUri(detailsUri);

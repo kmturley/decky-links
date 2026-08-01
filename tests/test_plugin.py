@@ -684,7 +684,9 @@ class TestPairing:
              patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
 
-        mock_pair.assert_called_once_with(bytes.fromhex("DEADBEEF"))
+        mock_pair.assert_called_once_with(
+            bytes.fromhex("DEADBEEF"), source_id="nfc:/dev/ttyUSB0"
+        )
         mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -704,7 +706,9 @@ class TestPairing:
              patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
 
-        mock_pair.assert_called_once_with(bytes.fromhex("DEADBEEF"))
+        mock_pair.assert_called_once_with(
+            bytes.fromhex("DEADBEEF"), source_id="nfc:/dev/ttyUSB0"
+        )
         mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1382,3 +1386,69 @@ class TestPerSourceMediaIsolation:
             )
         assert plugin._pending_launch_origin is not None
         assert plugin._pending_launch_origin["media_id"] == "DEADBEEF"
+
+
+# ── Pairing state sync ───────────────────────────────────────────────────────
+
+class TestPairingUriSync:
+    """After a successful write the panel must show the new URI immediately.
+
+    poll() only reports a tag on arrival, so a card resting on the reader is
+    never re-read; without an explicit sync the UI showed "Url: Empty" until
+    the user lifted and replaced the card.
+    """
+
+    @pytest.mark.asyncio
+    async def test_successful_pairing_updates_current_tag_uri(self, plugin, mock_decky):
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        plugin.nfc_source  = MagicMock()
+        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
+
+        assert plugin.current_tag_uri == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_successful_pairing_emits_uri_detected_marked_paired(self, plugin, mock_decky):
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        plugin.nfc_source  = MagicMock()
+        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
+
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert "uri_detected" in calls
+        assert calls["uri_detected"]["uri"] == "steam://rungameid/400"
+        # The flag is what stops the frontend launching the game on a pair.
+        assert calls["uri_detected"]["paired"] is True
+
+    @pytest.mark.asyncio
+    async def test_successful_pairing_updates_active_media_registry(self, plugin, mock_decky):
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        plugin.nfc_source  = MagicMock()
+        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
+
+        active = await plugin.get_active_media()
+        assert active[0]["uri"] == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_failed_pairing_does_not_claim_a_uri(self, plugin, mock_decky):
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        plugin.nfc_source  = MagicMock()
+        plugin.nfc_source.write_ndef_uri.return_value = (False, "Write failed at page 4")
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
+
+        assert plugin.current_tag_uri is None
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "uri_detected" not in emitted

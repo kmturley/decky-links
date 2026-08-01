@@ -514,7 +514,7 @@ class Plugin:
                 "source_type": event.source_type.value,
             })
             uid_bytes = bytes.fromhex(uid_hex)
-            await self._handle_pairing(uid_bytes)
+            await self._handle_pairing(uid_bytes, source_id=event.source_id)
             return
 
         # Emit tag_detected immediately — matches old _handle_scan behavior where
@@ -721,7 +721,7 @@ class Plugin:
 
     # ── Pairing Handler ────────────────────────────────────────────────
 
-    async def _handle_pairing(self, uid):
+    async def _handle_pairing(self, uid, source_id: Optional[str] = None):
         """Write the pairing URI to the NFC tag (Spec §7)."""
         if not self.pairing_uri:
             decky.logger.warning("Pairing triggered but no URI set!")
@@ -739,6 +739,14 @@ class Plugin:
         try:
             success, error_msg = self.nfc_source.write_ndef_uri(uid, pairing_uri)
             self._play_sound("success.flac" if success else "error.flac")
+
+            if success:
+                # The tag now holds this URI, but nothing will re-read it while
+                # it rests on the reader — poll() only reports a tag on arrival.
+                # Without this the panel shows "Url: Empty" until the user lifts
+                # and replaces the card, even though pairing succeeded.
+                await self._sync_uri_after_pairing(uid, pairing_uri, source_id)
+
             await decky.emit("pairing_result", {
                 "success": success,
                 "uid":     uid.hex(),
@@ -751,6 +759,38 @@ class Plugin:
                 "uid":     uid.hex(),
                 "error":   str(e),
             })
+
+    async def _sync_uri_after_pairing(self, uid, uri: str, source_id: Optional[str]):
+        """Reflect a freshly-written URI in plugin state and tell the frontend.
+
+        Emits ``uri_detected`` with ``paired: True``. The flag matters: the
+        frontend launches on that event, and pairing a card must not also start
+        the game — it would yank the user out of whatever they were doing right
+        after they pressed a button that only promised to write a tag.
+        """
+        uid_hex = uid.hex().upper()
+        self.current_tag_uri = uri
+
+        # Keep the registry and the source's own view consistent, so the RPC
+        # poll fallback and any later reads agree with what the panel shows.
+        entry = self._active_media.get(source_id) if source_id else None
+        if entry is None:
+            entry = next(
+                (m for m in self._active_media.values() if m.get("source_type") == "nfc"),
+                None,
+            )
+        if entry is not None:
+            entry["uri"] = uri
+
+        if self.nfc_source is not None:
+            self.nfc_source.current_tag_uri = uri
+
+        decky.logger.info(f"Pairing wrote {uri} to {uid_hex}; syncing UI state")
+        await decky.emit("uri_detected", {
+            "uri":    uri,
+            "uid":    uid_hex,
+            "paired": True,
+        })
 
     # ── Launch ─────────────────────────────────────────────────────────
 
