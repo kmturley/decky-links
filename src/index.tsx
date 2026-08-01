@@ -144,6 +144,34 @@ async function triggerUpdateSetting(key: SettingKey, value: any) {
   notifySubscribers();
 }
 
+/** Drive categories, as udev distinguishes them. Defaults mirror the backend:
+ *  collectible media on, the user's own storage off. */
+const DRIVE_KINDS: { key: string; label: string; description: string; fallback: boolean }[] = [
+  { key: "floppy",  label: "Floppy Drives",  description: "USB and internal floppy drives", fallback: true },
+  { key: "optical", label: "Optical Drives", description: "CD and DVD drives",              fallback: true },
+  { key: "usb",     label: "USB Storage",    description: "Thumb drives and external disks", fallback: false },
+  { key: "flash",   label: "Memory Cards",   description: "SD and other card readers",       fallback: false },
+];
+
+function driveKindEnabled(storage: { drive_kinds?: Record<string, boolean> }, key: string): boolean {
+  const configured = storage.drive_kinds?.[key];
+  if (typeof configured === "boolean") return configured;
+  return DRIVE_KINDS.find((k) => k.key === key)?.fallback ?? false;
+}
+
+/** The backend stores drive_kinds as one dict, so a single toggle has to send
+ *  the whole merged map rather than just the key that changed. */
+async function triggerToggleDriveKind(
+  storage: { drive_kinds?: Record<string, boolean> },
+  key: string,
+  value: boolean,
+) {
+  const merged: Record<string, boolean> = {};
+  for (const kind of DRIVE_KINDS) merged[kind.key] = driveKindEnabled(storage, kind.key);
+  merged[key] = value;
+  await triggerUpdateSourceSetting("storage", "drive_kinds", merged);
+}
+
 const StatusRow: FC<{ icon: ReactNode; label: string; value: string; active: boolean }> = ({ icon, label, value, active }) => (
   <div style={{
     display: "flex",
@@ -348,13 +376,26 @@ const Content: FC = () => {
         {storageSettings && (
           <PanelSectionRow>
             <ToggleField
-              label="Disk Trigger"
-              description="Launch games from USB, floppy or SD media"
+              label="Disk Triggers"
+              description="Watch removable drives for paired media"
               checked={storageSettings.enabled}
               onChange={(v: boolean) => triggerUpdateSourceSetting("storage", "enabled", v)}
             />
           </PanelSectionRow>
         )}
+        {/* Which kinds of drive to act on. A floppy and a thumb drive are both
+            "removable" to the kernel but not to a person: one holds collectible
+            media, the other usually holds the user's own files. */}
+        {storageSettings?.enabled && DRIVE_KINDS.map(({ key, label, description }) => (
+          <PanelSectionRow key={key}>
+            <ToggleField
+              label={label}
+              description={description}
+              checked={driveKindEnabled(storageSettings, key)}
+              onChange={(v: boolean) => triggerToggleDriveKind(storageSettings, key, v)}
+            />
+          </PanelSectionRow>
+        ))}
         {cameraSettings && (
           <PanelSectionRow>
             <ToggleField

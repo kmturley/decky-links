@@ -127,6 +127,16 @@ class SettingsManager:
                 },
                 "storage": {
                     "enabled": True,
+                    # Per-category switches. Floppy and optical are collectible
+                    # media people deliberately attach; USB sticks and memory
+                    # cards usually hold the user's own data, so we leave them
+                    # alone unless asked. See DriveKind in storage_source.py.
+                    "drive_kinds": {
+                        "floppy": True,
+                        "optical": True,
+                        "usb": False,
+                        "flash": False,
+                    },
                 },
                 "camera": {
                     "enabled": False,
@@ -1531,6 +1541,7 @@ class Plugin:
 
         ALLOWED_KEYS: Dict[str, type] = {
             "enabled": bool,
+            "drive_kinds": dict,
             "broker_host": str,
             "broker_port": int,
             "topic": str,

@@ -38,6 +38,28 @@ MOUNT_TIMEOUT_SECONDS = 20
 # mounts stranded by a previous plugin process.
 _MOUNT_PREFIX = "/tmp/decky-links-"
 
+class DriveKind:
+    """Categories of removable drive, as udev distinguishes them.
+
+    Deliberately not an Enum: these values cross the RPC boundary into settings
+    JSON and the frontend, where plain strings are what everything else uses.
+    """
+    FLOPPY = "floppy"
+    OPTICAL = "optical"
+    FLASH = "flash"
+    USB = "usb"
+
+
+# Floppies and optical discs are collectible media people deliberately attach;
+# USB sticks and memory cards usually hold the user's own data and should be
+# left alone unless asked for.
+DEFAULT_DRIVE_KINDS = {
+    DriveKind.FLOPPY: True,
+    DriveKind.OPTICAL: True,
+    DriveKind.USB: False,
+    DriveKind.FLASH: False,
+}
+
 # Device node prefixes we consider mountable storage
 _DEVICE_PREFIXES = (
     "/dev/fd",       # floppy
@@ -223,6 +245,48 @@ class StorageSource(MediaSource):
             # Unknown — assume media is present and let the mount decide.
             return True
 
+    def _udev_properties(self, devnode: str) -> Dict[str, str]:
+        """udev properties for a block device, or {} if unavailable."""
+        if not self._context:
+            return {}
+        try:
+            import pyudev
+            device = pyudev.Devices.from_device_file(self._context, devnode)
+            return dict(device.properties)
+        except Exception:
+            return {}
+
+    def classify_drive(self, devnode: str) -> str:
+        """Which kind of drive this is, as a DriveKind value.
+
+        A floppy drive and a USB thumb drive are the same thing to
+        ``removable=1``, but they are not the same thing to a user: one holds
+        collectible media they want to trigger games with, the other usually
+        holds their own data and should be left alone. udev already knows the
+        difference — a USB floppy reports ``ID_TYPE=floppy`` and
+        ``ID_DRIVE_FLOPPY=1``.
+
+        Anything unrecognised falls back to USB storage, which is off by
+        default, so a misclassification errs towards leaving the disk alone.
+        """
+        props = self._udev_properties(devnode)
+
+        if props.get("ID_DRIVE_FLOPPY") == "1" or props.get("ID_TYPE") == "floppy":
+            return DriveKind.FLOPPY
+        if props.get("ID_CDROM") == "1" or props.get("ID_TYPE") == "cd":
+            return DriveKind.OPTICAL
+        if any(k.startswith("ID_DRIVE_FLASH") or k.startswith("ID_DRIVE_MEDIA_FLASH")
+               for k in props):
+            return DriveKind.FLASH
+        return DriveKind.USB
+
+    def _drive_kind_enabled(self, kind: str) -> bool:
+        """Whether the user has switched this category of drive on."""
+        kinds = self._settings.get("drive_kinds")
+        if not isinstance(kinds, dict):
+            kinds = DEFAULT_DRIVE_KINDS
+        return bool(kinds.get(kind, DEFAULT_DRIVE_KINDS.get(kind, False)))
+
     def _is_removable(self, devnode: str) -> bool:
         """True when devnode belongs to a removable drive.
 
@@ -258,6 +322,14 @@ class StorageSource(MediaSource):
                     self._logger.warning(
                         f"StorageSource: refusing to mount {devnode} — not a "
                         f"removable drive"
+                    )
+                return None
+            kind = self.classify_drive(devnode)
+            if not self._drive_kind_enabled(kind):
+                if self._logger:
+                    self._logger.info(
+                        f"StorageSource: ignoring {devnode} — {kind} drives are "
+                        f"switched off"
                     )
                 return None
             mountpoint = await self._mount_device(devnode)

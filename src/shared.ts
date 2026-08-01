@@ -15,7 +15,7 @@ export interface Settings {
             polling_interval: number;
             reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
         };
-        storage?: { enabled: boolean };
+        storage?: { enabled: boolean; drive_kinds?: Record<string, boolean> };
         camera?: { enabled: boolean; device: string; poll_interval: number };
         mqtt?: { enabled: boolean; broker_host: string; broker_port: number; topic: string; secret: string };
         serial?: { enabled: boolean; port: string; baudrate: number };

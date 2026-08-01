@@ -16,8 +16,17 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_source(settings=None):
-    from sources.storage_source import StorageSource
-    return StorageSource(settings or {}, logger=MagicMock())
+    """A source with every drive category switched on.
+
+    Most tests here exercise mount mechanics, not categorisation, and would
+    otherwise be silently skipped by the default (USB storage off). Tests that
+    care about the categories set them explicitly.
+    """
+    from sources.storage_source import StorageSource, DriveKind
+    if settings is None:
+        settings = {"drive_kinds": {k: True for k in (
+            DriveKind.FLOPPY, DriveKind.OPTICAL, DriveKind.USB, DriveKind.FLASH)}}
+    return StorageSource(settings, logger=MagicMock())
 
 
 def _make_udev_device(action: str, devnode: str):
@@ -602,6 +611,80 @@ class TestUnmountableMedia:
             "the event loop made no progress while mount was running — "
             "the whole plugin is frozen for the duration of every mount"
         )
+
+
+# ── Drive categorisation ──────────────────────────────────────────────────────
+
+class TestDriveKinds:
+    """A floppy drive and a USB thumb drive are both removable=1, but they are
+    not the same thing to a user. udev knows the difference."""
+
+    def _classify(self, props):
+        src = _make_source()
+        with patch.object(src, "_udev_properties", return_value=props):
+            return src.classify_drive("/dev/sda")
+
+    def test_usb_floppy_is_a_floppy(self):
+        from sources.storage_source import DriveKind
+        # Exactly what the TEAC drive reports on the Deck.
+        assert self._classify({
+            "ID_BUS": "usb", "ID_TYPE": "floppy", "ID_DRIVE_FLOPPY": "1",
+        }) == DriveKind.FLOPPY
+
+    def test_optical_is_detected(self):
+        from sources.storage_source import DriveKind
+        assert self._classify({"ID_CDROM": "1", "ID_TYPE": "cd"}) == DriveKind.OPTICAL
+
+    def test_card_reader_is_flash(self):
+        from sources.storage_source import DriveKind
+        assert self._classify({
+            "ID_BUS": "usb", "ID_TYPE": "disk", "ID_DRIVE_FLASH_SD": "1",
+        }) == DriveKind.FLASH
+
+    def test_thumb_drive_is_usb_storage(self):
+        from sources.storage_source import DriveKind
+        assert self._classify({"ID_BUS": "usb", "ID_TYPE": "disk"}) == DriveKind.USB
+
+    def test_unknown_falls_back_to_usb_storage(self):
+        """Which is off by default, so a misclassification leaves disks alone."""
+        from sources.storage_source import DriveKind
+        assert self._classify({}) == DriveKind.USB
+
+    def test_floppy_and_optical_are_on_by_default(self):
+        from sources.storage_source import StorageSource, DriveKind
+        src = StorageSource({}, logger=MagicMock())
+        assert src._drive_kind_enabled(DriveKind.FLOPPY) is True
+        assert src._drive_kind_enabled(DriveKind.OPTICAL) is True
+
+    def test_usb_and_flash_are_off_by_default(self):
+        """Someone's thumb drive is their data, not a game trigger."""
+        from sources.storage_source import StorageSource, DriveKind
+        src = StorageSource({}, logger=MagicMock())
+        assert src._drive_kind_enabled(DriveKind.USB) is False
+        assert src._drive_kind_enabled(DriveKind.FLASH) is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_category_is_never_mounted(self):
+        from sources.storage_source import StorageSource, DriveKind
+        src = StorageSource({}, logger=MagicMock())     # USB storage off
+        with patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.USB), \
+             patch.object(src, "_mount_device", new_callable=AsyncMock) as mock_mount:
+            event = await src._handle_device_added("/dev/sdb1")
+        assert event is None
+        mock_mount.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enabled_category_is_mounted(self, tmp_path):
+        from sources.storage_source import StorageSource, DriveKind
+        src = StorageSource({}, logger=MagicMock())     # floppies on by default
+        with patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
+             patch.object(src, "_mount_device", AsyncMock(return_value=str(tmp_path))):
+            event = await src._handle_device_added("/dev/sdb1")
+        assert event is not None
 
 
 # ── Mount leaks ───────────────────────────────────────────────────────────────
