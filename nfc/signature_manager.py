@@ -34,9 +34,18 @@ class SignatureManager:
         self.crypto_available = CRYPTO_AVAILABLE
         self.logger = logger
         
-        # Warn if cryptography is not available
+        # The HMAC fallback below is NOT equivalent to ECDSA: its "public" key is
+        # byte-identical to its private key, so anyone who obtains the exported
+        # public key can forge signatures. It exists only so the plugin stays
+        # functional when cryptography is missing — never treat its results as a
+        # real authenticity guarantee. Say so loudly rather than degrading quietly.
         if not self.crypto_available and self.logger:
-            self.logger.warning("cryptography library not installed; signing features disabled")
+            self.logger.error(
+                "cryptography library not installed — falling back to a SYMMETRIC "
+                "HMAC scheme. Signatures are NOT forgery-resistant and the exported "
+                "'public key' is the secret. Do not publish it. Install cryptography "
+                "for real ECDSA signing."
+            )
         
         if keys_path:
             self.load()

@@ -110,6 +110,20 @@ class SourceManager:
                         ))
                         was_connected = False
 
+                    # Always release the previous attempt's resources before
+                    # re-initialising. Without this, a source that dropped out
+                    # (e.g. NFC reader after a poll error) leaks its open serial
+                    # handle and start() opens a second fd on the same device,
+                    # making reconnects timing-dependent.
+                    try:
+                        await source.stop()
+                    except Exception as e:
+                        if self._logger:
+                            self._logger.warning(
+                                f"SourceManager: error stopping {source.source_id} "
+                                f"before restart: {e}"
+                            )
+
                     ok = await source.start()
                     if not ok:
                         await asyncio.sleep(reconnect_delay)

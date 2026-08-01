@@ -660,6 +660,61 @@ class TestPairing:
         mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_pairing_works_on_blank_tag(self, plugin, mock_decky):
+        """A blank tag (no URI) must still enter the pairing flow.
+
+        Regression test for the ordering bug where the `if not uri: return`
+        guard ran before the pairing branch, making it impossible to pair a
+        fresh tag — i.e. every tag a user actually wants to write.
+        """
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+
+        event = _make_load_event("DEADBEEF", uri=None)
+        with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock) as mock_pair, \
+             patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(event)
+
+        mock_pair.assert_called_once_with(bytes.fromhex("DEADBEEF"))
+        mock_launch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pairing_blank_tag_does_not_emit_blocked_uri(self, plugin, mock_decky):
+        """Pairing a blank tag must not report it as a rejected/blocked URI."""
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+
+        event = _make_load_event("DEADBEEF", uri=None)
+        with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock), \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(event)
+
+        emitted = {c.args[0] for c in mock_decky.emit.call_args_list}
+        assert "uri_detected" not in emitted
+        assert "tag_detected" in emitted
+
+    @pytest.mark.asyncio
+    async def test_start_pairing_rearms_nfc_source(self, plugin, mock_decky):
+        """start_pairing re-arms the source so a resting card is re-detected.
+
+        Without this, poll() suppresses the LOAD event for a card that was
+        already on the reader, and the user must lift and re-tap to pair.
+        """
+        plugin.nfc_source = MagicMock()
+        ok = await plugin.start_pairing("steam://rungameid/400")
+
+        assert ok is True
+        plugin.nfc_source.rearm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_start_pairing_survives_missing_source(self, plugin, mock_decky):
+        """start_pairing must not blow up before sources are initialised."""
+        plugin.nfc_source = None
+        assert await plugin.start_pairing("steam://rungameid/400") is True
+        assert plugin.is_pairing is True
+
+    @pytest.mark.asyncio
     async def test_pairing_plays_success_sound_on_write_ok(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"

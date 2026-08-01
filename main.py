@@ -2,11 +2,17 @@ import os
 import sys
 
 # Bootstrap sys.path before any local package imports.
-# build.sh copies sources/ and nfc/ into py_modules/ alongside pip packages.
+#
+# The decky loader appends only <plugin>/py_modules to sys.path, not the plugin
+# directory itself, so local packages (sources/, nfc/) need the plugin dir added
+# explicitly. It goes first so the checked-out tree always wins over anything
+# that may be left in py_modules/ — py_modules is for pip dependencies only.
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
 _py_modules = os.path.join(_plugin_dir, "py_modules")
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
 if _py_modules not in sys.path:
-    sys.path.insert(0, _py_modules)
+    sys.path.append(_py_modules)
 
 import asyncio
 import time
@@ -146,7 +152,10 @@ class SettingsManager:
     def _get_default_device_path(self):
         if sys.platform == "darwin":
             return "/dev/cu.usbserial-1440"
-        return "/dev/ttyACM0"
+        # PN532 UART boards attach via CH340/CP2102/FTDI bridges, which enumerate
+        # as ttyUSB*, not ttyACM*. NfcSource._find_serial_port() still globs both
+        # as a fallback.
+        return "/dev/ttyUSB0"
 
     def load(self):
         try:
@@ -458,6 +467,19 @@ class Plugin:
         # Audio feedback (Spec §11)
         self._play_sound("scan.flac")
 
+        # Pairing must be handled BEFORE any URI inspection (Spec §7).
+        # A blank tag — the normal case when pairing a new card — carries no URI,
+        # so deferring this until after the `if not uri: return` guard below made
+        # pairing impossible for exactly the tags users want to pair.
+        if self.is_pairing and event.source_type == SourceType.NFC:
+            await decky.emit("tag_detected", {
+                "uid": uid_hex,
+                "source_type": event.source_type.value,
+            })
+            uid_bytes = bytes.fromhex(uid_hex)
+            await self._handle_pairing(uid_bytes)
+            return
+
         # Emit tag_detected immediately — matches old _handle_scan behavior where
         # the UID appeared in the UI as soon as the card was read.
         await decky.emit("tag_detected", {
@@ -496,11 +518,8 @@ class Plugin:
         # Emit valid URI once — matches old code where uri_detected fired only with final URI
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 
-        # Handle pairing mode
-        if self.is_pairing and event.source_type == SourceType.NFC:
-            uid_bytes = bytes.fromhex(uid_hex)
-            await self._handle_pairing(uid_bytes)
-            return
+        # (Pairing is handled at the top of this method, before URI inspection —
+        # see the comment there for why it cannot live down here.)
 
         if not self.settings.get("auto_launch"):
             return
@@ -724,6 +743,10 @@ class Plugin:
         decky.logger.info(f"UI requested pairing for URI: {uri}")
         self.is_pairing  = True
         self.pairing_uri = uri
+        # Re-arm so a card already sitting on the reader is picked up on the next
+        # poll, instead of requiring the user to lift and re-tap it.
+        if self.nfc_source:
+            self.nfc_source.rearm()
         return True
 
     async def cancel_pairing(self):
@@ -1146,11 +1169,22 @@ class Plugin:
                 sig_record.signature
             )
             
-            decky.logger.info(f"Signature verification: {valid}")
+            # Without cryptography the manager verifies with a symmetric HMAC whose
+            # "public" key is the secret — a pass there proves possession of the
+            # secret, not authenticity. Flag it so callers can't conflate the two.
+            insecure = not getattr(self.signature_manager, "crypto_available", False)
+            if insecure:
+                decky.logger.warning(
+                    "Signature checked with the insecure HMAC fallback "
+                    "(cryptography unavailable) — result is not forgery-resistant."
+                )
+
+            decky.logger.info(f"Signature verification: {valid} (insecure={insecure})")
             return {
                 "valid": valid,
                 "key_id": sig_record.key_id,
-                "algorithm": sig_record.algorithm
+                "algorithm": sig_record.algorithm,
+                "insecure": insecure,
             }
         except Exception as e:
             decky.logger.error(f"Failed to verify signature: {e}")

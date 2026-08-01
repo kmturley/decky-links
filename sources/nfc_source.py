@@ -33,8 +33,14 @@ from sources.base import (
 
 try:
     from nfc.reader import PN532UARTReader
-except ImportError:
+    _READER_IMPORT_ERROR = None
+except ImportError as _e:
+    # Keep the reason. Discarding it makes a packaging failure (e.g. wheels
+    # built for the wrong platform, breaking the adafruit_pn532 -> Blinka ->
+    # cffi import chain) indistinguishable from "no reader plugged in", which
+    # is exactly what made this class of bug so hard to diagnose.
     PN532UARTReader = None
+    _READER_IMPORT_ERROR = _e
 
 
 class NfcSource(MediaSource):
@@ -105,6 +111,17 @@ class NfcSource(MediaSource):
     def reader(self):
         """Expose the underlying reader for direct access by plugin methods."""
         return self._reader
+
+    def rearm(self) -> None:
+        """Forget the currently-seen tag so the next poll re-reports it as new.
+
+        ``poll()`` only emits a LOAD event when the UID differs from the last
+        one seen. Without this, a card already resting on the reader when the
+        user starts pairing would never produce an event, and the user would
+        have to lift and re-tap. Called by ``Plugin.start_pairing``.
+        """
+        self._last_uid_hex = None
+        self._missing_count = 0
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -212,7 +229,13 @@ class NfcSource(MediaSource):
                 self._logger.error(traceback.format_exc())
             # Mark reader as dead so SourceManager will attempt reconnect.
             # Reset last_uid so the same card is re-detected after reconnect.
+            # Close before dropping the reference — otherwise the serial fd
+            # stays open until GC and the next connect() races against it.
             self._last_uid_hex = None
+            try:
+                self._reader.close()
+            except Exception:
+                pass
             self._reader = None
             if self._uart:
                 try:
@@ -322,7 +345,17 @@ class NfcSource(MediaSource):
 
         if rtype == "pn532_uart":
             if not PN532UARTReader:
-                self._logger.error("PN532UARTReader not available")
+                if self._logger:
+                    self._logger.error(
+                        "PN532UARTReader unavailable — nfc.reader failed to import. "
+                        "This is a packaging problem, not missing hardware. "
+                        f"Cause: {type(_READER_IMPORT_ERROR).__name__}: "
+                        f"{_READER_IMPORT_ERROR}"
+                    )
+                    self._logger.error(
+                        "Check that py_modules/ holds Linux x86_64 wheels — macOS "
+                        "builds break the adafruit_pn532 -> Blinka -> cffi chain."
+                    )
                 return None
             return PN532UARTReader(path, baud, logger=self._logger)
         elif rtype == "acr122u":
