@@ -205,16 +205,18 @@ const Content: FC = () => {
       : "Not Playing";
 
   // Pairing needs both halves: something to write, and something to write it to.
-  // Enabling the button without a card meant pressing it just armed pairing and
-  // waited, which reads as a no-op. The game-page icon still supports the
+  // Enabling the button without a medium meant pressing it just armed pairing
+  // and waited, which reads as a no-op. The game-page icon still supports the
   // press-then-tap flow for when you want to arm it deliberately.
   const cardPresent = !!state.tagUid;
+  const isStorage = state.tagSourceType === SourceType.STORAGE;
+  const mediumNoun = isStorage ? "disk" : "card";
   const pairBlockedReason = !pairTarget
     ? "Open a game's page to pair it."
     : !cardPresent
-      ? "Place a card on the reader to pair it."
+      ? "Present a card or insert a disk to pair it."
       : alreadyPaired
-        ? `This card already launches ${pairTarget.label}.`
+        ? `This ${mediumNoun} already launches ${pairTarget.label}.`
         : null;
 
   const pairLabel = state.pairing
@@ -249,9 +251,10 @@ const Content: FC = () => {
           />
         )}
         <StatusRow
-          icon={<FaHashtag />}
-          label="Tag"
-          value={state.tagUid ? state.tagUid : "Not Connected"}
+          icon={isStorage ? <FaHdd /> : <FaHashtag />}
+          label={isStorage ? "Disk" : "Tag"}
+          // A storage media_id is a device node; the leading /dev/ is noise.
+          value={state.tagUid ? (isStorage ? state.tagUid.replace(/^\/dev\//, "") : state.tagUid) : "Not Connected"}
           active={!!state.tagUid}
         />
         <StatusRow
@@ -269,15 +272,14 @@ const Content: FC = () => {
         <ButtonItem
           layout="below"
           onClick={triggerPairing}
+          // Gated on media being present, not on the NFC reader being connected:
+          // a floppy is pairable on a Deck with no reader plugged in at all.
           // Never disable while pairing — the button is the only way to cancel.
-          disabled={
-            !state.readerStatus.connected ||
-            (!state.pairing && pairBlockedReason !== null)
-          }
+          disabled={!state.pairing && pairBlockedReason !== null}
         >
           {pairLabel}
         </ButtonItem>
-        {!state.pairing && state.readerStatus.connected && pairBlockedReason && (
+        {!state.pairing && pairBlockedReason && (
           <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
             {pairBlockedReason}
           </div>
@@ -352,7 +354,10 @@ const Content: FC = () => {
 
       <KeyManagementPanel />
 
-      <SectorManagementPanel tagUid={state.tagUid || undefined} />
+      {/* Keys and sectors are Mifare concepts; a floppy has neither. */}
+      {!isStorage && (
+        <SectorManagementPanel tagUid={state.tagUid || undefined} />
+      )}
     </PanelSection>
   );
 };

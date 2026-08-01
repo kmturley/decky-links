@@ -133,6 +133,35 @@ class MediaSource(ABC):
         """
         return self.is_active()
 
+    # ── Pairing ────────────────────────────────────────────────────────
+
+    def can_write(self) -> bool:
+        """Return ``True`` when media on this source can be paired.
+
+        Pairing means persisting a URI onto the medium itself, so that it
+        launches the same game on any Deck. Sources that only observe —
+        a camera reading QR codes, an MQTT topic — return ``False``.
+        """
+        return False
+
+    def write_uri(self, media_id: str, uri: str) -> "tuple[bool, Optional[str]]":
+        """Persist ``uri`` onto the medium identified by ``media_id``.
+
+        Returns ``(success, error_message)``. ``media_id`` is whatever this
+        source puts in :attr:`MediaEvent.media_id` — a tag UID for NFC, a
+        device node for storage.
+        """
+        return False, f"{self.source_type.value} media cannot be paired"
+
+    def rearm(self) -> None:
+        """Re-report media that is already present on the next poll.
+
+        Sources only emit LOAD on arrival, so media sitting in place when the
+        user presses "Pair" would never produce an event and the button would
+        appear to hang. Called by ``Plugin.start_pairing`` on every source.
+        """
+        return None
+
     @abstractmethod
     async def poll(self) -> Optional[PluginEvent]:
         """Perform one poll cycle.

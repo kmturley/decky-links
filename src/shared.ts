@@ -90,6 +90,9 @@ export interface SharedState {
   readerStatus: ReaderStatus;
   tagUid: string | null;
   tagUri: string | null;
+  /** Which source is presenting the current medium — an NFC tag and a floppy
+   *  both land in tagUid, but only one of them has sectors to manage. */
+  tagSourceType: SourceType | null;
   activeAppId: string | null;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
@@ -110,6 +113,7 @@ export const sharedState: SharedState = {
   readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
   tagUid: null,
   tagUri: null,
+  tagSourceType: null,
   activeAppId: null,
   viewedApp: null,
   pairing: false,

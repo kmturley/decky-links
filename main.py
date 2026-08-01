@@ -508,13 +508,12 @@ class Plugin:
         # A blank tag — the normal case when pairing a new card — carries no URI,
         # so deferring this until after the `if not uri: return` guard below made
         # pairing impossible for exactly the tags users want to pair.
-        if self.is_pairing and event.source_type == SourceType.NFC:
+        if self.is_pairing and self._pairable_source(event.source_id) is not None:
             await decky.emit("tag_detected", {
                 "uid": uid_hex,
                 "source_type": event.source_type.value,
             })
-            uid_bytes = bytes.fromhex(uid_hex)
-            await self._handle_pairing(uid_bytes, source_id=event.source_id)
+            await self._handle_pairing(uid_hex, source_id=event.source_id)
             return
 
         # Emit tag_detected immediately — matches old _handle_scan behavior where
@@ -721,46 +720,82 @@ class Plugin:
 
     # ── Pairing Handler ────────────────────────────────────────────────
 
-    async def _handle_pairing(self, uid, source_id: Optional[str] = None):
-        """Write the pairing URI to the NFC tag (Spec §7)."""
+    def _pairable_source(self, source_id: Optional[str]):
+        """Return the registered source with this id, if it can be written to.
+
+        Pairing is no longer NFC-only: a blank floppy is written by asking its
+        own source to persist the URI, exactly as a blank tag is.
+        """
+        if not source_id:
+            return None
+        for source in (
+            self.nfc_source,
+            self.storage_source,
+            self.camera_source,
+            self.mqtt_source,
+            self.serial_source,
+            self.file_watch_source,
+        ):
+            if source is None:
+                continue
+            if source.source_id == source_id and source.can_write():
+                return source
+        return None
+
+    async def _handle_pairing(self, media_id: str, source_id: Optional[str] = None):
+        """Write the pairing URI onto the presented medium (Spec §7)."""
         if not self.pairing_uri:
             decky.logger.warning("Pairing triggered but no URI set!")
             self.is_pairing = False
             self.pairing_uri = None
             return
 
+        source = self._pairable_source(source_id)
+        if source is None:
+            decky.logger.warning(
+                f"Pairing triggered for {source_id} which cannot be written to"
+            )
+            self.is_pairing = False
+            self.pairing_uri = None
+            await decky.emit("pairing_result", {
+                "success": False,
+                "uid":     media_id,
+                "error":   "This trigger source cannot be paired",
+            })
+            return
+
         # Atomic state update: exit pairing mode immediately to prevent
-        # new tags from interfering with the write operation
+        # new media from interfering with the write operation
         pairing_uri = self.pairing_uri
         self.is_pairing = False
         self.pairing_uri = None
 
-        decky.logger.info(f"Pairing: writing {pairing_uri} to tag {uid.hex()}")
+        decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
-            success, error_msg = self.nfc_source.write_ndef_uri(uid, pairing_uri)
+            success, error_msg = source.write_uri(media_id, pairing_uri)
             self._play_sound("success.flac" if success else "error.flac")
 
             if success:
-                # The tag now holds this URI, but nothing will re-read it while
-                # it rests on the reader — poll() only reports a tag on arrival.
-                # Without this the panel shows "Url: Empty" until the user lifts
-                # and replaces the card, even though pairing succeeded.
-                await self._sync_uri_after_pairing(uid, pairing_uri, source_id)
+                # The medium now holds this URI, but nothing will re-read it
+                # while it stays put — poll() only reports media on arrival.
+                # Without this the panel shows "Url: Empty" until the user
+                # lifts and replaces the card, even though pairing succeeded.
+                await self._sync_uri_after_pairing(media_id, pairing_uri, source_id)
 
             await decky.emit("pairing_result", {
                 "success": success,
-                "uid":     uid.hex(),
+                "uid":     media_id,
                 "error":   error_msg,
             })
         except Exception as e:
             decky.logger.error(f"Critical error in pairing handler: {e}")
             await decky.emit("pairing_result", {
                 "success": False,
-                "uid":     uid.hex(),
+                "uid":     media_id,
                 "error":   str(e),
             })
 
-    async def _sync_uri_after_pairing(self, uid, uri: str, source_id: Optional[str]):
+    async def _sync_uri_after_pairing(self, media_id: str, uri: str, source_id: Optional[str]):
         """Reflect a freshly-written URI in plugin state and tell the frontend.
 
         Emits ``uri_detected`` with ``paired: True``. The flag matters: the
@@ -768,13 +803,13 @@ class Plugin:
         the game — it would yank the user out of whatever they were doing right
         after they pressed a button that only promised to write a tag.
         """
-        uid_hex = uid.hex().upper()
-        self.current_tag_uri = uri
+        source = self._pairable_source(source_id)
+        is_nfc = source is not None and source.source_type == SourceType.NFC
 
         # Keep the registry and the source's own view consistent, so the RPC
         # poll fallback and any later reads agree with what the panel shows.
         entry = self._active_media.get(source_id) if source_id else None
-        if entry is None:
+        if entry is None and is_nfc:
             entry = next(
                 (m for m in self._active_media.values() if m.get("source_type") == "nfc"),
                 None,
@@ -782,13 +817,17 @@ class Plugin:
         if entry is not None:
             entry["uri"] = uri
 
-        if self.nfc_source is not None:
-            self.nfc_source.current_tag_uri = uri
+        # current_tag_* is the NFC-specific view behind get_tag_status; pairing
+        # a floppy must not overwrite what the reader is holding.
+        if is_nfc:
+            self.current_tag_uri = uri
+            if self.nfc_source is not None:
+                self.nfc_source.current_tag_uri = uri
 
-        decky.logger.info(f"Pairing wrote {uri} to {uid_hex}; syncing UI state")
+        decky.logger.info(f"Pairing wrote {uri} to {media_id}; syncing UI state")
         await decky.emit("uri_detected", {
             "uri":    uri,
-            "uid":    uid_hex,
+            "uid":    media_id,
             "paired": True,
         })
 
@@ -834,9 +873,30 @@ class Plugin:
                 decky.logger.error(f"Sound path is not a regular file: {sound_path}")
                 return
             
-            subprocess.Popen(["paplay", sound_path])
+            subprocess.Popen(["paplay", sound_path], env=self._audio_env())
         except Exception as e:
             decky.logger.error(f"Failed to play sound {filename}: {e}")
+
+    def _audio_env(self):
+        """Environment that lets paplay reach the desktop user's audio server.
+
+        The plugin runs as root (needed to mount disks), which puts it outside
+        the user's PipeWire session — paplay would find no server and every
+        sound would silently vanish. Point it at the session socket explicitly;
+        root can open it regardless of its ownership.
+        """
+        env = dict(os.environ)
+        if os.geteuid() != 0:
+            return env
+        try:
+            import pwd
+            user = getattr(decky, "DECKY_USER", None) or "deck"
+            uid = pwd.getpwnam(user).pw_uid
+        except (KeyError, ImportError):
+            return env
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+        env.setdefault("PULSE_SERVER", f"unix:/run/user/{uid}/pulse/native")
+        return env
 
     # -----------------------------------------------------------
     # Callable methods (called from JS frontend)
@@ -863,10 +923,17 @@ class Plugin:
         decky.logger.info(f"UI requested pairing for URI: {uri}")
         self.is_pairing  = True
         self.pairing_uri = uri
-        # Re-arm so a card already sitting on the reader is picked up on the next
-        # poll, instead of requiring the user to lift and re-tap it.
-        if self.nfc_source:
-            self.nfc_source.rearm()
+        # Re-arm every source so media already in place — a card resting on the
+        # reader, a disk already in the drive — is picked up on the next poll,
+        # instead of requiring the user to remove and re-present it.
+        for source in (self.nfc_source, self.storage_source, self.camera_source,
+                       self.mqtt_source, self.serial_source, self.file_watch_source):
+            if source is None:
+                continue
+            try:
+                source.rearm()
+            except Exception as e:
+                decky.logger.warning(f"rearm failed for {source.source_id}: {e}")
         return True
 
     async def cancel_pairing(self):

@@ -271,12 +271,22 @@ class TestHandleDeviceAdded:
         assert event.media_id == "/dev/sdb1"
         assert src._active_media["/dev/sdb1"] == "steam://run/12345"
 
-    def test_existing_mount_without_payload_returns_none(self, tmp_path):
+    def test_existing_mount_without_payload_reports_blank_media(self, tmp_path):
+        """A disk with no payload is pairable, not uninteresting.
+
+        It is the floppy equivalent of a blank NFC tag: the panel needs to know
+        it is there so it can offer to write one.
+        """
+        from sources.base import MediaEventKind
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
             event = src._handle_device_added("/dev/sdb1")
-        assert event is None
-        assert "/dev/sdb1" not in src._active_media
+        assert event is not None
+        assert event.kind == MediaEventKind.LOAD
+        assert event.uri == ""
+        assert event.payload["blank"] is True
+        assert event.payload["mountpoint"] == str(tmp_path)
+        assert src._active_media["/dev/sdb1"] == ""
 
     def test_no_mount_then_mounts_and_emits_load(self, tmp_path):
         from sources.base import MediaEventKind
@@ -311,16 +321,18 @@ class TestHandleDeviceAdded:
         assert event is None
         mock_mount.assert_not_called()
 
-    def test_our_mount_cleaned_up_when_no_payload(self, tmp_path):
+    def test_our_mount_kept_when_no_payload(self, tmp_path):
+        """Pairing needs somewhere to write, so a blank disk stays mounted."""
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=True):
                 with patch.object(src, "_mount_device", return_value=str(tmp_path)):
                     with patch.object(src, "_unmount_device") as mock_umount:
                         event = src._handle_device_added("/dev/sdb1")
-        assert event is None
-        mock_umount.assert_called_once_with(str(tmp_path))
-        assert "/dev/sdb1" not in src._our_mounts
+        assert event is not None
+        assert event.payload["blank"] is True
+        mock_umount.assert_not_called()
+        assert src._our_mounts["/dev/sdb1"] == str(tmp_path)
 
     def test_uri_excluded_from_event_payload(self, tmp_path):
         src = _make_source()
@@ -488,6 +500,113 @@ class TestScanExistingDevices:
         assert uris == {"steam://run/1", "steam://run/2"}
 
 
+# ── rearm() ───────────────────────────────────────────────────────────────────
+
+class TestRearm:
+    """udev fires once, on insertion. Pressing Pair with a disk already in the
+    drive must not wait for an event that will never come."""
+
+    @pytest.mark.asyncio
+    async def test_rearm_requeues_load_for_present_disk(self):
+        from sources.base import MediaEventKind
+        src = _make_source()
+        src._active_media["/dev/sdb1"] = "steam://run/42"
+        src.rearm()
+        event = await src.poll()
+        assert event is not None
+        assert event.kind == MediaEventKind.LOAD
+        assert event.media_id == "/dev/sdb1"
+        assert event.uri == "steam://run/42"
+
+    @pytest.mark.asyncio
+    async def test_rearm_marks_unpaired_disk_blank(self):
+        src = _make_source()
+        src._active_media["/dev/sdb1"] = ""
+        src.rearm()
+        event = await src.poll()
+        assert event.payload["blank"] is True
+
+    def test_rearm_with_no_media_is_a_no_op(self):
+        src = _make_source()
+        src.rearm()
+        assert len(src._pending) == 0
+
+
+# ── write_uri() — pairing a disk ──────────────────────────────────────────────
+
+class TestWriteUri:
+
+    def test_source_advertises_write_capability(self):
+        assert _make_source().can_write() is True
+
+    def test_writes_payload_to_mounted_disk(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", return_value=True):
+            ok, err = src.write_uri("/dev/sdb1", "steam://rungameid/400")
+        assert (ok, err) == (True, None)
+        written = json.loads((tmp_path / "decky-links.json").read_text())
+        assert written == {
+            "version": 1, "uri": "steam://rungameid/400", "title": "", "icon": "",
+        }
+        assert src._active_media["/dev/sdb1"] == "steam://rungameid/400"
+
+    def test_written_payload_reads_back(self, tmp_path):
+        """The file we write must satisfy the reader that will parse it later."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", return_value=True):
+            src.write_uri("/dev/sdb1", "steam://rungameid/400", title="Portal")
+        payload = src._read_payload(str(tmp_path / "decky-links.json"))
+        assert payload is not None
+        assert payload["uri"] == "steam://rungameid/400"
+        assert payload["title"] == "Portal"
+
+    def test_remounts_read_only_afterwards(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", return_value=True) as mock_remount:
+            src.write_uri("/dev/sdb1", "steam://run/1")
+        assert [c.args[1] for c in mock_remount.call_args_list] == ["rw", "ro"]
+
+    def test_restores_read_only_even_when_write_fails(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", return_value=True) as mock_remount:
+            with patch("builtins.open", side_effect=OSError("disk full")):
+                ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+        assert ok is False
+        assert "disk full" in err
+        # Leaving the disk writable after a failed pair is how a floppy gets
+        # corrupted by the next sudden eject.
+        assert [c.args[1] for c in mock_remount.call_args_list] == ["rw", "ro"]
+
+    def test_fails_when_not_mounted(self):
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=None):
+            ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+        assert ok is False
+        assert "not mounted" in err
+
+    def test_fails_when_remount_rw_refused(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", return_value=False):
+            ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+        assert ok is False
+        assert "read-write" in err
+        assert not (tmp_path / "decky-links.json").exists()
+
+    def test_falls_back_to_system_mount_point(self, tmp_path):
+        """Disks the system mounted are pairable too, not just ones we mounted."""
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            with patch.object(src, "_remount", return_value=True):
+                ok, _ = src.write_uri("/dev/sdb1", "steam://run/1")
+        assert ok is True
+        assert (tmp_path / "decky-links.json").exists()
+
+
 # ── _is_removable() ───────────────────────────────────────────────────────────
 
 class TestIsRemovable:
@@ -583,14 +702,18 @@ class TestIntegration:
         assert src._active_media == {}
 
     @pytest.mark.asyncio
-    async def test_add_without_payload_produces_no_events(self, tmp_path):
+    async def test_add_without_payload_produces_blank_load(self, tmp_path):
+        from sources.base import MediaEventKind
         src = _make_source()
         src._monitor = MagicMock()
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
             src._monitor.poll.return_value = _make_udev_device("add", "/dev/sdb1")
             event = await src.poll()
-        assert event is None
-        assert src._active_media == {}
+        assert event is not None
+        assert event.kind == MediaEventKind.LOAD
+        assert event.uri == ""
+        assert event.payload["blank"] is True
+        assert src._active_media == {"/dev/sdb1": ""}
 
     @pytest.mark.asyncio
     async def test_startup_scan_events_emitted_before_udev_events(self, tmp_path):

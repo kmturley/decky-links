@@ -118,6 +118,12 @@ else
     echo "  not installed"
 fi
 echo
+echo "── plugin process user (must be root to mount disks) ──"
+ps -eo user:16,pid,args 2>/dev/null | grep -i "[D]ecky Links" | head -3 || true
+if [ -n "$plugin_dir" ]; then
+    echo "  plugin.json flags: $(grep -A4 '"flags"' "$plugin_dir/plugin.json" 2>/dev/null | tr -d ' \n')"
+fi
+echo
 echo "── log dirs ──"
 ls -1 "$HOME"/homebrew/logs/ 2>/dev/null || echo "  none"
 echo

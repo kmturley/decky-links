@@ -3,7 +3,7 @@
   "author": "kmturley",
   "flags": [
     "debug",
-    "_root"
+    "root"
   ],
   "api_version": 1,
   "publish": {

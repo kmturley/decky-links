@@ -15,6 +15,7 @@ Tests cover:
 """
 import asyncio
 import json
+import sys
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 
@@ -28,6 +29,22 @@ def _make_uid(b: bytes = b"\xDE\xAD\xBE\xEF"):
     uid.__eq__ = lambda self, other: b == other
     uid.__ne__ = lambda self, other: b != other
     return uid
+
+
+def _mock_nfc_source(write_result=(True, None), source_id="nfc:/dev/ttyUSB0"):
+    """A stand-in NfcSource that satisfies the source-generic pairing lookup.
+
+    Pairing resolves the source by id and asks whether it can be written to,
+    so a bare MagicMock is no longer enough.
+    """
+    from sources.base import SourceType
+    src = MagicMock()
+    src.source_id = source_id
+    src.source_type = SourceType.NFC
+    src.can_write.return_value = True
+    src.write_uri.return_value = write_result
+    src.write_ndef_uri.return_value = write_result
+    return src
 
 
 def _make_load_event(uid_hex: str, uri=None, records=None, tag_meta=None):
@@ -317,6 +334,69 @@ class TestNoAutoRelaunch:
 
         assert plugin.current_tag_uid == "DEADBEEF"
         assert plugin.state           == PluginState.READY
+
+
+# ── §9.1a — Serial port auto-detection ───────────────────────────────────────
+
+def _fake_port(device, vid=None, pid=None, product=None):
+    p = MagicMock()
+    p.device, p.vid, p.pid, p.product = device, vid, pid, product
+    return p
+
+
+class TestFindSerialPort:
+    """Auto-detection must never guess at an unidentified CDC-ACM device.
+
+    A Steam Deck exposes an unrelated /dev/ttyACM0; picking it meant writing
+    PN532 wake-up frames to some other piece of hardware every retry.
+    """
+
+    def _source(self, ports):
+        from sources.nfc_source import NfcSource
+        src = NfcSource({"device_path": "/dev/ttyUSB0"}, logger=MagicMock())
+        fake_list_ports = MagicMock()
+        fake_list_ports.comports.return_value = ports
+        fake_tools = MagicMock(list_ports=fake_list_ports)
+        with patch.dict(sys.modules, {"serial.tools": fake_tools,
+                                      "serial.tools.list_ports": fake_list_ports}):
+            return src, src._find_serial_port()
+
+    def test_picks_ch340_bridge(self):
+        _, found = self._source([
+            _fake_port("/dev/ttyACM0", vid=0x2341, pid=0x0043, product="Arduino"),
+            _fake_port("/dev/ttyUSB0", vid=0x1A86, pid=0x7523, product="USB Serial"),
+        ])
+        assert found == "/dev/ttyUSB0"
+
+    def test_ignores_unknown_acm_device(self):
+        _, found = self._source([_fake_port("/dev/ttyACM0", vid=0x2341, pid=0x0043)])
+        assert found is None
+
+    def test_ignores_port_without_usb_ids(self):
+        _, found = self._source([_fake_port("/dev/ttyS0")])
+        assert found is None
+
+    def test_no_ports_at_all(self):
+        _, found = self._source([])
+        assert found is None
+
+    @pytest.mark.parametrize("vid", [0x1A86, 0x10C4, 0x0403, 0x067B])
+    def test_known_bridge_vendors_accepted(self, vid):
+        _, found = self._source([_fake_port("/dev/ttyUSB0", vid=vid, pid=0x0001)])
+        assert found == "/dev/ttyUSB0"
+
+    def test_repeated_failures_log_only_once(self):
+        """start() retries forever; an unplugged reader used to log every 30s."""
+        from sources.nfc_source import NfcSource
+        src = NfcSource({"device_path": "/dev/ttyUSB0"}, logger=MagicMock())
+        fake_list_ports = MagicMock()
+        fake_list_ports.comports.return_value = [_fake_port("/dev/ttyACM0", vid=0x2341)]
+        fake_tools = MagicMock(list_ports=fake_list_ports)
+        with patch.dict(sys.modules, {"serial.tools": fake_tools,
+                                      "serial.tools.list_ports": fake_list_ports}):
+            for _ in range(5):
+                src._find_serial_port()
+        assert src._logger.info.call_count == 1
 
 
 # ── §9.1 — Reader / NfcSource init ───────────────────────────────────────────
@@ -684,9 +764,7 @@ class TestPairing:
              patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
 
-        mock_pair.assert_called_once_with(
-            bytes.fromhex("DEADBEEF"), source_id="nfc:/dev/ttyUSB0"
-        )
+        mock_pair.assert_called_once_with("DEADBEEF", source_id="nfc:/dev/ttyUSB0")
         mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -706,9 +784,7 @@ class TestPairing:
              patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
 
-        mock_pair.assert_called_once_with(
-            bytes.fromhex("DEADBEEF"), source_id="nfc:/dev/ttyUSB0"
-        )
+        mock_pair.assert_called_once_with("DEADBEEF", source_id="nfc:/dev/ttyUSB0")
         mock_launch.assert_not_called()
 
     @pytest.mark.asyncio
@@ -754,7 +830,7 @@ class TestPairing:
 
         with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
              patch.object(plugin, "_play_sound") as mock_sound:
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         mock_sound.assert_called_with("success.flac")
 
@@ -766,7 +842,7 @@ class TestPairing:
 
         with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(False, "Auth failed")), \
              patch.object(plugin, "_play_sound") as mock_sound:
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         mock_sound.assert_called_with("error.flac")
 
@@ -778,7 +854,7 @@ class TestPairing:
 
         with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
              patch.object(plugin, "_play_sound"):
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         assert plugin.is_pairing  is False
         assert plugin.pairing_uri is None
@@ -790,7 +866,7 @@ class TestPairing:
         uid                = _make_uid()
 
         with patch.object(plugin.nfc_source, "write_ndef_uri", new_callable=MagicMock) as mock_write:
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         mock_write.assert_not_called()
         assert plugin.is_pairing is False
@@ -803,7 +879,7 @@ class TestPairing:
 
         with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
              patch.object(plugin, "_play_sound"):
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         mock_decky.emit.assert_called()
         event_name = mock_decky.emit.call_args_list[-1].args[0]
@@ -818,7 +894,7 @@ class TestPairing:
         with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
              patch.object(plugin, "_launch_uri", new_callable=AsyncMock) as mock_launch, \
              patch.object(plugin, "_play_sound"):
-            await plugin._handle_pairing(uid)
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
         mock_launch.assert_not_called()
 
@@ -1402,8 +1478,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_updates_current_tag_uri(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = MagicMock()
-        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+        plugin.nfc_source  = _mock_nfc_source((True, None))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1414,8 +1489,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_emits_uri_detected_marked_paired(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = MagicMock()
-        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+        plugin.nfc_source  = _mock_nfc_source((True, None))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1430,8 +1504,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_updates_active_media_registry(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = MagicMock()
-        plugin.nfc_source.write_ndef_uri.return_value = (True, None)
+        plugin.nfc_source  = _mock_nfc_source((True, None))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1443,8 +1516,7 @@ class TestPairingUriSync:
     async def test_failed_pairing_does_not_claim_a_uri(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = MagicMock()
-        plugin.nfc_source.write_ndef_uri.return_value = (False, "Write failed at page 4")
+        plugin.nfc_source  = _mock_nfc_source((False, "Write failed at page 4"))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))

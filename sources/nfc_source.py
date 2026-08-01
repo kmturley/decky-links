@@ -43,6 +43,16 @@ except ImportError as _e:
     _READER_IMPORT_ERROR = _e
 
 
+# USB-serial bridge chips used by PN532/PN5180 UART modules. Auto-detection is
+# restricted to these so it can never land on an unrelated CDC-ACM device.
+_KNOWN_USB_SERIAL_VIDS = frozenset({
+    0x1A86,  # QinHeng CH340 / CH341
+    0x10C4,  # Silicon Labs CP210x
+    0x0403,  # FTDI
+    0x067B,  # Prolific PL2303
+})
+
+
 class NfcSource(MediaSource):
     """NFC reader polling source.
 
@@ -83,6 +93,8 @@ class NfcSource(MediaSource):
         # Last path that produced a successful connection — prefer this over
         # auto-detecting a different port after a transient USB disconnect.
         self._last_good_path: Optional[str] = None
+        # Deduplicates the repeated logging of an unchanged failure state.
+        self._last_log_key: Optional[str] = None
 
         # Pairing state (set by plugin)
         self.is_pairing: bool = False
@@ -126,26 +138,62 @@ class NfcSource(MediaSource):
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     def _find_serial_port(self) -> Optional[str]:
-        """Return the first available USB serial port, or None.
+        """Return a serial port that looks like a reader, or None.
 
-        Used as a fallback when the configured device_path doesn't exist —
-        covers macOS (/dev/cu.usbserial-*) and Linux (/dev/ttyUSB*, /dev/ttyACM*).
+        Identified by the USB-serial bridge's vendor ID rather than by globbing
+        device names. A Steam Deck exposes an unrelated ``/dev/ttyACM0``; the
+        old glob picked it whenever no reader was plugged in and then wrote
+        PN532 wake-up frames to it every retry. Auto-detection now guesses only
+        when there is positive evidence, and stays silent otherwise.
         """
-        import glob
-        if sys.platform == "darwin":
-            patterns = ["/dev/cu.usbserial-*", "/dev/cu.usbmodem*"]
-        else:
-            patterns = ["/dev/ttyUSB*", "/dev/ttyACM*"]
-        for pattern in patterns:
-            matches = sorted(glob.glob(pattern))
-            if matches:
-                if self._logger:
-                    self._logger.info(
-                        f"NfcSource: auto-detected serial port {matches[0]!r} "
-                        f"(configured {self._settings.get('device_path')!r} not found)"
-                    )
-                return matches[0]
-        return None
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            self._log_once("no-list-ports", "warning",
+                           "NfcSource: pyserial list_ports unavailable — "
+                           "cannot auto-detect a reader port")
+            return None
+
+        try:
+            ports = list(list_ports.comports())
+        except Exception as e:
+            self._log_once("list-ports-failed", "warning",
+                           f"NfcSource: could not enumerate serial ports: {e}")
+            return None
+
+        candidates = sorted(
+            (p for p in ports if p.vid in _KNOWN_USB_SERIAL_VIDS),
+            key=lambda p: p.device,
+        )
+        if not candidates:
+            seen = ", ".join(sorted(p.device for p in ports)) or "none"
+            self._log_once(
+                "no-candidate", "info",
+                f"NfcSource: no USB-serial reader found "
+                f"(configured {self._settings.get('device_path')!r} not present; "
+                f"ports seen: {seen})",
+            )
+            return None
+
+        chosen = candidates[0]
+        self._log_once(
+            f"detected:{chosen.device}", "info",
+            f"NfcSource: auto-detected serial port {chosen.device!r} "
+            f"[{chosen.vid:04x}:{chosen.pid:04x} {chosen.product or 'unknown'}] "
+            f"(configured {self._settings.get('device_path')!r} not found)",
+        )
+        return chosen.device
+
+    def _log_once(self, key: str, level: str, message: str) -> None:
+        """Log only when the situation changes.
+
+        ``start()`` is retried on a timer forever, so an unplugged reader used
+        to write the same two lines to the log every 30 seconds indefinitely.
+        """
+        if not self._logger or self._last_log_key == key:
+            return
+        self._last_log_key = key
+        getattr(self._logger, level)(message)
 
     async def start(self) -> bool:
         """Initialise the NFC reader hardware."""
@@ -171,16 +219,20 @@ class NfcSource(MediaSource):
 
         connected = await reader.connect()
         if not connected:
-            if self._logger:
-                self._logger.error("NfcSource: reader init failed: unable to connect")
+            self._log_once(
+                f"connect-failed:{path}", "error",
+                f"NfcSource: reader init failed on {path}: unable to connect",
+            )
             self._reader = None
             return False
 
         if self._logger:
             self._logger.info(
                 f"NfcSource: connected to reader type "
-                f"{self._settings.get('reader_type')}"
+                f"{self._settings.get('reader_type')} on {path}"
             )
+        # Let the next failure speak up, however many times we retried to get here.
+        self._last_log_key = None
         self._reader = reader
         self._last_good_path = self._effective_path
         return True
@@ -568,6 +620,20 @@ class NfcSource(MediaSource):
         return None
 
     # ── NDEF Write (for pairing) ───────────────────────────────────────
+
+    def can_write(self) -> bool:
+        return True
+
+    def write_uri(self, media_id: str, uri: str) -> Tuple[bool, Optional[str]]:
+        """Source-generic pairing entry point.
+
+        ``media_id`` is the tag UID as hex, the form carried by MediaEvents.
+        """
+        try:
+            uid = bytes.fromhex(media_id)
+        except (ValueError, TypeError):
+            return False, f"invalid tag UID {media_id!r}"
+        return self.write_ndef_uri(uid, uri)
 
     def write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         """Write a URI as an NDEF URI record to the tag.

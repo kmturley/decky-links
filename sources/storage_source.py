@@ -239,18 +239,24 @@ class StorageSource(MediaSource):
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
         payload = self._read_payload(payload_path)
         if payload is None:
+            # A disk with no payload is still a pairable medium — the floppy
+            # equivalent of a blank NFC tag. Report it as present-but-blank so
+            # the panel can offer to write one, and keep the mount so pairing
+            # has somewhere to write to.
             if self._logger:
-                # Silent rejection here is the most likely reason a working disk
-                # appears to do nothing, so name the exact file we wanted.
                 self._logger.info(
-                    f"StorageSource: {devnode} mounted at {mountpoint} but no valid "
-                    f"{PAYLOAD_FILENAME} at its root — ignoring. Expected JSON with "
-                    f'{{"version": 1, "uri": "steam://rungameid/..."}}'
+                    f"StorageSource: {devnode} mounted at {mountpoint} with no valid "
+                    f"{PAYLOAD_FILENAME} — reporting as blank media, ready to pair"
                 )
-            if mounted_by_us:
-                self._unmount_device(mountpoint)
-                self._our_mounts.pop(devnode, None)
-            return None
+            self._active_media[devnode] = ""
+            return MediaEvent(
+                kind=MediaEventKind.LOAD,
+                source_type=SourceType.STORAGE,
+                source_id=self.source_id,
+                media_id=devnode,
+                uri="",
+                payload={"blank": True, "mountpoint": mountpoint},
+            )
 
         uri = payload.get("uri", "")
         self._active_media[devnode] = uri
@@ -286,6 +292,88 @@ class StorageSource(MediaSource):
             media_id=devnode,
             uri=uri,
         )
+
+    # ── Pairing ────────────────────────────────────────────────────────
+
+    def can_write(self) -> bool:
+        return True
+
+    def rearm(self) -> None:
+        """Re-queue a LOAD for every disk currently in a drive.
+
+        udev fires once, on insertion. Without this, pressing "Pair" with a
+        disk already in the drive would wait for an event that never comes —
+        the user would have to eject and reinsert to pair.
+        """
+        for devnode, uri in list(self._active_media.items()):
+            self._pending.append(MediaEvent(
+                kind=MediaEventKind.LOAD,
+                source_type=SourceType.STORAGE,
+                source_id=self.source_id,
+                media_id=devnode,
+                uri=uri,
+                payload={"blank": not uri, "rearmed": True},
+            ))
+
+    def write_uri(self, media_id: str, uri: str, title: str = "", icon: str = ""):
+        """Write ``decky-links.json`` to the disk's filesystem root.
+
+        Disks are mounted read-only so that a disk sitting in a drive is never
+        at risk from a crash or a sudden eject; pairing briefly remounts
+        read-write and puts it back afterwards regardless of outcome.
+        """
+        devnode = media_id
+        mountpoint = self._our_mounts.get(devnode) or self._find_mount_point(devnode)
+        if not mountpoint:
+            return False, f"{devnode} is not mounted"
+
+        if not self._remount(mountpoint, "rw"):
+            return False, f"could not remount {mountpoint} read-write"
+
+        try:
+            path = os.path.join(mountpoint, PAYLOAD_FILENAME)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"version": 1, "uri": uri, "title": title, "icon": icon},
+                    f,
+                    indent=2,
+                )
+                f.flush()
+                # Floppies are slow and users eject the moment the UI says done.
+                os.fsync(f.fileno())
+        except OSError as e:
+            if self._logger:
+                self._logger.error(f"StorageSource: failed writing {devnode}: {e}")
+            return False, str(e)
+        finally:
+            self._remount(mountpoint, "ro")
+
+        self._active_media[devnode] = uri
+        if self._logger:
+            self._logger.info(f"StorageSource: wrote uri={uri} to {devnode}")
+        return True, None
+
+    def _remount(self, mountpoint: str, mode: str) -> bool:
+        """Remount an existing mountpoint ``rw`` or ``ro`` in place."""
+        try:
+            result = subprocess.run(
+                ["mount", "-o", f"remount,{mode}", mountpoint],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return True
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: remount,{mode} failed for {mountpoint}: "
+                    f"{result.stderr.decode(errors='replace').strip()}"
+                )
+        except Exception as e:
+            if self._logger:
+                self._logger.error(
+                    f"StorageSource: remount,{mode} error for {mountpoint}: {e}"
+                )
+        return False
 
     # ── Mount helpers ──────────────────────────────────────────────────
 

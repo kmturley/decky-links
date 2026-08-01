@@ -199,10 +199,13 @@ export function startBackgroundManager(): () => void {
     if (active && tag.uid) {
       sharedState.tagUid = tag.uid;
       sharedState.tagUri = tag.uri;
+      // get_tag_status only ever reports the NFC reader's view.
+      sharedState.tagSourceType = SourceType.NFC;
       tagUidRef.current = tag.uid;
     } else if (active) {
       sharedState.tagUid = null;
       sharedState.tagUri = null;
+      sharedState.tagSourceType = null;
       tagUidRef.current = null;
     }
 
@@ -216,10 +219,13 @@ export function startBackgroundManager(): () => void {
   init();
 
   // event listeners
-  const tagListener = addEventListener<[data: { uid: string }]>("tag_detected", (data) => {
+  const tagListener = addEventListener<[data: { uid: string, source_type?: string }]>("tag_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     sharedState.tagUid = data.uid;
     sharedState.tagUri = null;
+    // Absent source_type means NFC: that is the only source that predates the
+    // field, and every other one sets it explicitly.
+    sharedState.tagSourceType = (data.source_type as SourceType) ?? SourceType.NFC;
     tagUidRef.current = data.uid;
     notifySubscribers();
   });
@@ -227,6 +233,7 @@ export function startBackgroundManager(): () => void {
   const removeListener = addEventListener("tag_removed", () => {
     sharedState.tagUid = null;
     sharedState.tagUri = null;
+    sharedState.tagSourceType = null;
     tagUidRef.current = null;
     notifySubscribers();
   });
@@ -380,6 +387,7 @@ export function startBackgroundManager(): () => void {
             if (sharedState.tagUid !== t.uid || sharedState.tagUri !== t.uri) {
               sharedState.tagUid = t.uid;
               sharedState.tagUri = t.uri;
+              sharedState.tagSourceType = SourceType.NFC;
               notifySubscribers();
             }
             tagUidRef.current = t.uid;
