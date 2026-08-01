@@ -34,6 +34,10 @@ PAYLOAD_FILENAME = "decky-links.json"
 # worker thread — blocking the event loop for this long stalls the whole plugin.
 MOUNT_TIMEOUT_SECONDS = 20
 
+# Temp mountpoints we create. Also the marker used to identify — and reap —
+# mounts stranded by a previous plugin process.
+_MOUNT_PREFIX = "/tmp/decky-links-"
+
 # Device node prefixes we consider mountable storage
 _DEVICE_PREFIXES = (
     "/dev/fd",       # floppy
@@ -93,6 +97,7 @@ class StorageSource(MediaSource):
             self._monitor = monitor
             if self._logger:
                 self._logger.info("StorageSource: udev monitor started")
+            await self._reap_stale_mounts()
             await self._scan_existing_devices()
             return True
         except Exception as e:
@@ -323,12 +328,19 @@ class StorageSource(MediaSource):
     async def _handle_device_removed(self, devnode: str) -> Optional[MediaEvent]:
         """Emit UNLOAD event and clean up any mount we created."""
         uri = self._active_media.pop(devnode, None)
-        if uri is None:
-            return None  # Never saw a LOAD for this device — ignore
 
+        # Release the mount before deciding whether there is an event to emit.
+        # Returning early on "no active media" used to strand the mount: eject
+        # the disk (which clears _active_media), then unplug the drive, and the
+        # filesystem stayed mounted forever. The kernel will not reuse a device
+        # node that is still busy, so the next drive plugged in comes up as
+        # /dev/sdb, then /dev/sdc, drifting further each time.
         mountpoint = self._our_mounts.pop(devnode, None)
         if mountpoint:
             await self._unmount_device(mountpoint)
+
+        if uri is None:
+            return None  # Never saw a LOAD for this device — nothing to report
 
         if self._logger:
             self._logger.info(f"StorageSource: removed {devnode}")
@@ -401,6 +413,33 @@ class StorageSource(MediaSource):
             self._logger.info(f"StorageSource: wrote uri={uri} to {devnode}")
         return True, None
 
+    async def _reap_stale_mounts(self) -> None:
+        """Unmount temp mounts left behind by a previous plugin process.
+
+        A restart (or a crash, or `systemctl restart plugin_loader`) never runs
+        ``stop()``, so every mount we held stays in the kernel's table with
+        nothing tracking it. They pin their device nodes, which is how a floppy
+        drive that was /dev/sda comes back as /dev/sdb. Only paths matching our
+        own tempdir prefix are touched.
+        """
+        stale = []
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1].startswith(_MOUNT_PREFIX):
+                        stale.append((parts[0], parts[1]))
+        except OSError:
+            return
+
+        for devnode, mountpoint in stale:
+            if self._logger:
+                self._logger.info(
+                    f"StorageSource: reaping stale mount {devnode} at {mountpoint} "
+                    f"left by a previous run"
+                )
+            await self._unmount_device(mountpoint)
+
     async def _remount(self, mountpoint: str, mode: str) -> bool:
         """Remount an existing mountpoint ``rw`` or ``ro`` in place."""
         try:
@@ -440,7 +479,8 @@ class StorageSource(MediaSource):
 
     async def _mount_device(self, devnode: str) -> Optional[str]:
         """Mount devnode read-only to a temp directory. Returns mountpoint or None."""
-        tmpdir = tempfile.mkdtemp(prefix="decky-links-")
+        tmpdir = tempfile.mkdtemp(prefix=os.path.basename(_MOUNT_PREFIX),
+                                  dir=os.path.dirname(_MOUNT_PREFIX))
         try:
             result = await asyncio.to_thread(
                 subprocess.run,

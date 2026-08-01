@@ -604,6 +604,56 @@ class TestUnmountableMedia:
         )
 
 
+# ── Mount leaks ───────────────────────────────────────────────────────────────
+
+class TestMountLeaks:
+    """A mount left behind pins its device node, so the drive that was
+    /dev/sda comes back as /dev/sdb — observed on hardware 2026-08-01."""
+
+    @pytest.mark.asyncio
+    async def test_unplugging_after_eject_still_unmounts(self):
+        """Ejecting clears _active_media; the later unplug must not skip cleanup."""
+        src = _make_source()
+        src._our_mounts["/dev/sda"] = "/tmp/decky-links-abc"
+        # No _active_media entry — the disk was already ejected.
+        with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+            event = await src._handle_device_removed("/dev/sda")
+        assert event is None, "nothing to report, but the mount must still go"
+        mock_umount.assert_called_once_with("/tmp/decky-links-abc")
+        assert "/dev/sda" not in src._our_mounts
+
+    @pytest.mark.asyncio
+    async def test_stale_mounts_from_a_previous_process_are_reaped(self):
+        """A restart never runs stop(), so its mounts survive in the kernel."""
+        src = _make_source()
+        mounts = (
+            "/dev/sda /tmp/decky-links-lp01k9a5 vfat ro,relatime 0 0\n"
+            "/dev/mmcblk0p1 /run/media/deck/SC256 ext4 rw 0 0\n"
+        )
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+                await src._reap_stale_mounts()
+        mock_umount.assert_called_once_with("/tmp/decky-links-lp01k9a5")
+
+    @pytest.mark.asyncio
+    async def test_reaping_leaves_other_mounts_alone(self):
+        src = _make_source()
+        mounts = (
+            "/dev/mmcblk0p1 /run/media/deck/SC256 ext4 rw 0 0\n"
+            "/dev/nvme0n1p8 /home ext4 rw 0 0\n"
+        )
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+                await src._reap_stale_mounts()
+        mock_umount.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_proc_mounts_is_survivable(self):
+        src = _make_source()
+        with patch("builtins.open", side_effect=OSError("no /proc")):
+            await src._reap_stale_mounts()   # must not raise
+
+
 # ── rearm() ───────────────────────────────────────────────────────────────────
 
 class TestRearm:
