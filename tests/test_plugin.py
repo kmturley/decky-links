@@ -60,6 +60,31 @@ def _make_unload_event(uid_hex: str, uri=None):
     )
 
 
+def _make_storage_load_event(devnode: str, uri=None):
+    """Build a STORAGE MediaEvent(LOAD) — a floppy/USB insert."""
+    from sources.base import MediaEvent, MediaEventKind, SourceType
+    return MediaEvent(
+        kind=MediaEventKind.LOAD,
+        source_type=SourceType.STORAGE,
+        source_id="storage:udev",
+        media_id=devnode,
+        uri=uri,
+        payload={},
+    )
+
+
+def _make_storage_unload_event(devnode: str, uri=None):
+    """Build a STORAGE MediaEvent(UNLOAD) — a floppy/USB eject."""
+    from sources.base import MediaEvent, MediaEventKind, SourceType
+    return MediaEvent(
+        kind=MediaEventKind.UNLOAD,
+        source_type=SourceType.STORAGE,
+        source_id="storage:udev",
+        media_id=devnode,
+        uri=uri,
+    )
+
+
 # ── §5 / §6 — State Machine Transitions ──────────────────────────────────────
 
 class TestStateMachine:
@@ -609,12 +634,15 @@ class TestMediaRemoval:
 
     @pytest.mark.asyncio
     async def test_card_removed_during_game_emits_correct_event(self, plugin, mock_decky):
-        from main import PluginState
-        plugin.state           = PluginState.GAME_RUNNING
-        plugin.running_game_id = 400
-        plugin.current_tag_uid = "DEADBEEF"
-        plugin.current_tag_uri = "steam://rungameid/400"
-        plugin.is_pairing      = False
+        plugin.is_pairing = False
+
+        # Tap the tag, then let the frontend report the launch -- this is what
+        # establishes the launch origin that authorises the quit.
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
 
         event = _make_unload_event("DEADBEEF", uri="steam://rungameid/400")
         await plugin._handle_media_unload(event)
@@ -962,6 +990,7 @@ class TestMultiTagDetection:
         mock_decky.emit.assert_any_call("multiple_tags", {
             "previous": uid_hex,
             "current": other.hex().upper(),
+            "source_type": "nfc",
         })
 
 
@@ -971,12 +1000,13 @@ class TestCardRemovedDuringGame:
 
     @pytest.mark.asyncio
     async def test_removal_event_emitted_when_game_running(self, plugin, mock_decky):
-        from main import PluginState
-        plugin.state           = PluginState.GAME_RUNNING
-        plugin.running_game_id = 400
-        plugin.current_tag_uid = "DEADBEEF"
-        plugin.current_tag_uri = "steam://rungameid/400"
-        plugin.is_pairing      = False
+        plugin.is_pairing = False
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
 
         event = _make_unload_event("DEADBEEF", uri="steam://rungameid/400")
         await plugin._handle_media_unload(event)
@@ -1234,3 +1264,121 @@ class TestHandleSourceEvent:
         ss_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "source_statuses"]
         assert len(ss_calls) == 1
         assert isinstance(ss_calls[0].args[1], list)
+
+
+# ── C1 — Per-source media isolation ──────────────────────────────────────────
+
+class TestPerSourceMediaIsolation:
+    """Multiple sources must not clobber each other's state.
+
+    Before the per-source registry there was a single global tag slot, so a
+    storage eject cleared the NFC tag and could quit a game launched by tapping.
+    """
+
+    @pytest.mark.asyncio
+    async def test_storage_load_does_not_clobber_nfc_tag(self, plugin, mock_decky):
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/500")
+            )
+
+        assert plugin.current_tag_uid == "DEADBEEF"
+        assert plugin.current_tag_uri == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_storage_unload_does_not_clear_nfc_tag(self, plugin, mock_decky):
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/500")
+            )
+        await plugin._handle_media_unload(_make_storage_unload_event("/dev/sdb1"))
+
+        assert plugin.current_tag_uid == "DEADBEEF"
+        assert plugin.current_tag_uri == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_ejecting_other_media_does_not_quit_nfc_launched_game(self, plugin, mock_decky):
+        """The whole point of launch attribution."""
+        plugin.is_pairing = False
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/500")
+            )
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(_make_storage_unload_event("/dev/sdb1"))
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_collision_is_scoped_per_source(self, plugin, mock_decky):
+        """Media on a second source is not a collision on the first."""
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+            mock_decky.emit.reset_mock()
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/500")
+            )
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "multiple_tags" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_get_active_media_reports_every_source(self, plugin, mock_decky):
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/500")
+            )
+
+        active = await plugin.get_active_media()
+        by_type = {m["source_type"]: m for m in active}
+        assert by_type["nfc"]["media_id"] == "DEADBEEF"
+        assert by_type["storage"]["media_id"] == "/dev/sdb1"
+
+    @pytest.mark.asyncio
+    async def test_manual_launch_is_not_attributed_to_any_medium(self, plugin, mock_decky):
+        """A game the user started by hand must not be quit by removing a tag."""
+        plugin.is_pairing = False
+        await plugin.set_running_game(400)          # no preceding media load
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(_make_unload_event("DEADBEEF"))
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_launch_origin_survives_frontend_reporting_first(self, plugin, mock_decky):
+        """set_running_game may arrive before _handle_media_load finishes.
+
+        The frontend launches on uri_detected, so the origin must be claimed
+        before that event is emitted or attribution is lost.
+        """
+        plugin.is_pairing = False
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        assert plugin._pending_launch_origin is not None
+        assert plugin._pending_launch_origin["media_id"] == "DEADBEEF"
