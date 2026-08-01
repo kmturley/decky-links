@@ -330,7 +330,10 @@ class TestHandleDeviceAdded:
         assert event.kind == MediaEventKind.LOAD
         assert event.uri == ""
         assert event.payload["unreadable"] is True
-        assert "FAT" in event.payload["error"]
+        # Shown verbatim in a panel row, which is one line of a narrow panel —
+        # the full "format it as FAT" diagnosis goes to the log instead.
+        assert event.payload["error"] == "Unformatted disk"
+        assert len(event.payload["error"]) <= 24
         assert event.payload.get("blank") is None, "unreadable is not the same as blank"
 
     @pytest.mark.asyncio
@@ -767,6 +770,30 @@ class TestRearm:
         src = _make_source()
         src.rearm()
         assert len(src._pending) == 0
+
+    @pytest.mark.asyncio
+    async def test_rearm_carries_the_drive_category(self):
+        """Reported from hardware: re-pairing a floppy wrote the disk and played
+        the sound, but the row went to "No disk" until the disk was ejected and
+        reinserted. Pair calls rearm(), and the row finds its medium by drive
+        category — a rearm without one orphaned the disk from its own row."""
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        src._active_media["/dev/sda"] = ""
+        src._drives["/dev/sda"] = DriveKind.FLOPPY
+        src.rearm()
+        event = await src.poll()
+        assert event.payload["drive_kind"] == DriveKind.FLOPPY
+
+    @pytest.mark.asyncio
+    async def test_rearm_classifies_a_drive_it_has_not_seen(self, monkeypatch):
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        src._active_media["/dev/sr0"] = ""
+        monkeypatch.setattr(src, "classify_drive", lambda d: DriveKind.OPTICAL)
+        src.rearm()
+        event = await src.poll()
+        assert event.payload["drive_kind"] == DriveKind.OPTICAL
 
 
 # ── write_uri() — pairing a disk ──────────────────────────────────────────────

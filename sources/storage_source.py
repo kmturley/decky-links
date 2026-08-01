@@ -381,7 +381,10 @@ class StorageSource(MediaSource):
                 uri="",
                 payload={
                     "unreadable": True,
-                    "error": "No readable filesystem — format the disk as FAT.",
+                    # Shown verbatim in a panel row, so it has to fit one. The
+                    # full diagnosis is in the log line above, where there is
+                    # room for it.
+                    "error": "Unformatted disk",
                     "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
                 },
             )
@@ -468,6 +471,11 @@ class StorageSource(MediaSource):
         udev fires once, on insertion. Without this, pressing "Pair" with a
         disk already in the drive would wait for an event that never comes —
         the user would have to eject and reinsert to pair.
+
+        The payload must carry ``drive_kind`` like every other LOAD: the panel
+        matches a medium to its row by drive category, so a rearm that omitted
+        it left the freshly-paired disk unable to find its own row. It showed
+        "No disk" until the disk was ejected and reinserted.
         """
         for devnode, uri in list(self._active_media.items()):
             self._pending.append(MediaEvent(
@@ -476,7 +484,11 @@ class StorageSource(MediaSource):
                 source_id=self.source_id,
                 media_id=devnode,
                 uri=uri,
-                payload={"blank": not uri, "rearmed": True},
+                payload={
+                    "blank": not uri,
+                    "rearmed": True,
+                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
+                },
             ))
 
     async def write_uri(self, media_id: str, uri: str, title: str = "", icon: str = ""):

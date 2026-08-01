@@ -1790,6 +1790,54 @@ class TestTargetedPairing:
         assert plugin.pairing_source_id is None
 
 
+# ── The registry keeps a medium's drive category ─────────────────────────────
+
+class TestDriveKindPersistence:
+    """The panel matches a medium to its row by drive_kind, so a LOAD that
+    omits it must not erase what we already know about the same medium."""
+
+    def _event(self, payload, uri=""):
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.STORAGE,
+            source_id="storage:udev",
+            media_id="/dev/sda",
+            uri=uri,
+            payload=payload,
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_reload_keeps_the_category(self, plugin, mock_decky):
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                self._event({"blank": True, "drive_kind": "floppy"})
+            )
+            await plugin._handle_media_load(self._event({"rearmed": True}))
+
+        assert plugin._active_media["storage:udev"]["drive_kind"] == "floppy"
+
+    @pytest.mark.asyncio
+    async def test_a_different_disk_does_not_inherit_the_category(self, plugin, mock_decky):
+        """Swapping a floppy for a card in a multi-slot reader is a new medium;
+        it must be classified on its own terms, not the last disk's."""
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                self._event({"blank": True, "drive_kind": "floppy"})
+            )
+            await plugin._handle_media_load(MediaEvent(
+                kind=MediaEventKind.LOAD,
+                source_type=SourceType.STORAGE,
+                source_id="storage:udev",
+                media_id="/dev/sdb",
+                uri="",
+                payload={"blank": True},
+            ))
+
+        assert plugin._active_media["storage:udev"]["drive_kind"] is None
+
+
 # ── Drive categories reach the panel ─────────────────────────────────────────
 
 class TestDriveKindStatus:

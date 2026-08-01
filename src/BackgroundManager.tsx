@@ -295,11 +295,15 @@ export function startBackgroundManager(): () => void {
 
   const uriListener = addEventListener<[data: {
     uri: string | null, uid: string, paired?: boolean, source_id?: string,
+    source_type?: SourceType,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
-    // A storage media_id is a device node, whose case is meaningful.
-    const normalizedUid = sharedState.tagSourceType === SourceType.STORAGE
+    // A storage media_id is a device node, whose case is meaningful. Trust the
+    // event's own source_type when it carries one — the global tagSourceType
+    // describes whatever was presented last, which need not be this medium.
+    const sourceType = data.source_type ?? sharedState.tagSourceType;
+    const normalizedUid = sourceType === SourceType.STORAGE
       ? data.uid
       : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;

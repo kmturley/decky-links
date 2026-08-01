@@ -560,12 +560,20 @@ class Plugin:
             })
 
         # Registry is the source of truth for which media each source holds.
+        # A re-emitted LOAD for the *same* medium keeps the category we already
+        # know: the panel matches a medium to its row by drive_kind, so a
+        # partial payload must never downgrade it to None.
+        prior_kind = (
+            previous.get("drive_kind")
+            if previous and previous["media_id"] == uid_hex
+            else None
+        )
         self._active_media[event.source_id] = {
             "source_id":   event.source_id,
             "source_type": event.source_type.value,
             "media_id":    uid_hex,
             "uri":         uri,
-            "drive_kind":  event.payload.get("drive_kind"),
+            "drive_kind":  event.payload.get("drive_kind") or prior_kind,
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
         }
 
@@ -930,10 +938,15 @@ class Plugin:
                 self.nfc_source.current_tag_uri = uri
 
         decky.logger.info(f"Pairing wrote {uri} to {media_id}; syncing UI state")
+        # source_id/source_type let the panel address the medium directly
+        # instead of guessing from media_id, which matters once more than one
+        # trigger is holding media at the same time.
         await decky.emit("uri_detected", {
             "uri":    uri,
             "uid":    media_id,
             "paired": True,
+            "source_id": source_id or (entry or {}).get("source_id"),
+            "source_type": (entry or {}).get("source_type"),
         })
 
     # ── Launch ─────────────────────────────────────────────────────────

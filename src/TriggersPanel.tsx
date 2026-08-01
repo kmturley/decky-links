@@ -30,10 +30,11 @@ export interface TriggerRow {
   sourceType: SourceType;
   /** Storage only: which drive category within that source. */
   driveKind?: string;
-  /** Emoji for the medium this trigger reads. Deliberately on the toggle row
-   *  rather than the media row: the list is nine entries long and, on first
-   *  run, every one of them is off — the icons are what make it scannable
-   *  before anything is connected. */
+  /** Emoji for the medium this trigger reads. It sits on the media row only:
+   *  the glyphs depict media (a disk, a card), not the drives that read them,
+   *  and repeating one on the toggle row above read as visual noise. The icon
+   *  is also what distinguishes a media row from a trigger row now that the
+   *  media row is no longer indented. */
   icon: string;
   /** What the user physically puts on this trigger. "Empty disk" and "No card"
    *  read like the hardware; "Empty media" reads like a spec document. */
@@ -179,7 +180,6 @@ const MediaRow: FC<{
         <Field
           icon={icon}
           label={state.text}
-          indentLevel={1}
           focusable={false}
           bottomSeparator="standard"
           highlightOnFocus={false}
@@ -194,7 +194,6 @@ const MediaRow: FC<{
         icon={icon}
         label={state.text}
         layout="inline"
-        indentLevel={1}
         bottomSeparator="standard"
         onClick={() => void pairRow(row, target!)}
       >
@@ -249,7 +248,6 @@ export const TriggersPanel: FC<{
           <div key={row.key}>
             <PanelSectionRow>
               <ToggleField
-                icon={<span style={{ fontSize: "1.1em" }}>{row.icon}</span>}
                 label={row.label}
                 checked={enabled}
                 bottomSeparator={enabled ? "none" : "standard"}
