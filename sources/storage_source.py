@@ -186,6 +186,25 @@ class StorageSource(MediaSource):
             # Unknown — assume media is present and let the mount decide.
             return True
 
+    def _is_removable(self, devnode: str) -> bool:
+        """True when devnode belongs to a removable drive.
+
+        Guards every mount we perform ourselves. A Steam Deck's internal NVMe
+        carries several unmounted system partitions (rootfs B, var B, the EFI
+        partitions); without this the startup scan would mount each of them in
+        turn looking for a payload. Unknown devices are treated as fixed.
+        """
+        name = os.path.basename(devnode)
+        try:
+            syspath = os.path.realpath(f"/sys/class/block/{name}")
+            # A partition has no `removable` of its own — it inherits the disk's.
+            if os.path.exists(os.path.join(syspath, "partition")):
+                syspath = os.path.dirname(syspath)
+            with open(os.path.join(syspath, "removable"), "r") as f:
+                return f.read().strip() == "1"
+        except OSError:
+            return False
+
     # ── Device handling ────────────────────────────────────────────────
 
     def _is_relevant_device(self, devnode: str) -> bool:
@@ -197,6 +216,13 @@ class StorageSource(MediaSource):
         mounted_by_us = False
 
         if not mountpoint:
+            if not self._is_removable(devnode):
+                if self._logger:
+                    self._logger.warning(
+                        f"StorageSource: refusing to mount {devnode} — not a "
+                        f"removable drive"
+                    )
+                return None
             mountpoint = self._mount_device(devnode)
             if mountpoint:
                 mounted_by_us = True
@@ -392,6 +418,10 @@ class StorageSource(MediaSource):
                 if not devnode or devnode in seen:
                     continue
                 if not self._is_relevant_device(devnode):
+                    continue
+                # Filter here as well as in _handle_device_added so the Deck's
+                # internal partitions don't each log a refusal on every start.
+                if not self._is_removable(devnode):
                     continue
                 if not self._has_media(devnode):
                     continue

@@ -285,8 +285,9 @@ class TestHandleDeviceAdded:
             "version": 1, "uri": "steam://run/999",
         }))
         with patch.object(src, "_find_mount_point", return_value=None):
-            with patch.object(src, "_mount_device", return_value=str(tmp_path)):
-                event = src._handle_device_added("/dev/sdb1")
+            with patch.object(src, "_is_removable", return_value=True):
+                with patch.object(src, "_mount_device", return_value=str(tmp_path)):
+                    event = src._handle_device_added("/dev/sdb1")
         assert event is not None
         assert event.uri == "steam://run/999"
         assert src._our_mounts["/dev/sdb1"] == str(tmp_path)
@@ -294,16 +295,29 @@ class TestHandleDeviceAdded:
     def test_no_mount_and_mount_fails_returns_none(self):
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
-            with patch.object(src, "_mount_device", return_value=None):
-                event = src._handle_device_added("/dev/sdb1")
+            with patch.object(src, "_is_removable", return_value=True):
+                with patch.object(src, "_mount_device", return_value=None):
+                    event = src._handle_device_added("/dev/sdb1")
         assert event is None
+
+    def test_fixed_disk_is_never_mounted(self):
+        """The Deck's internal NVMe holds unmounted system partitions; mounting
+        them while hunting for a payload would be both useless and risky."""
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=None):
+            with patch.object(src, "_is_removable", return_value=False):
+                with patch.object(src, "_mount_device") as mock_mount:
+                    event = src._handle_device_added("/dev/nvme0n1p5")
+        assert event is None
+        mock_mount.assert_not_called()
 
     def test_our_mount_cleaned_up_when_no_payload(self, tmp_path):
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
-            with patch.object(src, "_mount_device", return_value=str(tmp_path)):
-                with patch.object(src, "_unmount_device") as mock_umount:
-                    event = src._handle_device_added("/dev/sdb1")
+            with patch.object(src, "_is_removable", return_value=True):
+                with patch.object(src, "_mount_device", return_value=str(tmp_path)):
+                    with patch.object(src, "_unmount_device") as mock_umount:
+                        event = src._handle_device_added("/dev/sdb1")
         assert event is None
         mock_umount.assert_called_once_with(str(tmp_path))
         assert "/dev/sdb1" not in src._our_mounts
@@ -472,6 +486,44 @@ class TestScanExistingDevices:
         assert len(src._pending) == 2
         uris = {e.uri for e in src._pending}
         assert uris == {"steam://run/1", "steam://run/2"}
+
+
+# ── _is_removable() ───────────────────────────────────────────────────────────
+
+class TestIsRemovable:
+
+    def _run(self, src, devnode, flag, is_partition=False):
+        with patch("os.path.realpath", side_effect=lambda p: p):
+            with patch("os.path.exists", return_value=is_partition):
+                with patch("builtins.open", mock_open(read_data=flag)):
+                    return src._is_removable(devnode)
+
+    def test_removable_flag_one_accepted(self):
+        assert self._run(_make_source(), "/dev/sda", "1\n") is True
+
+    def test_removable_flag_zero_rejected(self):
+        assert self._run(_make_source(), "/dev/nvme0n1", "0\n") is False
+
+    def test_partition_inherits_parent_disk_flag(self):
+        src = _make_source()
+        opened = []
+
+        def fake_open(path, *a, **k):
+            opened.append(path)
+            return mock_open(read_data="1\n")(path, *a, **k)
+
+        with patch("os.path.realpath", side_effect=lambda p: p):
+            with patch("os.path.exists", return_value=True):  # it's a partition
+                with patch("builtins.open", side_effect=fake_open):
+                    result = src._is_removable("/dev/sda1")
+        assert result is True
+        # Read the parent disk's flag, not the partition's own path
+        assert opened == [os.path.join("/sys/class/block", "removable")]
+
+    def test_missing_sysfs_entry_treated_as_fixed(self):
+        src = _make_source()
+        with patch("builtins.open", side_effect=OSError("no such file")):
+            assert src._is_removable("/dev/sdz") is False
 
 
 # ── _is_relevant_device() ─────────────────────────────────────────────────────

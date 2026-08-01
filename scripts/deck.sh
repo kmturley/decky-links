@@ -166,28 +166,42 @@ cmd_mount_test() {
         exit 1
     fi
     echo "Attempting the same read-only mount StorageSource performs on $dev ..."
-    remote "echo '$DECK_PASS' | sudo -S bash -s" <<REMOTE
-dev="$dev"
-tmp=\$(mktemp -d /tmp/decky-links-XXXXXX)
+    # The script is staged to a file first. Piping the password into `sudo -S`
+    # makes the pipe sudo's stdin, which would swallow a heredoc sent over ssh
+    # and leave the remote bash with nothing to run.
+    remote "cat > /tmp/decky-mount-test.sh; \
+        echo '$DECK_PASS' | sudo -S bash /tmp/decky-mount-test.sh '$dev'; \
+        rm -f /tmp/decky-mount-test.sh" <<'REMOTE'
+dev="$1"
+if [ ! -b "$dev" ]; then
+    echo "  $dev is not a block device — check lsblk; a USB floppy is usually /dev/sda"
+    exit 1
+fi
+name=$(basename "$dev")
 echo "── device state ──"
-name=\$(basename "\$dev")
-echo "  sectors: \$(cat /sys/class/block/\$name/size 2>/dev/null)"
+sectors=$(cat "/sys/class/block/$name/size" 2>/dev/null)
+echo "  sectors: $sectors"
+if [ "$sectors" = "0" ]; then
+    echo "  no media inserted — StorageSource waits for a 'change' event before mounting"
+    exit 0
+fi
+tmp=$(mktemp -d /tmp/decky-links-XXXXXX)
 echo "── mount attempt ──"
-if mount -o ro "\$dev" "\$tmp" 2>&1; then
-    echo "  mounted at \$tmp"
+if mount -o ro "$dev" "$tmp" 2>&1; then
+    echo "  mounted at $tmp"
     echo "── contents ──"
-    ls -la "\$tmp" 2>&1 | head -20
+    ls -la "$tmp" 2>&1 | head -20
     echo "── decky-links.json ──"
-    if [ -f "\$tmp/decky-links.json" ]; then
-        cat "\$tmp/decky-links.json"
+    if [ -f "$tmp/decky-links.json" ]; then
+        cat "$tmp/decky-links.json"
     else
         echo "  NOT PRESENT — StorageSource needs this file at the filesystem root"
     fi
-    umount "\$tmp"
+    umount "$tmp"
 else
     echo "  mount FAILED (see error above)"
 fi
-rmdir "\$tmp" 2>/dev/null
+rmdir "$tmp" 2>/dev/null
 REMOTE
 }
 
