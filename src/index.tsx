@@ -204,6 +204,29 @@ const Content: FC = () => {
       ? `Viewing ${state.viewedApp.name || state.viewedApp.appId}`
       : "Not Playing";
 
+  // Pairing needs both halves: something to write, and something to write it to.
+  // Enabling the button without a card meant pressing it just armed pairing and
+  // waited, which reads as a no-op. The game-page icon still supports the
+  // press-then-tap flow for when you want to arm it deliberately.
+  const cardPresent = !!state.tagUid;
+  const pairBlockedReason = !pairTarget
+    ? "Open a game's page to pair it."
+    : !cardPresent
+      ? "Place a card on the reader to pair it."
+      : alreadyPaired
+        ? `This card already launches ${pairTarget.label}.`
+        : null;
+
+  const pairLabel = state.pairing
+    ? "Cancel Pairing"
+    : alreadyPaired
+      ? "Already Paired"
+      : !cardPresent
+        ? "Waiting for Card"
+        : pairTarget
+          ? `Pair ${pairTarget.label}`
+          : "Pair Current Game";
+
   return (
     <PanelSection>
       <PanelSection title="Status">
@@ -249,25 +272,14 @@ const Content: FC = () => {
           // Never disable while pairing — the button is the only way to cancel.
           disabled={
             !state.readerStatus.connected ||
-            (!state.pairing && (!pairTarget || alreadyPaired))
+            (!state.pairing && pairBlockedReason !== null)
           }
         >
-          {state.pairing
-            ? "Cancel Pairing"
-            : alreadyPaired
-              ? "Already Paired"
-              : pairTarget
-                ? `Pair ${pairTarget.label}`
-                : "Pair Current Game"}
+          {pairLabel}
         </ButtonItem>
-        {!state.pairing && state.readerStatus.connected && !pairTarget && (
+        {!state.pairing && state.readerStatus.connected && pairBlockedReason && (
           <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
-            Open a game's page to pair it.
-          </div>
-        )}
-        {!state.pairing && alreadyPaired && (
-          <div style={{ fontSize: "0.7rem", opacity: 0.6, padding: "0 16px 8px" }}>
-            This card already launches {pairTarget?.label}.
+            {pairBlockedReason}
           </div>
         )}
       </PanelSection>
