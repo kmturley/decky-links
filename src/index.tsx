@@ -3,12 +3,11 @@ import {
   PanelSectionRow,
   Router,
   staticClasses,
-  TextField,
   ToggleField,
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
-import { FC, ReactNode } from "react";
-import { FaLink, FaCircle, FaGamepad } from "react-icons/fa";
+import { FC } from "react";
+import { FaLink } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
 import {
@@ -26,7 +25,6 @@ import {
 // (the rest of the file remains unchanged)
 
 
-import { KeyManagementPanel } from "./KeyManagementPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
@@ -62,6 +60,10 @@ function resolvePairTarget(): { uri: string; label: string } | null {
   return null;
 }
 
+/** Update one of the two top-level behaviour switches.
+ *
+ * Per-source settings do not come through here — the Triggers panel writes
+ * those with setSourceSetting, which the backend validates per source. */
 async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
@@ -69,43 +71,11 @@ async function triggerUpdateSetting(key: SettingKey, value: any) {
     return;
   }
   if (sharedState.settings) {
-    if (key === "auto_launch" || key === "auto_close") {
-      sharedState.settings = { ...sharedState.settings, [key]: value };
-    } else {
-      sharedState.settings = {
-        ...sharedState.settings,
-        sources: {
-          ...sharedState.settings.sources,
-          nfc: {
-            ...sharedState.settings.sources.nfc,
-            [key]: value,
-          },
-        },
-      };
-    }
+    sharedState.settings = { ...sharedState.settings, [key]: value };
   }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
 }
-
-const StatusRow: FC<{ icon: ReactNode; label: string; value: string; active: boolean }> = ({ icon, label, value, active }) => (
-  <div style={{
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "4px 8px",
-    fontSize: "0.9em"
-  }}>
-    <div style={{ color: active ? "#4CAF50" : "#757575", display: "flex", alignItems: "center" }}>
-      {icon}
-    </div>
-    <div style={{ flex: 1, opacity: active ? 1 : 0.6 }}>
-      <span style={{ fontWeight: "bold" }}>{label}: </span>
-      <span style={{ fontFamily: "monospace" }}>{value}</span>
-    </div>
-    <FaCircle size={8} color={active ? "#4CAF50" : "#333"} />
-  </div>
-);
 
 const Content: FC = () => {
   // Subscribe to sharedState — re-renders automatically when BackgroundManager
@@ -113,9 +83,6 @@ const Content: FC = () => {
   const state = useSharedState();
 
   if (!state.settings) return null;
-
-  const nfcSettings = state.settings.sources.nfc;
-
 
   // Recomputed each render: sharedState.viewedApp changes trigger a re-render
   // via notifySubscribers(), so this stays in step with what's on screen.
@@ -128,23 +95,14 @@ const Content: FC = () => {
     (m) => m.source_type === SourceType.NFC,
   );
 
-  const gameStatusValue = state.activeAppId
-    ? `Playing ${state.activeAppId}`
-    : state.viewedApp
-      ? `Viewing ${state.viewedApp.name || state.viewedApp.appId}`
-      : "Not Playing";
-
-
   return (
     <PanelSection>
-      <PanelSection title="Status">
-        <StatusRow
-          icon={<FaGamepad />}
-          label="Game"
-          value={gameStatusValue}
-          active={!!state.activeAppId || !!state.viewedApp}
-        />
-      </PanelSection>
+      <TriggersPanel
+        statuses={state.sourceStatuses}
+        media={state.activeMedia}
+        target={pairTarget}
+        pairing={state.pairing}
+      />
 
       <PanelSection title="Settings">
         <PanelSectionRow>
@@ -163,23 +121,7 @@ const Content: FC = () => {
             onChange={(v: boolean) => triggerUpdateSetting("auto_close", v)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <TextField
-            label="Reader Type"
-            value={nfcSettings.reader_type}
-            onChange={(e) => triggerUpdateSetting("reader_type", e.target.value)}
-          />
-        </PanelSectionRow>
       </PanelSection>
-
-      <TriggersPanel
-        statuses={state.sourceStatuses}
-        media={state.activeMedia}
-        target={pairTarget}
-        pairing={state.pairing}
-      />
-
-      <KeyManagementPanel />
 
       {/* Keys and sectors are Mifare concepts; a floppy has neither, so this
           follows the NFC medium specifically rather than whatever was last
