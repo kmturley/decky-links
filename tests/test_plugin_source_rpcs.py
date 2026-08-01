@@ -360,3 +360,43 @@ class TestGetSourceStatusesHasMedia:
         result = await p.get_source_statuses()
         mqtt_entry = next(e for e in result if e["source_type"] == "mqtt")
         assert mqtt_entry["active"] is True
+
+
+# ── can_pair — the game-page link button's gate ───────────────────────────────
+
+class TestGetSourceStatusesCanPair:
+    """The link button on a game page used to ask get_reader_status, so it
+    reported "NFC reader not detected" even with a pairable floppy connected.
+    It now looks for any source that can be written to."""
+
+    @pytest.mark.asyncio
+    async def test_storage_advertises_can_pair(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        result = await p.get_source_statuses()
+        entry = next(e for e in result if e["source_type"] == "storage")
+        assert entry["can_pair"] is True
+
+    @pytest.mark.asyncio
+    async def test_nfc_advertises_can_pair(self, tmp_path):
+        p, _ = _make_plugin_with_storage(tmp_path)
+        result = await p.get_source_statuses()
+        entry = next(e for e in result if e["source_type"] == "nfc")
+        assert entry["can_pair"] is True
+
+    @pytest.mark.asyncio
+    async def test_read_only_sources_cannot_pair(self, tmp_path):
+        """A camera reads QR codes; there is nothing to write back to."""
+        p, _ = _make_plugin_with_storage(tmp_path)
+        result = await p.get_source_statuses()
+        for entry in result:
+            if entry["source_type"] in ("camera", "mqtt", "file_watch"):
+                assert entry["can_pair"] is False, entry["source_type"]
+
+    @pytest.mark.asyncio
+    async def test_a_connected_floppy_is_pairable_without_any_nfc_reader(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()
+        storage._drives.add("/dev/sda")
+        result = await p.get_source_statuses()
+        pairable = [e for e in result if e["can_pair"] and e["active"]]
+        assert [e["source_type"] for e in pairable] == ["storage"]

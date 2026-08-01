@@ -30,6 +30,8 @@ export interface SourceStatus {
     active: boolean;
     /** Media is actually loaded: a disk in the drive, a tag on the reader. */
     has_media?: boolean;
+    /** Media on this source can be written to, i.e. paired. */
+    can_pair?: boolean;
 }
 
 export interface ReaderStatus {

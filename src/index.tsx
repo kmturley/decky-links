@@ -9,7 +9,7 @@ import {
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
 import { FC, ReactNode } from "react";
-import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag, FaHdd, FaCamera, FaWifi, FaPlug, FaFolderOpen } from "react-icons/fa";
+import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag, FaHdd } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
 import {
@@ -36,6 +36,7 @@ import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget, isSameLaunchTarget } from "./lib/steamIds";
+import { sourceIcon } from "./lib/sourceIcons";
 
 function getMainRunningApp() {
   const appRaw = Router.MainRunningApp;
@@ -141,18 +142,6 @@ async function triggerUpdateSetting(key: SettingKey, value: any) {
   }
   settingsRef.current = sharedState.settings;
   notifySubscribers();
-}
-
-function sourceIcon(sourceType: string): ReactNode {
-  switch (sourceType) {
-    case SourceType.NFC: return <FaMicrochip />;
-    case SourceType.STORAGE: return <FaHdd />;
-    case SourceType.CAMERA: return <FaCamera />;
-    case SourceType.MQTT: return <FaWifi />;
-    case SourceType.SERIAL: return <FaPlug />;
-    case SourceType.FILE_WATCH: return <FaFolderOpen />;
-    default: return <FaCircle />;
-  }
 }
 
 const StatusRow: FC<{ icon: ReactNode; label: string; value: string; active: boolean }> = ({ icon, label, value, active }) => (

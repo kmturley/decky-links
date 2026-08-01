@@ -886,6 +886,42 @@ class TestPairing:
         assert event_name == "pairing_result"
 
     @pytest.mark.asyncio
+    async def test_pairing_result_names_the_source(self, plugin, mock_decky):
+        """The game-page modal needs to say "disk" or "tag", not always "tag"."""
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        uid                = _make_uid()
+
+        with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
+
+        payload = mock_decky.emit.call_args_list[-1].args[1]
+        assert payload["source_type"] == "nfc"
+
+    @pytest.mark.asyncio
+    async def test_pairing_result_for_storage_reports_storage(self, plugin, mock_decky):
+        from sources.base import SourceType
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+
+        storage = MagicMock()
+        storage.source_id = "storage:udev"
+        storage.source_type = SourceType.STORAGE
+        storage.can_write.return_value = True
+        storage.write_uri = AsyncMock(return_value=(True, None))
+        plugin.storage_source = storage
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing("/dev/sda", source_id="storage:udev")
+
+        payload = mock_decky.emit.call_args_list[-1].args[1]
+        assert payload["success"] is True
+        assert payload["uid"] == "/dev/sda"
+        assert payload["source_type"] == "storage"
+        storage.write_uri.assert_awaited_once_with("/dev/sda", "steam://rungameid/400")
+
+    @pytest.mark.asyncio
     async def test_pairing_does_not_launch_game_after_write(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"

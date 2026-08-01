@@ -792,6 +792,7 @@ class Plugin:
                 "success": success,
                 "uid":     media_id,
                 "error":   error_msg,
+                "source_type": source.source_type.value,
             })
         except Exception as e:
             decky.logger.error(f"Critical error in pairing handler: {e}")
@@ -1446,6 +1447,10 @@ class Plugin:
                 # the moment a disk comes out reads as a fault.
                 "active": source.has_drive(),
                 "has_media": source.has_media(),
+                # Whether media on this source can be written to. The game-page
+                # link button uses this to decide if pairing is possible at all,
+                # instead of asking specifically about the NFC reader.
+                "can_pair": source.can_write(),
             })
         return result
 

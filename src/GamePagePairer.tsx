@@ -2,18 +2,26 @@ import React, { FC, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { FaLink, FaTimes } from "react-icons/fa";
 import {
-  getReaderStatus,
+  getSourceStatuses,
   startPairing,
   cancelPairing,
   addEventListener,
   removeEventListener,
   setPairingToastSuppressed,
+  type SourceStatus,
 } from "./shared";
 import useAppId from "./hooks/useAppId";
+import {
+  sourceIcon,
+  sourceLabel,
+  presentMediaVerb,
+  mediumNoun,
+  joinWithOr,
+} from "./lib/sourceIcons";
 
 const RETRY_DELAY_MS = 500;
 const MODAL_CLOSE_DELAY_MS = 1500;
-const MODAL_WAITING_TEXT = "Waiting for tag…";
+const MODAL_WAITING_TEXT = "Waiting for media…";
 
 // Helper lifted from protondb plugin; used to watch for fullscreen mode so we
 // can hide our button when the header disappears.
@@ -75,6 +83,9 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   const [show, setShow] = useState<boolean>(true);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>(MODAL_WAITING_TEXT);
+  // Which pairable devices are connected, so the modal can show what the user
+  // may present rather than naming one hard-coded device.
+  const [readySources, setReadySources] = useState<SourceStatus[]>([]);
   const ref = useRef<HTMLDivElement | null>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const topCapsuleRetryRef = useRef<number | null>(null);
@@ -176,20 +187,25 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     if (!modalVisible) return;
 
     (async () => {
-      const reader = await getReaderStatus();
-      
-      // Provide detailed error messages
-      if (!reader.connected) {
-        if (!reader.path) {
-          setStatusMessage("NFC reader not configured. Go to Decky Links settings to set device path.");
-        } else {
-          setStatusMessage("NFC reader not detected. Check USB connection and device path in settings.");
-        }
+      // Any source that can be written to will do. start_pairing arms all of
+      // them at once, so whichever medium the user presents first wins — there
+      // is nothing to choose between here, only something to report.
+      const statuses = await getSourceStatuses();
+      const pairable = statuses.filter((s) => s.can_pair && s.active);
+      setReadySources(pairable);
+
+      if (pairable.length === 0) {
+        const known = statuses.filter((s) => s.can_pair).map((s) => sourceLabel(s.source_type));
+        setStatusMessage(
+          known.length > 0
+            ? `No pairable device connected. Connect ${joinWithOr(known.map((k) => k.toLowerCase()))} and try again.`
+            : "No pairable device connected."
+        );
         return;
       }
 
       if (!launchTarget) {
-        setStatusMessage("Unable to determine launch target. Make sure a game is running.");
+        setStatusMessage("Unable to determine launch target. Open a game's page or start a game first.");
         return;
       }
 
@@ -197,20 +213,29 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
       const ok = await startPairing(launchTarget);
       if (!ok) {
         setPairingToastSuppressed(false);
-        setStatusMessage("Failed to initiate pairing. Check reader status in settings.");
+        setStatusMessage("Failed to initiate pairing. Check device status in Decky Links settings.");
       } else {
-        setStatusMessage("Pairing mode active – tap a tag");
+        setStatusMessage(
+          `Pairing mode active – ${joinWithOr(pairable.map((s) => presentMediaVerb(s.source_type)))}`
+        );
       }
     })();
   }, [modalVisible, launchTarget]);
 
   // listen for pairing results so we can show status and close the modal
   useEffect(() => {
-    const listener = addEventListener<[data: { success: boolean; uid: string; error?: string }]>(
+    const listener = addEventListener<[data: { success: boolean; uid: string; error?: string; source_type?: string }]>(
       "pairing_result",
       (data) => {
         if (!modalVisible) return;
-        setStatusMessage(data.success ? `Paired to tag ${data.uid}` : `Pairing failed: ${data.error || "unknown"}`);
+        const noun = mediumNoun(data.source_type ?? "nfc");
+        // A storage media_id is a device node; "/dev/" is noise in a message.
+        const label = data.uid?.replace(/^\/dev\//, "") ?? "";
+        setStatusMessage(
+          data.success
+            ? `Paired to ${noun} ${label}`
+            : `Pairing failed: ${data.error || "unknown"}`
+        );
         clearTimer(modalCloseTimerRef);
         modalCloseTimerRef.current = window.setTimeout(() => {
           void closeModal();
@@ -225,6 +250,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
 
   const onClickButton = () => {
     setStatusMessage(MODAL_WAITING_TEXT);
+    setReadySources([]);
     setModalVisible(true);
   };
 
@@ -287,6 +313,25 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
           style={{ position: "absolute", top: 8, right: 8, cursor: "pointer" }}
           onClick={closeModal}
         />
+        {readySources.length > 0 && (
+          <div style={{
+            display: "flex",
+            justifyContent: "center",
+            gap: 16,
+            marginBottom: 12,
+          }}>
+            {readySources.map((s) => (
+              <div
+                key={s.source_id}
+                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
+                title={s.source_id}
+              >
+                <div style={{ fontSize: 22, color: "#4CAF50" }}>{sourceIcon(s.source_type)}</div>
+                <span style={{ fontSize: "0.7rem", opacity: 0.8 }}>{sourceLabel(s.source_type)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <p style={{ margin: 0 }}>{statusMessage}</p>
       </div>
     </div>
