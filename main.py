@@ -85,23 +85,27 @@ class PluginState(Enum):
     """Plugin state machine (Spec §5).
     
     State transitions:
-    - IDLE → READY: Reader connected and initialized
-    - READY → CARD_PRESENT: New tag detected
-    - CARD_PRESENT → READY: Tag removed (no game running)
+    - IDLE → READY: any source became available
+    - READY → CARD_PRESENT: media presented on any source
+    - CARD_PRESENT → READY: last medium removed (no game running)
     - CARD_PRESENT → GAME_RUNNING: Game launched (auto_launch enabled)
     - GAME_RUNNING → READY: Game exited (via set_running_game)
-    - GAME_RUNNING → READY: Tag removed during game (after card_removed_during_game event)
-    - Any state → IDLE: Reader disconnected or error
-    
+    - GAME_RUNNING → READY: launching medium removed (after card_removed_during_game)
+    - Any state → IDLE: every source became unavailable
+
     Key invariants:
-    - Only one tag is active at a time (single active card model)
-    - No auto-relaunch: requires physical card reinsertion
+    - Media is tracked per source (Plugin._active_media), not in one global slot
+    - Only the medium that launched a game may quit it (Plugin._launch_origin)
+    - No auto-relaunch: requires the medium to be physically re-presented
     - Game state is authoritative from frontend (Router.MainRunningApp)
+
+    The names are NFC-flavoured for historical reasons; CARD_PRESENT means
+    "some medium is loaded on some source", which includes a disk in a drive.
     """
-    IDLE         = "IDLE"          # No NFC reader detected
-    READY        = "READY"         # Reader connected, no card, no game running
-    CARD_PRESENT = "CARD_PRESENT"  # Card detected, URI parsed, awaiting launch decision
-    GAME_RUNNING = "GAME_RUNNING"  # A game is running; active UID is locked
+    IDLE         = "IDLE"          # No source available to trigger anything
+    READY        = "READY"         # At least one source up, no media, no game
+    CARD_PRESENT = "CARD_PRESENT"  # Media loaded, URI parsed, awaiting launch decision
+    GAME_RUNNING = "GAME_RUNNING"  # A game is running; its launching medium is locked
 
 
 # -----------------------------------------------------------------------
@@ -125,6 +129,7 @@ class SettingsManager:
                     "enabled": True,
                 },
                 "camera": {
+                    "enabled": False,
                     "device": "/dev/video0",
                     "poll_interval": 1.0,
                 },
@@ -408,14 +413,53 @@ class Plugin:
                 decky.logger.error(f"Event loop error: {e}")
                 decky.logger.error(traceback.format_exc())
 
+    def _all_sources(self):
+        """Every source this plugin owns.
+
+        Prefers the manager's registry, falling back to the attributes so the
+        helpers below still work before ``_main`` has registered anything.
+        """
+        if self.source_manager and self.source_manager.sources:
+            return list(self.source_manager.sources)
+        return [s for s in (
+            self.nfc_source, self.storage_source, self.camera_source,
+            self.mqtt_source, self.serial_source, self.file_watch_source,
+        ) if s is not None]
+
+    def _any_source_available(self, exclude: Optional[str] = None) -> bool:
+        """True when at least one enabled source is currently usable.
+
+        Drives the IDLE transition. IDLE means "nothing can trigger a launch",
+        which is not the same as "the NFC reader is unplugged".
+
+        ``exclude`` skips a source by id — used when handling that source's own
+        DISCONNECTED event, so the answer never depends on how promptly the
+        source got round to reporting itself inactive.
+        """
+        for source in self._all_sources():
+            try:
+                if source.source_id == exclude:
+                    continue
+                if source.is_enabled() and source.is_active():
+                    return True
+            except Exception:
+                continue
+        return False
+
     async def _handle_source_event(self, event: SourceEvent):
         """Handle hardware lifecycle events (connect/disconnect)."""
+        is_nfc = event.source_type == SourceType.NFC
+
         if event.kind == SourceEventKind.CONNECTED:
             decky.logger.info(
                 f"Source connected: {event.source_type.value} ({event.source_id})"
             )
-            if event.source_type == SourceType.NFC:
+            # Any working source means the plugin can be triggered — IDLE is
+            # "nothing to trigger with", not "no NFC reader". With only a floppy
+            # drive attached the machine used to sit in IDLE indefinitely.
+            if self.state == PluginState.IDLE:
                 self._set_state(PluginState.READY)
+            if is_nfc:
                 await decky.emit("reader_status", {
                     "connected": True,
                     "path": self.settings.get("device_path"),
@@ -429,7 +473,7 @@ class Plugin:
             # Hardware that has gone away cannot still be holding media. Drop
             # its registry entry, or the medium lingers as active forever and
             # keeps a stale claim on the running game.
-            self._active_media.pop(event.source_id, None)
+            had_media = self._active_media.pop(event.source_id, None) is not None
             if self._launch_origin and self._launch_origin.get("source_id") == event.source_id:
                 decky.logger.info(
                     f"Source {event.source_id} launched game {self.running_game_id} "
@@ -437,8 +481,7 @@ class Plugin:
                 )
                 self._launch_origin = None
 
-            if event.source_type == SourceType.NFC:
-                self._set_state(PluginState.IDLE)
+            if is_nfc:
                 await decky.emit("reader_status", {
                     "connected": False,
                     "path": self.settings.get("device_path"),
@@ -450,9 +493,22 @@ class Plugin:
                     self.current_tag_uid = None
                     self.current_tag_uri = None
                     self.current_tag_meta = None
-                    await decky.emit("tag_removed", {
-                        "source_type": event.source_type.value,
-                    })
+                    had_media = True
+
+            # Unplugging a drive with a disk in it must clear the panel the same
+            # way ejecting the disk would; otherwise it keeps showing media that
+            # is no longer attached to anything.
+            if had_media:
+                await decky.emit("tag_removed", {
+                    "source_type": event.source_type.value,
+                })
+
+            # IDLE only when nothing at all is left to trigger with. Losing the
+            # NFC reader while a floppy drive is still connected is not idle.
+            if not self._any_source_available(exclude=event.source_id):
+                self._set_state(PluginState.IDLE)
+            elif self.state == PluginState.CARD_PRESENT and not self._active_media:
+                self._set_state(PluginState.READY)
 
         statuses = await self.get_source_statuses()
         await decky.emit("source_statuses", statuses)
@@ -634,15 +690,21 @@ class Plugin:
             and not self.is_pairing
             and launched_this_game
         ):
+            # The decision belongs here, next to the launch decision — the
+            # backend is the only side that knows which medium started this
+            # game. The frontend owns the mechanism (only it has SteamClient),
+            # so it is told what to do rather than asked to work it out.
+            action = "close" if self.settings.get("auto_close") else "pause"
             decky.logger.info(
-                f"Media removed while game {self.running_game_id} active. "
-                f"Notifying frontend."
+                f"Media removed while game {self.running_game_id} active; "
+                f"action={action}."
             )
             await decky.emit("card_removed_during_game", {
                 "appid": self.running_game_id,
                 "uid":   removed_uid,
                 "uri":   removed_uri,
                 "source_type": event.source_type.value,
+                "action": action,
             })
         elif self.state == PluginState.GAME_RUNNING and not self.is_pairing:
             decky.logger.info(
@@ -748,16 +810,7 @@ class Plugin:
         """
         if not source_id:
             return None
-        for source in (
-            self.nfc_source,
-            self.storage_source,
-            self.camera_source,
-            self.mqtt_source,
-            self.serial_source,
-            self.file_watch_source,
-        ):
-            if source is None:
-                continue
+        for source in self._all_sources():
             if source.source_id == source_id and source.can_write():
                 return source
         return None
@@ -957,10 +1010,7 @@ class Plugin:
         # Re-arm every source so media already in place — a card resting on the
         # reader, a disk already in the drive — is picked up on the next poll,
         # instead of requiring the user to remove and re-present it.
-        for source in (self.nfc_source, self.storage_source, self.camera_source,
-                       self.mqtt_source, self.serial_source, self.file_watch_source):
-            if source is None:
-                continue
+        for source in self._all_sources():
             try:
                 source.rearm()
             except Exception as e:
@@ -1465,12 +1515,16 @@ class Plugin:
                 # link button uses this to decide if pairing is possible at all,
                 # instead of asking specifically about the NFC reader.
                 "can_pair": source.can_write(),
+                "enabled": source.is_enabled(),
             })
         return result
 
     async def set_source_setting(self, source_type: str, key: str, value):
-        """Update a per-source setting (virtual trigger sources only)."""
-        ALLOWED_SOURCE_TYPES = {"mqtt", "serial", "file_watch"}
+        """Update a per-source setting."""
+        # storage and camera joined the list when sources gained an explicit
+        # on/off switch — a disabled source idles instead of retrying forever,
+        # so the switch has to be reachable from the panel.
+        ALLOWED_SOURCE_TYPES = {"mqtt", "serial", "file_watch", "storage", "camera"}
         if source_type not in ALLOWED_SOURCE_TYPES:
             decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
             return False

@@ -1303,13 +1303,26 @@ class TestHandleSourceEvent:
         assert reader_calls[0].args[1]["source_type"] == "nfc"
 
     @pytest.mark.asyncio
-    async def test_storage_connected_does_not_change_state(self, plugin, mock_decky):
+    async def test_storage_connected_leaves_idle(self, plugin, mock_decky):
+        """IDLE means "nothing can trigger a launch", not "no NFC reader".
+
+        A Deck with only a floppy drive attached used to sit in IDLE forever.
+        """
         from main import PluginState
         from sources.base import SourceEvent, SourceEventKind, SourceType
         plugin.state = PluginState.IDLE
         event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
         await plugin._handle_source_event(event)
-        assert plugin.state == PluginState.IDLE
+        assert plugin.state == PluginState.READY
+
+    @pytest.mark.asyncio
+    async def test_source_connect_does_not_disturb_a_running_game(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.state = PluginState.GAME_RUNNING
+        event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.GAME_RUNNING
 
     @pytest.mark.asyncio
     async def test_storage_connected_does_not_emit_reader_status(self, plugin, mock_decky):
@@ -1338,13 +1351,36 @@ class TestHandleSourceEvent:
         assert reader_calls[0].args[1]["connected"] is False
 
     @pytest.mark.asyncio
-    async def test_storage_disconnected_does_not_change_state(self, plugin, mock_decky):
+    async def test_storage_disconnected_keeps_ready_while_reader_remains(self, plugin, mock_decky):
+        """Losing a drive while the NFC reader is still connected is not idle."""
         from main import PluginState
         from sources.base import SourceEvent, SourceEventKind, SourceType
         plugin.state = PluginState.READY
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
         await plugin._handle_source_event(event)
         assert plugin.state == PluginState.READY
+
+    @pytest.mark.asyncio
+    async def test_last_source_disconnecting_goes_idle(self, plugin, mock_decky):
+        from main import PluginState
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin.nfc_source._reader = None          # reader gone too
+        plugin.state = PluginState.READY
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        assert plugin.state == PluginState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_unplugging_a_drive_holding_media_clears_the_panel(self, plugin, mock_decky):
+        """Otherwise the panel keeps showing a disk that is no longer attached."""
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+        plugin._active_media["storage:udev"] = {
+            "media_id": "/dev/sda", "uri": "steam://run/1", "source_type": "storage",
+        }
+        event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
+        await plugin._handle_source_event(event)
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "tag_removed" in emitted
 
     @pytest.mark.asyncio
     async def test_storage_disconnected_does_not_emit_reader_status(self, plugin, mock_decky):
@@ -1608,3 +1644,71 @@ class TestUnreadableMediaReporting:
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
         assert plugin.current_tag_uri == "steam://rungameid/400"
+
+
+# ── C3 — the quit decision lives in the backend ──────────────────────────────
+
+class TestQuitDecision:
+    """Only the backend knows which medium launched the running game, so it
+    decides close-vs-pause. The frontend owns the mechanism, not the policy."""
+
+    async def _remove_media_during_game(self, plugin, auto_close):
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        from main import PluginState
+        plugin.state = PluginState.GAME_RUNNING
+        plugin.running_game_id = 400
+        plugin._launch_origin = {"source_id": "nfc:/dev/ttyUSB0", "media_id": "DEADBEEF"}
+        # The fixture's settings.get is a plain function reading this dict,
+        # so the setting has to be written where it actually looks.
+        plugin.settings.settings["auto_close"] = auto_close
+        event = MediaEvent(
+            kind=MediaEventKind.UNLOAD,
+            source_type=SourceType.NFC,
+            source_id="nfc:/dev/ttyUSB0",
+            media_id="DEADBEEF",
+            uri="steam://rungameid/400",
+        )
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_unload(event)
+
+    @pytest.mark.asyncio
+    async def test_auto_close_on_instructs_close(self, plugin, mock_decky):
+        await self._remove_media_during_game(plugin, auto_close=True)
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert calls["card_removed_during_game"]["action"] == "close"
+
+    @pytest.mark.asyncio
+    async def test_auto_close_off_instructs_pause(self, plugin, mock_decky):
+        await self._remove_media_during_game(plugin, auto_close=False)
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert calls["card_removed_during_game"]["action"] == "pause"
+
+
+# ── C4 — sources can be switched off ─────────────────────────────────────────
+
+class TestSourceEnablement:
+
+    def test_source_without_enabled_setting_is_on(self):
+        from sources.nfc_source import NfcSource
+        assert NfcSource({"device_path": "/dev/ttyUSB0"}).is_enabled() is True
+
+    def test_enabled_false_switches_a_source_off(self):
+        from sources.mqtt_source import MqttSource
+        assert MqttSource({"enabled": False}).is_enabled() is False
+
+    def test_enabled_true_switches_a_source_on(self):
+        from sources.mqtt_source import MqttSource
+        assert MqttSource({"enabled": True}).is_enabled() is True
+
+    def test_camera_is_off_by_default(self):
+        """A Steam Deck has no camera; leaving it on retried /dev/video0 forever."""
+        from main import SettingsManager
+        defaults = SettingsManager.__new__(SettingsManager)
+        # Read the literal defaults without touching the filesystem.
+        import main as main_module
+        sm = main_module.SettingsManager.__new__(main_module.SettingsManager)
+        sm.path = "/nonexistent"
+        sm.settings = None
+        SettingsManager.__init__(sm, "/nonexistent/settings.json")
+        assert sm.settings["sources"]["camera"]["enabled"] is False
+        assert sm.settings["sources"]["storage"]["enabled"] is True

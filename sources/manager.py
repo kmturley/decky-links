@@ -17,6 +17,14 @@ from sources.base import (
 )
 
 
+# Backoff for a source whose hardware is not responding.
+RECONNECT_MIN = 1.0
+RECONNECT_MAX = 30.0
+# How often a switched-off source re-checks whether the user switched it back
+# on. Deliberately slow: this is the idle path, and nothing is waiting on it.
+DISABLED_POLL_SECONDS = 5.0
+
+
 class SourceManager:
     """Orchestrates all media sources, each in its own asyncio.Task.
 
@@ -92,13 +100,49 @@ class SourceManager:
         ``SourceEvent`` CONNECTED/DISCONNECTED events as the source comes
         online or drops out.
         """
-        RECONNECT_MIN = 1.0
-        RECONNECT_MAX = 30.0
         reconnect_delay = RECONNECT_MIN
         was_connected = False
+        was_disabled = False
 
         while True:
             try:
+                # ── Respect the user's on/off switch ───────────────────
+                # Checked every cycle rather than once at startup, so toggling
+                # a source in the panel takes effect without a plugin restart.
+                if not source.is_enabled():
+                    if not was_disabled:
+                        if self._logger:
+                            self._logger.info(
+                                f"SourceManager: {source.source_id} is disabled — idling"
+                            )
+                        if source.is_active():
+                            try:
+                                await source.stop()
+                            except Exception as e:
+                                if self._logger:
+                                    self._logger.warning(
+                                        f"SourceManager: error stopping disabled "
+                                        f"{source.source_id}: {e}"
+                                    )
+                        if was_connected:
+                            await self._queue.put(SourceEvent(
+                                kind=SourceEventKind.DISCONNECTED,
+                                source_type=source.source_type,
+                                source_id=source.source_id,
+                            ))
+                            was_connected = False
+                        was_disabled = True
+                    await asyncio.sleep(DISABLED_POLL_SECONDS)
+                    continue
+
+                if was_disabled:
+                    if self._logger:
+                        self._logger.info(
+                            f"SourceManager: {source.source_id} re-enabled"
+                        )
+                    was_disabled = False
+                    reconnect_delay = RECONNECT_MIN
+
                 # ── Initialise if needed ───────────────────────────────
                 if not source.is_active():
                     if was_connected:

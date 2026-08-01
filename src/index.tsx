@@ -173,6 +173,8 @@ const Content: FC = () => {
   const nfcSettings = state.settings.sources.nfc;
   const sourceLabel = state.readerStatus.source_type ? state.readerStatus.source_type.toUpperCase() : "NFC";
 
+  const storageSettings = state.settings.sources.storage;
+  const cameraSettings = state.settings.sources.camera;
   const mqttSettings = state.settings.sources.mqtt;
   const serialSettings = state.settings.sources.serial;
   const fileWatchSettings = state.settings.sources.file_watch;
@@ -247,11 +249,13 @@ const Content: FC = () => {
               // its own line below. Collapsing the two made ejecting a floppy
               // look like the drive had been unplugged.
               value={
-                !src.active
-                  ? "Not Connected"
-                  : src.has_media === false
-                    ? "Connected, empty"
-                    : src.source_id.split(":").pop() || "Active"
+                src.enabled === false
+                  ? "Off"
+                  : !src.active
+                    ? "Not Connected"
+                    : src.has_media === false
+                      ? "Connected, empty"
+                      : src.source_id.split(":").pop() || "Active"
               }
               active={src.active}
             />
@@ -341,6 +345,26 @@ const Content: FC = () => {
             onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
           />
         </PanelSectionRow>
+        {storageSettings && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Disk Trigger"
+              description="Launch games from USB, floppy or SD media"
+              checked={storageSettings.enabled}
+              onChange={(v: boolean) => triggerUpdateSourceSetting("storage", "enabled", v)}
+            />
+          </PanelSectionRow>
+        )}
+        {cameraSettings && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Camera Trigger"
+              description={`QR codes via ${cameraSettings.device}`}
+              checked={cameraSettings.enabled}
+              onChange={(v: boolean) => triggerUpdateSourceSetting("camera", "enabled", v)}
+            />
+          </PanelSectionRow>
+        )}
         {mqttSettings && (
           <PanelSectionRow>
             <ToggleField

@@ -353,14 +353,21 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  const gameRemovalListener = addEventListener<[data: { appid: number, uid: string, uri: string }]>("card_removed_during_game", (data) => {
+  const gameRemovalListener = addEventListener<[data: {
+    appid: number, uid: string, uri: string, action?: "close" | "pause",
+  }]>("card_removed_during_game", (data) => {
     if (!data || typeof data.uri !== "string") return;
     const currentAppId = activeAppIdRef.current;
     const currentSettings = settingsRef.current;
     const uriAppId = parseSteamAppIdFromUri(data.uri);
 
+    // The backend decides close-vs-pause: it is the only side that knows which
+    // medium launched this game. Fall back to the local setting only if we are
+    // talking to an older backend that does not send the field.
+    const action = data.action ?? (currentSettings?.auto_close ? "close" : "pause");
+
     if (canSkipLaunch(currentAppId, uriAppId)) {
-      if (currentSettings?.auto_close) {
+      if (action === "close") {
         console.info(`[ Decky Links ] Paired tag removed. Auto-closing game: ${currentAppId}`);
         void (async () => {
           if (!currentAppId || !(await terminateSteamApp(String(currentAppId), data.uri))) {

@@ -16,7 +16,7 @@ export interface Settings {
             reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
         };
         storage?: { enabled: boolean };
-        camera?: { device: string; poll_interval: number };
+        camera?: { enabled: boolean; device: string; poll_interval: number };
         mqtt?: { enabled: boolean; broker_host: string; broker_port: number; topic: string; secret: string };
         serial?: { enabled: boolean; port: string; baudrate: number };
         file_watch?: { enabled: boolean; watch_dir: string; poll_interval: number };
@@ -32,6 +32,10 @@ export interface SourceStatus {
     has_media?: boolean;
     /** Media on this source can be written to, i.e. paired. */
     can_pair?: boolean;
+    /** The user's on/off switch. A disabled source idles rather than
+     *  retrying its hardware forever, so "off" and "not plugged in" are
+     *  different things and must look different. */
+    enabled?: boolean;
 }
 
 export interface ReaderStatus {

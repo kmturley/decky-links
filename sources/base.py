@@ -124,6 +124,20 @@ class MediaSource(ABC):
     def is_active(self) -> bool:
         """Return ``True`` if the source believes it is currently usable."""
 
+    def is_enabled(self) -> bool:
+        """Return ``True`` when the user wants this source running at all.
+
+        Distinct from :meth:`is_active`, which reports whether the hardware is
+        currently working. A source that is switched off must not be retried on
+        a backoff timer forever — that burns wakeups on a battery device and
+        makes a deliberate "off" indistinguishable from a hardware fault in the
+        logs. Sources with no ``enabled`` setting are always on.
+        """
+        settings = getattr(self, "_settings", None)
+        if not isinstance(settings, dict):
+            return True
+        return bool(settings.get("enabled", True))
+
     def has_media(self) -> bool:
         """Return True when physical media is actively present.
 
