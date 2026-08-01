@@ -624,7 +624,7 @@ class NfcSource(MediaSource):
     def can_write(self) -> bool:
         return True
 
-    def write_uri(self, media_id: str, uri: str) -> Tuple[bool, Optional[str]]:
+    async def write_uri(self, media_id: str, uri: str) -> Tuple[bool, Optional[str]]:
         """Source-generic pairing entry point.
 
         ``media_id`` is the tag UID as hex, the form carried by MediaEvents.

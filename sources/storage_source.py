@@ -10,6 +10,7 @@ Gracefully degrades on non-Linux platforms (macOS, Windows) where pyudev
 is not available — ``start()`` returns False and the source stays inactive.
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -27,6 +28,11 @@ from sources.base import (
 )
 
 PAYLOAD_FILENAME = "decky-links.json"
+
+# A floppy drive seeks for several seconds before it admits defeat on an
+# unformatted disk, so this has to be generous. Every call using it runs in a
+# worker thread — blocking the event loop for this long stalls the whole plugin.
+MOUNT_TIMEOUT_SECONDS = 20
 
 # Device node prefixes we consider mountable storage
 _DEVICE_PREFIXES = (
@@ -55,6 +61,8 @@ class StorageSource(MediaSource):
         self._pending: deque = deque() # buffered events (startup scan)
         self._our_mounts: Dict[str, str] = {}  # devnode → tmpdir we created
         self._active_media: Dict[str, str] = {}  # devnode → URI (needed for UNLOAD)
+        self._drives: set = set()        # drives present, with or without a disk
+        self._unmountable: set = set()   # media that already failed to mount
 
     @property
     def source_id(self) -> str:
@@ -85,7 +93,7 @@ class StorageSource(MediaSource):
             self._monitor = monitor
             if self._logger:
                 self._logger.info("StorageSource: udev monitor started")
-            self._scan_existing_devices()
+            await self._scan_existing_devices()
             return True
         except Exception as e:
             if self._logger:
@@ -100,9 +108,11 @@ class StorageSource(MediaSource):
         self._monitor = None
         self._context = None
         for _devnode, mountpoint in list(self._our_mounts.items()):
-            self._unmount_device(mountpoint)
+            await self._unmount_device(mountpoint)
         self._our_mounts.clear()
         self._active_media.clear()
+        self._drives.clear()
+        self._unmountable.clear()
         self._pending.clear()
 
     def is_active(self) -> bool:
@@ -110,6 +120,15 @@ class StorageSource(MediaSource):
 
     def has_media(self) -> bool:
         return len(self._active_media) > 0
+
+    def has_drive(self) -> bool:
+        """True when a storage drive is connected, disk or no disk.
+
+        The panel's source row tracks this rather than has_media: ejecting a
+        floppy does not unplug the drive, and showing the whole source as
+        inactive the moment a disk comes out reads as a fault.
+        """
+        return len(self._drives) > 0
 
     # ── Poll ───────────────────────────────────────────────────────────
 
@@ -144,7 +163,17 @@ class StorageSource(MediaSource):
                 f"media={has_media}"
             )
 
+        # Media that has already failed to mount must not be retried on every
+        # subsequent event. An unformatted floppy takes ~20s to fail, so
+        # retrying turns the drive into a permanent stall. The disk is only
+        # reconsidered once it has physically left the drive.
+        if not has_media:
+            self._unmountable.discard(devnode)
+        elif devnode in self._unmountable:
+            return None
+
         if action == "add":
+            self._drives.add(devnode)
             # A drive can appear with no disk in it (USB floppy, card reader).
             # Mounting that just fails noisily; wait for the media-change event.
             if not has_media:
@@ -154,19 +183,22 @@ class StorageSource(MediaSource):
                         f"waiting for a disk"
                     )
                 return None
-            return self._handle_device_added(devnode)
+            return await self._handle_device_added(devnode)
 
         if action == "remove":
-            return self._handle_device_removed(devnode)
+            self._drives.discard(devnode)
+            self._unmountable.discard(devnode)
+            return await self._handle_device_removed(devnode)
 
         if action == "change":
             # Inserting or ejecting a disk in an already-connected drive emits
             # 'change', not 'add'/'remove'. Without this branch a floppy drive
             # left plugged in never reports anything at all.
+            self._drives.add(devnode)
             if has_media and devnode not in self._active_media:
-                return self._handle_device_added(devnode)
+                return await self._handle_device_added(devnode)
             if not has_media and devnode in self._active_media:
-                return self._handle_device_removed(devnode)
+                return await self._handle_device_removed(devnode)
             return None
 
         return None
@@ -210,7 +242,7 @@ class StorageSource(MediaSource):
     def _is_relevant_device(self, devnode: str) -> bool:
         return any(devnode.startswith(p) for p in _DEVICE_PREFIXES)
 
-    def _handle_device_added(self, devnode: str) -> Optional[MediaEvent]:
+    async def _handle_device_added(self, devnode: str) -> Optional[MediaEvent]:
         """Find or create a mount, read payload, return LOAD event or None."""
         mountpoint = self._find_mount_point(devnode)
         mounted_by_us = False
@@ -223,16 +255,18 @@ class StorageSource(MediaSource):
                         f"removable drive"
                     )
                 return None
-            mountpoint = self._mount_device(devnode)
+            mountpoint = await self._mount_device(devnode)
             if mountpoint:
                 mounted_by_us = True
                 self._our_mounts[devnode] = mountpoint
 
         if not mountpoint:
+            self._unmountable.add(devnode)
             if self._logger:
                 self._logger.warning(
-                    f"StorageSource: {devnode} has media but could not be mounted "
-                    f"— check the filesystem is readable and the plugin runs as root"
+                    f"StorageSource: {devnode} has media but could not be mounted. "
+                    f"The most likely cause is an unformatted disk — format it with "
+                    f"a FAT filesystem (mkfs.vfat). Not retrying until it is ejected."
                 )
             return None
 
@@ -272,7 +306,7 @@ class StorageSource(MediaSource):
             payload={k: v for k, v in payload.items() if k != "uri"},
         )
 
-    def _handle_device_removed(self, devnode: str) -> Optional[MediaEvent]:
+    async def _handle_device_removed(self, devnode: str) -> Optional[MediaEvent]:
         """Emit UNLOAD event and clean up any mount we created."""
         uri = self._active_media.pop(devnode, None)
         if uri is None:
@@ -280,7 +314,7 @@ class StorageSource(MediaSource):
 
         mountpoint = self._our_mounts.pop(devnode, None)
         if mountpoint:
-            self._unmount_device(mountpoint)
+            await self._unmount_device(mountpoint)
 
         if self._logger:
             self._logger.info(f"StorageSource: removed {devnode}")
@@ -315,7 +349,7 @@ class StorageSource(MediaSource):
                 payload={"blank": not uri, "rearmed": True},
             ))
 
-    def write_uri(self, media_id: str, uri: str, title: str = "", icon: str = ""):
+    async def write_uri(self, media_id: str, uri: str, title: str = "", icon: str = ""):
         """Write ``decky-links.json`` to the disk's filesystem root.
 
         Disks are mounted read-only so that a disk sitting in a drive is never
@@ -327,7 +361,7 @@ class StorageSource(MediaSource):
         if not mountpoint:
             return False, f"{devnode} is not mounted"
 
-        if not self._remount(mountpoint, "rw"):
+        if not await self._remount(mountpoint, "rw"):
             return False, f"could not remount {mountpoint} read-write"
 
         try:
@@ -346,20 +380,21 @@ class StorageSource(MediaSource):
                 self._logger.error(f"StorageSource: failed writing {devnode}: {e}")
             return False, str(e)
         finally:
-            self._remount(mountpoint, "ro")
+            await self._remount(mountpoint, "ro")
 
         self._active_media[devnode] = uri
         if self._logger:
             self._logger.info(f"StorageSource: wrote uri={uri} to {devnode}")
         return True, None
 
-    def _remount(self, mountpoint: str, mode: str) -> bool:
+    async def _remount(self, mountpoint: str, mode: str) -> bool:
         """Remount an existing mountpoint ``rw`` or ``ro`` in place."""
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["mount", "-o", f"remount,{mode}", mountpoint],
                 capture_output=True,
-                timeout=10,
+                timeout=MOUNT_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 return True
@@ -389,14 +424,15 @@ class StorageSource(MediaSource):
             pass
         return None
 
-    def _mount_device(self, devnode: str) -> Optional[str]:
+    async def _mount_device(self, devnode: str) -> Optional[str]:
         """Mount devnode read-only to a temp directory. Returns mountpoint or None."""
         tmpdir = tempfile.mkdtemp(prefix="decky-links-")
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["mount", "-o", "ro", devnode, tmpdir],
                 capture_output=True,
-                timeout=10,
+                timeout=MOUNT_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
                 return tmpdir
@@ -414,10 +450,13 @@ class StorageSource(MediaSource):
             pass
         return None
 
-    def _unmount_device(self, mountpoint: str) -> None:
+    async def _unmount_device(self, mountpoint: str) -> None:
         """Unmount mountpoint and remove the temp directory."""
         try:
-            subprocess.run(["umount", mountpoint], capture_output=True, timeout=10)
+            await asyncio.to_thread(
+                subprocess.run, ["umount", mountpoint],
+                capture_output=True, timeout=MOUNT_TIMEOUT_SECONDS,
+            )
         except Exception:
             pass
         try:
@@ -451,7 +490,7 @@ class StorageSource(MediaSource):
 
     # ── Startup scan ───────────────────────────────────────────────────
 
-    def _scan_existing_devices(self) -> None:
+    async def _scan_existing_devices(self) -> None:
         """Buffer LOAD events for media already present when the plugin starts.
 
         Covers two cases: filesystems the system has already mounted, and — the
@@ -507,13 +546,17 @@ class StorageSource(MediaSource):
                     continue
                 if not self._is_relevant_device(devnode):
                     continue
+                # Record the drive itself before considering its media, so a
+                # drive that starts up empty still shows the source as active.
+                if self._is_removable(devnode):
+                    self._drives.add(devnode)
                 # Filter here as well as in _handle_device_added so the Deck's
                 # internal partitions don't each log a refusal on every start.
                 if not self._is_removable(devnode):
                     continue
                 if not self._has_media(devnode):
                     continue
-                event = self._handle_device_added(devnode)
+                event = await self._handle_device_added(devnode)
                 if event is not None:
                     if self._logger:
                         self._logger.info(

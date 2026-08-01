@@ -133,6 +133,15 @@ class MediaSource(ABC):
         """
         return self.is_active()
 
+    def has_drive(self) -> bool:
+        """Return True when this source's hardware is connected and usable.
+
+        Distinct from :meth:`has_media`: a floppy drive with no disk in it is
+        still connected. This is what the panel's source row reports, so that
+        ejecting a disk does not make the whole source look broken.
+        """
+        return self.is_active()
+
     # ── Pairing ────────────────────────────────────────────────────────
 
     def can_write(self) -> bool:
@@ -144,7 +153,7 @@ class MediaSource(ABC):
         """
         return False
 
-    def write_uri(self, media_id: str, uri: str) -> "tuple[bool, Optional[str]]":
+    async def write_uri(self, media_id: str, uri: str) -> "tuple[bool, Optional[str]]":
         """Persist ``uri`` onto the medium identified by ``media_id``.
 
         Returns ``(success, error_message)``. ``media_id`` is whatever this

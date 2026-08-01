@@ -778,7 +778,7 @@ class Plugin:
 
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
-            success, error_msg = source.write_uri(media_id, pairing_uri)
+            success, error_msg = await source.write_uri(media_id, pairing_uri)
             self._play_sound("success.flac" if success else "error.flac")
 
             if success:
@@ -867,11 +867,21 @@ class Plugin:
             return
         
         try:
-            sound_path = os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename)
-            
-            # Verify file exists before attempting to play
-            if not os.path.exists(sound_path):
-                decky.logger.error(f"Sound file not found: {sound_path}")
+            # The decky CLI zips a fixed allowlist (main.py, plugin.json,
+            # package.json, dist/, py_modules/, LICENSE, README.md) — a
+            # top-level assets/ is dropped, so the build vendors the sounds
+            # into py_modules/. Check the source-tree location first so a
+            # development checkout still works.
+            candidates = [
+                os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename),
+                os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules", "assets", "sounds", filename),
+            ]
+            sound_path = next((p for p in candidates if os.path.exists(p)), None)
+
+            if sound_path is None:
+                decky.logger.error(
+                    f"Sound file not found: {filename} (looked in {', '.join(candidates)})"
+                )
                 return
             
             # Verify it's a regular file (not a directory or symlink to sensitive location)
@@ -1431,7 +1441,11 @@ class Plugin:
             result.append({
                 "source_id": source.source_id,
                 "source_type": source.source_type.value,
-                "active": source.has_media(),
+                # The row tracks the hardware, not the media: ejecting a floppy
+                # does not unplug the drive, and greying the whole source out
+                # the moment a disk comes out reads as a fault.
+                "active": source.has_drive(),
+                "has_media": source.has_media(),
             })
         return result
 

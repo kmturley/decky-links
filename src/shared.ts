@@ -26,7 +26,10 @@ export interface Settings {
 export interface SourceStatus {
     source_id: string;
     source_type: SourceType;
+    /** The hardware is connected — a floppy drive with no disk in it counts. */
     active: boolean;
+    /** Media is actually loaded: a disk in the drive, a tag on the reader. */
+    has_media?: boolean;
 }
 
 export interface ReaderStatus {

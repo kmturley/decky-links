@@ -16,7 +16,8 @@
     "watch": "rollup -c -w",
     "test": ".venv/bin/pytest -q",
     "deck:udev": "./scripts/deck.sh udev",
-    "deck:mount-test": "./scripts/deck.sh mount-test"
+    "deck:mount-test": "./scripts/deck.sh mount-test",
+    "deck:format": "./scripts/deck.sh format"
   },
   "repository": {
     "type": "git",

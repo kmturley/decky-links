@@ -305,33 +305,53 @@ def _make_plugin_with_storage(tmp_path):
 
 
 class TestGetSourceStatusesHasMedia:
+    """`active` tracks the drive; `has_media` tracks the disk in it.
+
+    Reporting the source as inactive the moment a floppy is ejected reads as a
+    fault — the drive is still plugged in and still watching for a disk.
+    """
 
     @pytest.mark.asyncio
-    async def test_storage_udev_running_but_no_payload_reports_inactive(self, tmp_path):
+    async def test_no_drive_reports_inactive(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
-        storage._monitor = MagicMock()  # udev monitor running
+        storage._monitor = MagicMock()  # udev monitor running, but no drive
         result = await p.get_source_statuses()
-        storage_entry = next(e for e in result if e["source_type"] == "storage")
-        assert storage_entry["active"] is False
+        entry = next(e for e in result if e["source_type"] == "storage")
+        assert entry["active"] is False
+        assert entry["has_media"] is False
 
     @pytest.mark.asyncio
-    async def test_storage_with_active_media_reports_active(self, tmp_path):
-        p, storage = _make_plugin_with_storage(tmp_path)
-        storage._monitor = MagicMock()
-        storage._active_media["/dev/sdb1"] = "steam://run/12345"
-        result = await p.get_source_statuses()
-        storage_entry = next(e for e in result if e["source_type"] == "storage")
-        assert storage_entry["active"] is True
-
-    @pytest.mark.asyncio
-    async def test_storage_after_media_removal_reports_inactive(self, tmp_path):
+    async def test_drive_with_disk_reports_active_with_media(self, tmp_path):
         p, storage = _make_plugin_with_storage(tmp_path)
         storage._monitor = MagicMock()
-        storage._active_media["/dev/sdb1"] = "steam://run/12345"
-        del storage._active_media["/dev/sdb1"]
+        storage._drives.add("/dev/sda")
+        storage._active_media["/dev/sda"] = "steam://run/12345"
         result = await p.get_source_statuses()
-        storage_entry = next(e for e in result if e["source_type"] == "storage")
-        assert storage_entry["active"] is False
+        entry = next(e for e in result if e["source_type"] == "storage")
+        assert entry["active"] is True
+        assert entry["has_media"] is True
+
+    @pytest.mark.asyncio
+    async def test_drive_stays_active_after_disk_ejected(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()
+        storage._drives.add("/dev/sda")
+        storage._active_media["/dev/sda"] = "steam://run/12345"
+        del storage._active_media["/dev/sda"]
+        result = await p.get_source_statuses()
+        entry = next(e for e in result if e["source_type"] == "storage")
+        assert entry["active"] is True, "ejecting a disk does not unplug the drive"
+        assert entry["has_media"] is False
+
+    @pytest.mark.asyncio
+    async def test_unplugging_the_drive_reports_inactive(self, tmp_path):
+        p, storage = _make_plugin_with_storage(tmp_path)
+        storage._monitor = MagicMock()
+        storage._drives.add("/dev/sda")
+        storage._drives.discard("/dev/sda")
+        result = await p.get_source_statuses()
+        entry = next(e for e in result if e["source_type"] == "storage")
+        assert entry["active"] is False
 
     @pytest.mark.asyncio
     async def test_non_storage_sources_use_is_active_via_has_media(self, tmp_path):

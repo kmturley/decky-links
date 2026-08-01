@@ -42,7 +42,7 @@ def _mock_nfc_source(write_result=(True, None), source_id="nfc:/dev/ttyUSB0"):
     src.source_id = source_id
     src.source_type = SourceType.NFC
     src.can_write.return_value = True
-    src.write_uri.return_value = write_result
+    src.write_uri = AsyncMock(return_value=write_result)
     src.write_ndef_uri.return_value = write_result
     return src
 

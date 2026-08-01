@@ -8,6 +8,7 @@
 #   ./scripts/deck.sh status     Reader/device/plugin state snapshot
 #   ./scripts/deck.sh udev       Watch block-device udev events live
 #   ./scripts/deck.sh mount-test /dev/sdX   Try StorageSource's read-only mount
+#   ./scripts/deck.sh format /dev/sdX       ERASE a disk and format it as FAT
 #   ./scripts/deck.sh restart    Restart plugin_loader (reloads the plugin)
 #   ./scripts/deck.sh shell      Interactive SSH session
 #
@@ -226,6 +227,40 @@ rmdir "$tmp" 2>/dev/null
 REMOTE
 }
 
+cmd_format() {
+    local dev="${1:-}"
+    if [ -z "$dev" ]; then
+        echo "usage: ./scripts/deck.sh format /dev/sdX" >&2
+        echo "Formats a disk as FAT so Decky Links can read and pair it." >&2
+        exit 1
+    fi
+    echo "This ERASES EVERYTHING on $dev (on the Steam Deck) and formats it as FAT."
+    echo "Check 'pnpm deck:status' first — a USB floppy is usually /dev/sda, but"
+    echo "on a Deck with other USB storage attached it may not be."
+    printf "Type the device path again to confirm: "
+    read -r confirm
+    if [ "$confirm" != "$dev" ]; then
+        echo "Aborted." >&2
+        exit 1
+    fi
+    remote "cat > /tmp/decky-format.sh; \
+        echo '$DECK_PASS' | sudo -S bash /tmp/decky-format.sh '$dev'; \
+        rm -f /tmp/decky-format.sh" <<'REMOTE'
+dev="$1"
+if [ ! -b "$dev" ]; then
+    echo "  $dev is not a block device — aborting"
+    exit 1
+fi
+if [ "$(cat "/sys/class/block/$(basename "$dev")/removable" 2>/dev/null)" != "1" ]; then
+    echo "  $dev is not a removable drive — refusing to format it"
+    exit 1
+fi
+umount "$dev" 2>/dev/null
+echo "── formatting $dev ──"
+mkfs.vfat -I "$dev" && echo "  done — reinsert the disk and it should appear as blank media"
+REMOTE
+}
+
 cmd_restart() {
     remote "echo '$DECK_PASS' | sudo -S systemctl restart plugin_loader" \
         && echo "plugin_loader restarted"
@@ -238,6 +273,7 @@ case "${1:-logs}" in
     status)  cmd_status ;;
     udev)    cmd_udev ;;
     mount-test) cmd_mount_test "${2:-}" ;;
+    format)  cmd_format "${2:-}" ;;
     restart) cmd_restart ;;
     shell)   exec "${SSH[@]}" ;;
     *)

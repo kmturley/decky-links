@@ -8,8 +8,9 @@ import asyncio
 import json
 import os
 import sys
+import time
 import pytest
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -87,7 +88,7 @@ class TestStop:
         src = _make_source()
         src._monitor = MagicMock()
         src._our_mounts["/dev/sdb1"] = "/tmp/decky-links-abc"
-        with patch.object(src, "_unmount_device") as mock_umount:
+        with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
             await src.stop()
         mock_umount.assert_called_once_with("/tmp/decky-links-abc")
         assert src._our_mounts == {}
@@ -153,7 +154,7 @@ class TestPoll:
         src = _make_source()
         src._monitor = MagicMock()
         src._monitor.poll.return_value = _make_udev_device("add", "/dev/sdb1")
-        with patch.object(src, "_handle_device_added", return_value=None) as mock_add:
+        with patch.object(src, "_handle_device_added", AsyncMock(return_value=None)) as mock_add:
             await src.poll()
         mock_add.assert_called_once_with("/dev/sdb1")
 
@@ -162,7 +163,7 @@ class TestPoll:
         src = _make_source()
         src._monitor = MagicMock()
         src._monitor.poll.return_value = _make_udev_device("remove", "/dev/sdb1")
-        with patch.object(src, "_handle_device_removed", return_value=None) as mock_rem:
+        with patch.object(src, "_handle_device_removed", AsyncMock(return_value=None)) as mock_rem:
             await src.poll()
         mock_rem.assert_called_once_with("/dev/sdb1")
 
@@ -256,14 +257,15 @@ class TestReadPayload:
 
 class TestHandleDeviceAdded:
 
-    def test_existing_mount_with_payload_emits_load(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_existing_mount_with_payload_emits_load(self, tmp_path):
         from sources.base import MediaEventKind, SourceType
         src = _make_source()
         (tmp_path / "decky-links.json").write_text(json.dumps({
             "version": 1, "uri": "steam://run/12345", "title": "Game", "icon": "",
         }))
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
-            event = src._handle_device_added("/dev/sdb1")
+            event = await src._handle_device_added("/dev/sdb1")
         assert event is not None
         assert event.kind == MediaEventKind.LOAD
         assert event.source_type == SourceType.STORAGE
@@ -271,7 +273,8 @@ class TestHandleDeviceAdded:
         assert event.media_id == "/dev/sdb1"
         assert src._active_media["/dev/sdb1"] == "steam://run/12345"
 
-    def test_existing_mount_without_payload_reports_blank_media(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_existing_mount_without_payload_reports_blank_media(self, tmp_path):
         """A disk with no payload is pairable, not uninteresting.
 
         It is the floppy equivalent of a blank NFC tag: the panel needs to know
@@ -280,7 +283,7 @@ class TestHandleDeviceAdded:
         from sources.base import MediaEventKind
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
-            event = src._handle_device_added("/dev/sdb1")
+            event = await src._handle_device_added("/dev/sdb1")
         assert event is not None
         assert event.kind == MediaEventKind.LOAD
         assert event.uri == ""
@@ -288,7 +291,8 @@ class TestHandleDeviceAdded:
         assert event.payload["mountpoint"] == str(tmp_path)
         assert src._active_media["/dev/sdb1"] == ""
 
-    def test_no_mount_then_mounts_and_emits_load(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_no_mount_then_mounts_and_emits_load(self, tmp_path):
         from sources.base import MediaEventKind
         src = _make_source()
         (tmp_path / "decky-links.json").write_text(json.dumps({
@@ -296,51 +300,55 @@ class TestHandleDeviceAdded:
         }))
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=True):
-                with patch.object(src, "_mount_device", return_value=str(tmp_path)):
-                    event = src._handle_device_added("/dev/sdb1")
+                with patch.object(src, "_mount_device", AsyncMock(return_value=str(tmp_path))):
+                    event = await src._handle_device_added("/dev/sdb1")
         assert event is not None
         assert event.uri == "steam://run/999"
         assert src._our_mounts["/dev/sdb1"] == str(tmp_path)
 
-    def test_no_mount_and_mount_fails_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_no_mount_and_mount_fails_returns_none(self):
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=True):
-                with patch.object(src, "_mount_device", return_value=None):
-                    event = src._handle_device_added("/dev/sdb1")
+                with patch.object(src, "_mount_device", AsyncMock(return_value=None)):
+                    event = await src._handle_device_added("/dev/sdb1")
         assert event is None
 
-    def test_fixed_disk_is_never_mounted(self):
+    @pytest.mark.asyncio
+    async def test_fixed_disk_is_never_mounted(self):
         """The Deck's internal NVMe holds unmounted system partitions; mounting
         them while hunting for a payload would be both useless and risky."""
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=False):
-                with patch.object(src, "_mount_device") as mock_mount:
-                    event = src._handle_device_added("/dev/nvme0n1p5")
+                with patch.object(src, "_mount_device", new_callable=AsyncMock) as mock_mount:
+                    event = await src._handle_device_added("/dev/nvme0n1p5")
         assert event is None
         mock_mount.assert_not_called()
 
-    def test_our_mount_kept_when_no_payload(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_our_mount_kept_when_no_payload(self, tmp_path):
         """Pairing needs somewhere to write, so a blank disk stays mounted."""
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
             with patch.object(src, "_is_removable", return_value=True):
-                with patch.object(src, "_mount_device", return_value=str(tmp_path)):
-                    with patch.object(src, "_unmount_device") as mock_umount:
-                        event = src._handle_device_added("/dev/sdb1")
+                with patch.object(src, "_mount_device", AsyncMock(return_value=str(tmp_path))):
+                    with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+                        event = await src._handle_device_added("/dev/sdb1")
         assert event is not None
         assert event.payload["blank"] is True
         mock_umount.assert_not_called()
         assert src._our_mounts["/dev/sdb1"] == str(tmp_path)
 
-    def test_uri_excluded_from_event_payload(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_uri_excluded_from_event_payload(self, tmp_path):
         src = _make_source()
         (tmp_path / "decky-links.json").write_text(json.dumps({
             "version": 1, "uri": "steam://run/1", "title": "T", "icon": "i.png",
         }))
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
-            event = src._handle_device_added("/dev/sdb1")
+            event = await src._handle_device_added("/dev/sdb1")
         assert "uri" not in event.payload
         assert event.payload["title"] == "T"
         assert event.payload["version"] == 1
@@ -350,11 +358,12 @@ class TestHandleDeviceAdded:
 
 class TestHandleDeviceRemoved:
 
-    def test_known_device_emits_unload(self):
+    @pytest.mark.asyncio
+    async def test_known_device_emits_unload(self):
         from sources.base import MediaEventKind, SourceType
         src = _make_source()
         src._active_media["/dev/sdb1"] = "steam://run/12345"
-        event = src._handle_device_removed("/dev/sdb1")
+        event = await src._handle_device_removed("/dev/sdb1")
         assert event is not None
         assert event.kind == MediaEventKind.UNLOAD
         assert event.source_type == SourceType.STORAGE
@@ -362,26 +371,29 @@ class TestHandleDeviceRemoved:
         assert event.media_id == "/dev/sdb1"
         assert "/dev/sdb1" not in src._active_media
 
-    def test_unknown_device_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_unknown_device_returns_none(self):
         src = _make_source()
-        event = src._handle_device_removed("/dev/sdb1")
+        event = await src._handle_device_removed("/dev/sdb1")
         assert event is None
 
-    def test_our_mount_is_unmounted_on_removal(self):
+    @pytest.mark.asyncio
+    async def test_our_mount_is_unmounted_on_removal(self):
         src = _make_source()
         src._active_media["/dev/sdb1"] = "steam://run/1"
         src._our_mounts["/dev/sdb1"] = "/tmp/decky-links-xyz"
-        with patch.object(src, "_unmount_device") as mock_umount:
-            src._handle_device_removed("/dev/sdb1")
+        with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+            await src._handle_device_removed("/dev/sdb1")
         mock_umount.assert_called_once_with("/tmp/decky-links-xyz")
         assert "/dev/sdb1" not in src._our_mounts
 
-    def test_externally_mounted_device_no_unmount_called(self):
+    @pytest.mark.asyncio
+    async def test_externally_mounted_device_no_unmount_called(self):
         src = _make_source()
         src._active_media["/dev/sdb1"] = "steam://run/1"
         # Not in _our_mounts — we didn't mount it
-        with patch.object(src, "_unmount_device") as mock_umount:
-            src._handle_device_removed("/dev/sdb1")
+        with patch.object(src, "_unmount_device", new_callable=AsyncMock) as mock_umount:
+            await src._handle_device_removed("/dev/sdb1")
         mock_umount.assert_not_called()
 
 
@@ -414,35 +426,38 @@ class TestFindMountPoint:
 
 class TestMountDevice:
 
-    def test_successful_mount_returns_tmpdir(self):
+    @pytest.mark.asyncio
+    async def test_successful_mount_returns_tmpdir(self):
         src = _make_source()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             with patch("tempfile.mkdtemp", return_value="/tmp/decky-links-test"):
-                result = src._mount_device("/dev/sdb1")
+                result = await src._mount_device("/dev/sdb1")
         assert result == "/tmp/decky-links-test"
         args = mock_run.call_args[0][0]
         assert "mount" in args
         assert "ro" in args
         assert "/dev/sdb1" in args
 
-    def test_failed_mount_returns_none(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_failed_mount_returns_none(self, tmp_path):
         src = _make_source()
         tmpdir = str(tmp_path / "mnt")
         os.makedirs(tmpdir)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=32, stderr=b"permission denied")
             with patch("tempfile.mkdtemp", return_value=tmpdir):
-                result = src._mount_device("/dev/sdb1")
+                result = await src._mount_device("/dev/sdb1")
         assert result is None
 
-    def test_mount_exception_returns_none(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_mount_exception_returns_none(self, tmp_path):
         src = _make_source()
         tmpdir = str(tmp_path / "mnt")
         os.makedirs(tmpdir)
         with patch("subprocess.run", side_effect=Exception("timeout")):
             with patch("tempfile.mkdtemp", return_value=tmpdir):
-                result = src._mount_device("/dev/sdb1")
+                result = await src._mount_device("/dev/sdb1")
         assert result is None
 
 
@@ -450,14 +465,15 @@ class TestMountDevice:
 
 class TestScanExistingDevices:
 
-    def test_buffers_load_event_for_matching_mount(self):
+    @pytest.mark.asyncio
+    async def test_buffers_load_event_for_matching_mount(self):
         from sources.base import MediaEventKind
         src = _make_source()
         payload = {"version": 1, "uri": "steam://run/42", "title": "Game 42", "icon": ""}
         mounts_text = "/dev/sdb1 /mnt/usb vfat ro 0 0\n"
         with patch("builtins.open", mock_open(read_data=mounts_text)):
             with patch.object(src, "_read_payload", return_value=payload):
-                src._scan_existing_devices()
+                await src._scan_existing_devices()
         assert len(src._pending) == 1
         evt = src._pending[0]
         assert evt.kind == MediaEventKind.LOAD
@@ -465,28 +481,32 @@ class TestScanExistingDevices:
         assert evt.media_id == "/dev/sdb1"
         assert src._active_media["/dev/sdb1"] == "steam://run/42"
 
-    def test_ignores_non_storage_devices(self):
+    @pytest.mark.asyncio
+    async def test_ignores_non_storage_devices(self):
         src = _make_source()
         mounts_text = "tmpfs /run tmpfs rw 0 0\nsysfs /sys sysfs rw 0 0\n"
         with patch("builtins.open", mock_open(read_data=mounts_text)):
-            src._scan_existing_devices()
+            await src._scan_existing_devices()
         assert len(src._pending) == 0
 
-    def test_ignores_device_without_payload(self):
+    @pytest.mark.asyncio
+    async def test_ignores_device_without_payload(self):
         src = _make_source()
         mounts_text = "/dev/sdb1 /mnt/usb vfat ro 0 0\n"
         with patch("builtins.open", mock_open(read_data=mounts_text)):
             with patch.object(src, "_read_payload", return_value=None):
-                src._scan_existing_devices()
+                await src._scan_existing_devices()
         assert len(src._pending) == 0
 
-    def test_handles_proc_mounts_missing_gracefully(self):
+    @pytest.mark.asyncio
+    async def test_handles_proc_mounts_missing_gracefully(self):
         src = _make_source()
         with patch("builtins.open", side_effect=OSError("no such file")):
-            src._scan_existing_devices()
+            await src._scan_existing_devices()
         assert len(src._pending) == 0
 
-    def test_multiple_matching_mounts(self):
+    @pytest.mark.asyncio
+    async def test_multiple_matching_mounts(self):
         from sources.base import MediaEventKind
         src = _make_source()
         payload1 = {"version": 1, "uri": "steam://run/1", "title": "", "icon": ""}
@@ -494,10 +514,85 @@ class TestScanExistingDevices:
         mounts_text = "/dev/sdb1 /mnt/usb1 vfat ro 0 0\n/dev/sdc1 /mnt/usb2 vfat ro 0 0\n"
         with patch("builtins.open", mock_open(read_data=mounts_text)):
             with patch.object(src, "_read_payload", side_effect=[payload1, payload2]):
-                src._scan_existing_devices()
+                await src._scan_existing_devices()
         assert len(src._pending) == 2
         uris = {e.uri for e in src._pending}
         assert uris == {"steam://run/1", "steam://run/2"}
+
+
+# ── Unmountable media / event-loop safety ─────────────────────────────────────
+
+class TestUnmountableMedia:
+    """An unformatted floppy takes ~20s to fail. Retrying it on every udev
+    event turns the drive into a permanent stall."""
+
+    async def _insert(self, src, action="change"):
+        src._monitor.poll.return_value = _make_udev_device(action, "/dev/sda")
+        return await src.poll()
+
+    def _source_with_unmountable_disk(self):
+        src = _make_source()
+        src._monitor = MagicMock()
+        return src
+
+    @pytest.mark.asyncio
+    async def test_failed_mount_is_not_retried_while_disk_stays_in(self):
+        src = self._source_with_unmountable_disk()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_mount_device", AsyncMock(return_value=None)) as mock_mount:
+            for _ in range(5):
+                await self._insert(src)
+        assert mock_mount.call_count == 1, "retried an unmountable disk"
+
+    @pytest.mark.asyncio
+    async def test_ejecting_the_disk_clears_the_block(self):
+        src = self._source_with_unmountable_disk()
+        with patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_mount_device", AsyncMock(return_value=None)) as mock_mount:
+            with patch.object(src, "_has_media", return_value=True):
+                await self._insert(src)
+            with patch.object(src, "_has_media", return_value=False):
+                await self._insert(src)          # disk taken out
+            with patch.object(src, "_has_media", return_value=True):
+                await self._insert(src)          # put back in — try again
+        assert mock_mount.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_mount_does_not_block_the_event_loop(self):
+        """StorageSource.poll runs on the plugin's only event loop. A mount
+        that blocks it stalls NFC polling and every RPC for its duration."""
+        import subprocess as sp
+        src = self._source_with_unmountable_disk()
+        ticks = []
+        ticks_seen_by_mount = []
+
+        def slow_mount(*args, **kwargs):
+            time.sleep(0.25)
+            # Sampled before returning: this is the count of loop iterations
+            # that got through *while the mount was still running*. Asserting
+            # on the total after gather() proves nothing, since a blocking
+            # mount still lets the ticker finish afterwards.
+            ticks_seen_by_mount.append(len(ticks))
+            raise sp.TimeoutExpired(cmd="mount", timeout=0.25)
+
+        async def ticker():
+            for _ in range(10):
+                await asyncio.sleep(0.01)
+                ticks.append(1)
+
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch("subprocess.run", side_effect=slow_mount):
+            await asyncio.gather(self._insert(src), ticker())
+
+        assert ticks_seen_by_mount == [10], (
+            "the event loop made no progress while mount was running — "
+            "the whole plugin is frozen for the duration of every mount"
+        )
 
 
 # ── rearm() ───────────────────────────────────────────────────────────────────
@@ -539,11 +634,12 @@ class TestWriteUri:
     def test_source_advertises_write_capability(self):
         assert _make_source().can_write() is True
 
-    def test_writes_payload_to_mounted_disk(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_writes_payload_to_mounted_disk(self, tmp_path):
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)
-        with patch.object(src, "_remount", return_value=True):
-            ok, err = src.write_uri("/dev/sdb1", "steam://rungameid/400")
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            ok, err = await src.write_uri("/dev/sdb1", "steam://rungameid/400")
         assert (ok, err) == (True, None)
         written = json.loads((tmp_path / "decky-links.json").read_text())
         assert written == {
@@ -551,58 +647,64 @@ class TestWriteUri:
         }
         assert src._active_media["/dev/sdb1"] == "steam://rungameid/400"
 
-    def test_written_payload_reads_back(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_written_payload_reads_back(self, tmp_path):
         """The file we write must satisfy the reader that will parse it later."""
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)
-        with patch.object(src, "_remount", return_value=True):
-            src.write_uri("/dev/sdb1", "steam://rungameid/400", title="Portal")
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/400", title="Portal")
         payload = src._read_payload(str(tmp_path / "decky-links.json"))
         assert payload is not None
         assert payload["uri"] == "steam://rungameid/400"
         assert payload["title"] == "Portal"
 
-    def test_remounts_read_only_afterwards(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_remounts_read_only_afterwards(self, tmp_path):
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)
-        with patch.object(src, "_remount", return_value=True) as mock_remount:
-            src.write_uri("/dev/sdb1", "steam://run/1")
+        with patch.object(src, "_remount", AsyncMock(return_value=True)) as mock_remount:
+            await src.write_uri("/dev/sdb1", "steam://run/1")
         assert [c.args[1] for c in mock_remount.call_args_list] == ["rw", "ro"]
 
-    def test_restores_read_only_even_when_write_fails(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_restores_read_only_even_when_write_fails(self, tmp_path):
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)
-        with patch.object(src, "_remount", return_value=True) as mock_remount:
+        with patch.object(src, "_remount", AsyncMock(return_value=True)) as mock_remount:
             with patch("builtins.open", side_effect=OSError("disk full")):
-                ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+                ok, err = await src.write_uri("/dev/sdb1", "steam://run/1")
         assert ok is False
         assert "disk full" in err
         # Leaving the disk writable after a failed pair is how a floppy gets
         # corrupted by the next sudden eject.
         assert [c.args[1] for c in mock_remount.call_args_list] == ["rw", "ro"]
 
-    def test_fails_when_not_mounted(self):
+    @pytest.mark.asyncio
+    async def test_fails_when_not_mounted(self):
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
-            ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+            ok, err = await src.write_uri("/dev/sdb1", "steam://run/1")
         assert ok is False
         assert "not mounted" in err
 
-    def test_fails_when_remount_rw_refused(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_fails_when_remount_rw_refused(self, tmp_path):
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)
-        with patch.object(src, "_remount", return_value=False):
-            ok, err = src.write_uri("/dev/sdb1", "steam://run/1")
+        with patch.object(src, "_remount", AsyncMock(return_value=False)):
+            ok, err = await src.write_uri("/dev/sdb1", "steam://run/1")
         assert ok is False
         assert "read-write" in err
         assert not (tmp_path / "decky-links.json").exists()
 
-    def test_falls_back_to_system_mount_point(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_falls_back_to_system_mount_point(self, tmp_path):
         """Disks the system mounted are pairable too, not just ones we mounted."""
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
-            with patch.object(src, "_remount", return_value=True):
-                ok, _ = src.write_uri("/dev/sdb1", "steam://run/1")
+            with patch.object(src, "_remount", AsyncMock(return_value=True)):
+                ok, _ = await src.write_uri("/dev/sdb1", "steam://run/1")
         assert ok is True
         assert (tmp_path / "decky-links.json").exists()
 
@@ -781,17 +883,18 @@ class TestHasMedia:
         await src.stop()
         assert src.has_media() is False
 
-    def test_has_media_tracks_load_unload_cycle(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_has_media_tracks_load_unload_cycle(self, tmp_path):
         from sources.base import MediaEventKind
         src = _make_source()
         (tmp_path / "decky-links.json").write_text(json.dumps({
             "version": 1, "uri": "steam://run/42",
         }))
         with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
-            src._handle_device_added("/dev/sdb1")
+            await src._handle_device_added("/dev/sdb1")
         assert src.has_media() is True
 
-        src._handle_device_removed("/dev/sdb1")
+        await src._handle_device_removed("/dev/sdb1")
         assert src.has_media() is False
 
 

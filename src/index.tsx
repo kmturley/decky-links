@@ -238,7 +238,16 @@ const Content: FC = () => {
               key={src.source_id}
               icon={sourceIcon(src.source_type)}
               label={src.source_type.toUpperCase()}
-              value={src.active ? src.source_id.split(":").pop() || "Active" : "Inactive"}
+              // "Connected" means the drive/reader is there; media presence is
+              // its own line below. Collapsing the two made ejecting a floppy
+              // look like the drive had been unplugged.
+              value={
+                !src.active
+                  ? "Not Connected"
+                  : src.has_media === false
+                    ? "Connected, empty"
+                    : src.source_id.split(":").pop() || "Active"
+              }
               active={src.active}
             />
           ))
