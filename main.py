@@ -35,13 +35,8 @@ from sources import (
     MediaEvent,
     PluginEvent,
     SourceManager,
+    build_all,
 )
-from sources.nfc_source import NfcSource
-from sources.storage_source import StorageSource, DEFAULT_DRIVE_KINDS
-from sources.camera_source import CameraSource
-from sources.mqtt_source import MqttSource
-from sources.serial_source import SerialSource
-from sources.file_watch_source import FileWatchSource
 
 import decky
 
@@ -118,12 +113,6 @@ class Plugin:
     def __init__(self):
         self.settings = None
         self.key_manager = None
-        self.nfc_source = None
-        self.storage_source = None
-        self.camera_source = None
-        self.mqtt_source = None
-        self.serial_source = None
-        self.file_watch_source = None
         self.source_manager = None
         self.state = "IDLE"
         self.current_tag_uid = None
@@ -207,41 +196,18 @@ class Plugin:
 
         # --- Source-based architecture ---
         self._event_queue: asyncio.Queue[PluginEvent] = asyncio.Queue()
-        self.nfc_source = NfcSource(
-            settings=self.settings.get_source_settings("nfc"),
-            key_manager=self.key_manager,
-            logger=decky.logger,
-        )
-        self.storage_source = StorageSource(
-            settings=self.settings.get_source_settings("storage"),
-            logger=decky.logger,
-        )
-        self.camera_source = CameraSource(
-            settings=self.settings.get_source_settings("camera"),
-            logger=decky.logger,
-        )
-        self.mqtt_source = MqttSource(
-            settings=self.settings.get_source_settings("mqtt"),
-            logger=decky.logger,
-        )
-        self.serial_source = SerialSource(
-            settings=self.settings.get_source_settings("serial"),
-            logger=decky.logger,
-        )
-        self.file_watch_source = FileWatchSource(
-            settings=self.settings.get_source_settings("file_watch"),
-            logger=decky.logger,
-        )
         self.source_manager = SourceManager(
             event_queue=self._event_queue,
             logger=decky.logger,
         )
-        self.source_manager.register(self.nfc_source)
-        self.source_manager.register(self.storage_source)
-        self.source_manager.register(self.camera_source)
-        self.source_manager.register(self.mqtt_source)
-        self.source_manager.register(self.serial_source)
-        self.source_manager.register(self.file_watch_source)
+        # One entry per source lives in sources.source_classes(); key_manager
+        # reaches only the sources whose constructor declares it.
+        for source in build_all(
+            self.settings.get_source_settings,
+            logger=decky.logger,
+            key_manager=self.key_manager,
+        ):
+            self.source_manager.register(source)
 
         await self.source_manager.start_all()
         self.polling_task = asyncio.create_task(self._event_loop())
@@ -322,15 +288,37 @@ class Plugin:
     def _all_sources(self):
         """Every source this plugin owns.
 
-        Prefers the manager's registry, falling back to the attributes so the
-        helpers below still work before ``_main`` has registered anything.
+        The manager's registry is the only record now. It used to be that plus
+        six named attributes holding the same objects, with this method
+        reconciling them — so registering a source and remembering to also
+        assign it were two things that could disagree.
         """
-        if self.source_manager and self.source_manager.sources:
-            return list(self.source_manager.sources)
-        return [s for s in (
-            self.nfc_source, self.storage_source, self.camera_source,
-            self.mqtt_source, self.serial_source, self.file_watch_source,
-        ) if s is not None]
+        if not self.source_manager:
+            return []
+        return list(self.source_manager.sources)
+
+    def _source_of_type(self, source_type: SourceType):
+        """The registered source of a given kind, or None.
+
+        A handful of RPCs are genuinely reader-specific — Mifare keys, sector
+        locking, firmware diagnostics — and need to address the NFC source
+        directly. They ask by type rather than holding a reference, so there is
+        still only one record of what exists.
+        """
+        for source in self._all_sources():
+            if source.source_type == source_type:
+                return source
+        return None
+
+    @property
+    def nfc_source(self):
+        """The NFC reader, for the reader-specific RPCs. May be None."""
+        return self._source_of_type(SourceType.NFC)
+
+    @property
+    def storage_source(self):
+        """The storage source, for the drive-category rescan. May be None."""
+        return self._source_of_type(SourceType.STORAGE)
 
     def _any_source_available(self, exclude: Optional[str] = None) -> bool:
         """True when at least one enabled source is currently usable.
@@ -1187,17 +1175,13 @@ class Plugin:
             }
             # Storage is one source covering several kinds of drive, and the
             # panel shows a row per kind — so it needs presence per kind, not
-            # just "some drive is attached".
-            if hasattr(source, "drive_kinds_present"):
-                settings = self.settings.get_source_settings("storage") or {}
-                configured = settings.get("drive_kinds") or {}
-                entry["drive_kinds"] = {
-                    kind: {
-                        "present": present,
-                        "enabled": bool(configured.get(kind, DEFAULT_DRIVE_KINDS.get(kind, False))),
-                    }
-                    for kind, present in source.drive_kinds_present().items()
-                }
+            # just "some drive is attached". Part of the MediaSource contract:
+            # this used to be a hasattr probe into the subclass, with the
+            # enablement half recomputed here from the source's own settings
+            # and an imported copy of its defaults.
+            sub_devices = source.sub_devices()
+            if sub_devices:
+                entry["drive_kinds"] = sub_devices
             result.append(entry)
         return result
 

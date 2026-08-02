@@ -60,6 +60,25 @@ class SourceManager:
                 f"source ({source.source_id})"
             )
 
+    def replace(self, source: MediaSource) -> None:
+        """Swap the registered source of this type for another, in place.
+
+        The registry is the only record of what sources exist — the plugin's
+        ``nfc_source`` and ``storage_source`` are lookups into it — so
+        substituting one (tests standing in mock hardware, or a future
+        reconfiguration path) has to go through here rather than by assigning
+        over a reference that no longer exists.
+
+        Position is preserved, because the order sources were registered in is
+        the order the panel lists them. Only safe before ``start_all``: an
+        already-running task holds its own reference to the source it polls.
+        """
+        for i, existing in enumerate(self._sources):
+            if existing.source_type == source.source_type:
+                self._sources[i] = source
+                return
+        self.register(source)
+
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start_all(self) -> None:

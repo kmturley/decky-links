@@ -199,6 +199,19 @@ class StorageSource(MediaSource):
             present[kind] = True
         return present
 
+    def sub_devices(self) -> Dict[str, Dict[str, bool]]:
+        """Presence and enablement per drive category — see MediaSource.
+
+        Both halves come from here now. The plugin used to combine
+        ``drive_kinds_present()`` with its own reading of this source's
+        settings dict and an imported copy of ``DEFAULT_DRIVE_KINDS``, which
+        meant the default for an unset category was written down twice.
+        """
+        return {
+            kind: {"present": present, "enabled": self._drive_kind_enabled(kind)}
+            for kind, present in self.drive_kinds_present().items()
+        }
+
     def has_drive(self) -> bool:
         """True when a storage drive is connected, disk or no disk.
 

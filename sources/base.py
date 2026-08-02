@@ -161,6 +161,24 @@ class MediaSource(ABC):
         """
         return self.is_active()
 
+    def sub_devices(self) -> Dict[str, Dict[str, bool]]:
+        """Per-category presence and enablement, for sources covering several.
+
+        Storage is one source spanning floppy, optical, USB and card readers,
+        and the panel shows a row for each — so "some drive is attached" is not
+        enough to render it. Every other source is a single device and returns
+        ``{}``.
+
+        This is part of the contract rather than something the plugin
+        discovers, because it used to be reached for with
+        ``hasattr(source, "drive_kinds_present")`` and the enablement half was
+        recomputed in the plugin from the source's own settings dict plus an
+        imported copy of its defaults. Two places deciding the same thing.
+
+        Shape: ``{category: {"present": bool, "enabled": bool}}``.
+        """
+        return {}
+
     # ── Pairing ────────────────────────────────────────────────────────
 
     def can_write(self) -> bool:

@@ -158,16 +158,26 @@ def plugin(tmp_path):
     from sources.nfc_source import NfcSource
 
     p.source_manager = SourceManager(p._event_queue, logger=_mock_decky.logger)
-    p.nfc_source = NfcSource(p.settings.get_source_settings("nfc"), logger=_mock_decky.logger)
+
+    # Registered rather than assigned to p.nfc_source: the manager's registry
+    # is the only record of what exists, and Plugin.nfc_source is a lookup
+    # into it. Assigning both was how a source could be registered but not
+    # remembered, or the reverse.
+    nfc = NfcSource(p.settings.get_source_settings("nfc"), logger=_mock_decky.logger)
+    p.source_manager.register(nfc)
 
     # Hardware mock reader — tests configure this to control NFC behaviour.
     # Reads return a valid NTAG215 capability container by default (magic 0xE1,
     # version, 0x3E×8 = 496 bytes of user memory), so the default tag under test
     # is a real, writable NTAG. A bare MagicMock here would read as a tag whose
     # CC cannot be parsed, which the write path now correctly refuses.
-    p.nfc_source._reader = MagicMock()
-    p.nfc_source._reader.read_uid = MagicMock()
-    p.nfc_source._reader.ntag2xx_read_block.return_value = bytes([0xE1, 0x10, 0x3E, 0x00])
+    nfc._reader = MagicMock()
+    nfc._reader.read_uid = MagicMock()
+    nfc._reader.ntag2xx_read_block.return_value = bytes([0xE1, 0x10, 0x3E, 0x00])
+
+    # Registering above logs. Tests assert on what the code under test logged,
+    # not on fixture setup, so start them from a clean slate.
+    _mock_decky.logger.reset_mock()
 
     # Plugin state
     p.state           = PluginState.READY

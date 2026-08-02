@@ -10,8 +10,6 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from sources.base import SourceType
-
 from sources.base import MediaSource, SourceEventKind, SourceType
 
 
@@ -213,3 +211,84 @@ class TestPollExceptionBacksOff:
                 await manager._run_source(source)
 
         assert max(sleeps) == mgr.RECONNECT_MAX
+
+
+# ── The registry is the only record ───────────────────────────────────────────
+
+class TestRegistryIsTheOnlyRecord:
+    """Plugin used to hold six named source attributes *and* register the same
+    objects with the manager, with a helper reconciling the two. Registering a
+    source and remembering to also assign it were two things that could
+    disagree."""
+
+    def test_replace_swaps_by_type(self):
+        from sources.manager import SourceManager
+
+        original = MagicMock()
+        original.source_type = SourceType.NFC
+        original.source_id = "nfc:old"
+        replacement = MagicMock()
+        replacement.source_type = SourceType.NFC
+        replacement.source_id = "nfc:new"
+
+        mgr = SourceManager(asyncio.Queue(), logger=MagicMock())
+        mgr.register(original)
+        mgr.replace(replacement)
+
+        assert [s.source_id for s in mgr.sources] == ["nfc:new"]
+
+    def test_replace_preserves_position(self):
+        """Registration order is the order the panel lists sources in."""
+        from sources.manager import SourceManager
+
+        def _src(kind, sid):
+            m = MagicMock()
+            m.source_type, m.source_id = kind, sid
+            return m
+
+        mgr = SourceManager(asyncio.Queue(), logger=MagicMock())
+        for s in (_src(SourceType.NFC, "a"), _src(SourceType.STORAGE, "b"),
+                  _src(SourceType.CAMERA, "c")):
+            mgr.register(s)
+
+        mgr.replace(_src(SourceType.STORAGE, "b2"))
+        assert [s.source_id for s in mgr.sources] == ["a", "b2", "c"]
+
+    def test_replace_registers_when_absent(self):
+        from sources.manager import SourceManager
+
+        mgr = SourceManager(asyncio.Queue(), logger=MagicMock())
+        added = MagicMock()
+        added.source_type, added.source_id = SourceType.MQTT, "mqtt:x"
+        mgr.replace(added)
+        assert [s.source_id for s in mgr.sources] == ["mqtt:x"]
+
+
+class TestBuildAll:
+    """Adding a source used to mean editing eight places. The first three are
+    now one entry in sources.source_classes()."""
+
+    def test_builds_every_registered_source(self):
+        from sources import build_all, source_classes
+
+        built = build_all(lambda _t: {}, logger=MagicMock())
+        assert len(built) == len(source_classes())
+        assert {s.source_type for s in built} == set(source_classes())
+
+    def test_extras_reach_only_the_sources_that_accept_them(self):
+        """NFC takes a key manager; nothing else should grow an unused
+        parameter to accommodate it."""
+        from sources import build_all
+
+        sentinel = object()
+        built = build_all(lambda _t: {}, logger=MagicMock(), key_manager=sentinel)
+        by_type = {s.source_type: s for s in built}
+        assert by_type[SourceType.NFC]._key_manager is sentinel
+        assert not hasattr(by_type[SourceType.MQTT], "_key_manager")
+
+    def test_each_source_gets_its_own_settings_section(self):
+        from sources import build_all, source_classes
+
+        seen = []
+        build_all(lambda t: seen.append(t) or {}, logger=MagicMock())
+        assert seen == [t.value for t in source_classes()]

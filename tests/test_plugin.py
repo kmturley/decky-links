@@ -816,16 +816,20 @@ class TestPairing:
         Without this, poll() suppresses the LOAD event for a card that was
         already on the reader, and the user must lift and re-tap to pair.
         """
-        plugin.nfc_source = MagicMock()
+        from sources.base import SourceType
+        stand_in = MagicMock()
+        stand_in.source_type = SourceType.NFC
+        plugin.source_manager.replace(stand_in)
+
         ok = await plugin.start_pairing("steam://rungameid/400")
 
         assert ok is True
-        plugin.nfc_source.rearm.assert_called_once()
+        stand_in.rearm.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_start_pairing_survives_missing_source(self, plugin, mock_decky):
         """start_pairing must not blow up before sources are initialised."""
-        plugin.nfc_source = None
+        plugin.source_manager._sources = []   # no reader at all
         assert await plugin.start_pairing("steam://rungameid/400") is True
         assert plugin.is_pairing is True
 
@@ -917,7 +921,7 @@ class TestPairing:
         storage.source_type = SourceType.STORAGE
         storage.can_write.return_value = True
         storage.write_uri = AsyncMock(return_value=(True, None))
-        plugin.storage_source = storage
+        plugin.source_manager.replace(storage)
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_pairing("/dev/sda", source_id="storage:udev")
@@ -1653,7 +1657,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_updates_current_tag_uri(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = _mock_nfc_source((True, None))
+        plugin.source_manager.replace(_mock_nfc_source((True, None)))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1664,7 +1668,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_emits_uri_detected_marked_paired(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = _mock_nfc_source((True, None))
+        plugin.source_manager.replace(_mock_nfc_source((True, None)))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1679,7 +1683,7 @@ class TestPairingUriSync:
     async def test_successful_pairing_updates_active_media_registry(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = _mock_nfc_source((True, None))
+        plugin.source_manager.replace(_mock_nfc_source((True, None)))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1691,7 +1695,7 @@ class TestPairingUriSync:
     async def test_failed_pairing_does_not_claim_a_uri(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"
-        plugin.nfc_source  = _mock_nfc_source((False, "Write failed at page 4"))
+        plugin.source_manager.replace(_mock_nfc_source((False, "Write failed at page 4")))
 
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(_make_load_event("DEADBEEF", uri=None))
@@ -1830,7 +1834,7 @@ class TestTargetedPairing:
         trigger to target."""
         from sources.storage_source import StorageSource
         storage = StorageSource({}, logger=MagicMock())
-        plugin.storage_source = storage
+        plugin.source_manager.replace(storage)
         return storage
 
     def _storage_load(self):
@@ -1847,7 +1851,7 @@ class TestTargetedPairing:
     @pytest.mark.asyncio
     async def test_targeting_one_trigger_ignores_media_from_another(self, plugin, mock_decky):
         self._with_storage(plugin)
-        plugin.nfc_source = _mock_nfc_source()
+        plugin.source_manager.replace(_mock_nfc_source())
         assert await plugin.start_pairing("steam://run/1", source_id="nfc:/dev/ttyUSB0")
 
         with patch.object(plugin, "_handle_pairing", new_callable=AsyncMock) as mock_pair, \
@@ -1967,7 +1971,7 @@ class TestDriveKindStatus:
                                 logger=MagicMock())
         storage._monitor = MagicMock()
         storage._drives["/dev/sda"] = "floppy"
-        plugin.storage_source = storage
+        plugin.source_manager.replace(storage)
         plugin.source_manager.register(storage)
         plugin.settings.get_source_settings = lambda t: (
             {"drive_kinds": {"floppy": True, "usb": False}} if t == "storage" else {}
