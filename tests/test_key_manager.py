@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import pytest
-from nfc.key_manager import KeyManager
+from nfc.key_manager import ENCRYPTION_AVAILABLE, KeyManager
 
 
 class TestKeyManager:
@@ -198,3 +198,99 @@ class TestKeyManager:
         km.set_key(uid, "FFFFFFFFFFFF", "D3F7D3F7D3F7")
         
         assert km.get_keys(uid) == ["FFFFFFFFFFFF", "D3F7D3F7D3F7"]
+
+
+# ── Storage guarantees ────────────────────────────────────────────────────────
+
+_FERNET_KEY = "hn0DdlwYPBXn8gG_2qYy0VfM6HGmuLd1LGtQ7Wgk0Ic="
+_ENV = "DECKY_LINKS_KEY_ENCRYPTION_KEY"
+
+# The file-mode guarantees below hold with or without cryptography; only the
+# encryption tests need it. Skipping the whole module would have taken the
+# permission tests with it.
+_needs_crypto = pytest.mark.skipif(
+    not ENCRYPTION_AVAILABLE, reason="encryption paths need cryptography"
+)
+
+
+class TestKeyFilePermissions:
+    """These keys unlock the user's tags and the plugin runs as root, so the
+    file mode is the protection that actually applies."""
+
+    def test_key_file_is_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "sub", "keys.json")
+            km = KeyManager(path)
+            km.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            assert os.stat(path).st_mode & 0o777 == 0o600
+
+    def test_key_directory_is_owner_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            keydir = os.path.join(tmpdir, "sub")
+            km = KeyManager(os.path.join(keydir, "keys.json"))
+            km.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            assert os.stat(keydir).st_mode & 0o777 == 0o700
+
+    def test_no_temp_file_is_left_behind(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "keys.json")
+            km = KeyManager(path)
+            km.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            assert os.listdir(tmpdir) == ["keys.json"]
+
+
+@_needs_crypto
+class TestEncryptionAtRest:
+
+    def test_plaintext_file_is_migrated_not_destroyed(self, monkeypatch):
+        """Turning encryption on used to silently lose every stored key: the
+        decrypt failed, load() returned empty, and the next save overwrote."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "keys.json")
+            with open(path, "w") as f:
+                json.dump({"DEADBEEFCAFE": ["FFFFFFFFFFFF", "D3F7D3F7D3F7"]}, f)
+
+            monkeypatch.setenv(_ENV, _FERNET_KEY)
+            km = KeyManager(path)
+
+            assert km.get_keys("DEADBEEFCAFE") == ["FFFFFFFFFFFF", "D3F7D3F7D3F7"]
+            # And the file is now ciphertext, not JSON.
+            with open(path, "rb") as f:
+                with pytest.raises(json.JSONDecodeError):
+                    json.loads(f.read().decode("utf-8"))
+
+    def test_encrypted_roundtrip(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "keys.json")
+            monkeypatch.setenv(_ENV, _FERNET_KEY)
+
+            KeyManager(path).set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            assert KeyManager(path).get_keys("DEADBEEFCAFE") == [
+                "FFFFFFFFFFFF", "D3F7D3F7D3F7"
+            ]
+
+    def test_wrong_key_does_not_clobber_the_file(self, monkeypatch):
+        """A mistyped key must not cost the user their stored keys."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "keys.json")
+            monkeypatch.setenv(_ENV, _FERNET_KEY)
+            KeyManager(path).set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            original = open(path, "rb").read()
+
+            monkeypatch.setenv(_ENV, "Xn0DdlwYPBXn8gG_2qYy0VfM6HGmuLd1LGtQ7Wgk0Ic=")
+            km = KeyManager(path)
+
+            assert km.list_keys() == []
+            assert open(path, "rb").read() == original
+
+    def test_invalid_key_refuses_to_write_plaintext(self, monkeypatch):
+        """Encryption must never silently degrade — that reports success while
+        doing the one thing the user asked it not to."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "keys.json")
+            monkeypatch.setenv(_ENV, "not-a-valid-fernet-key")
+            km = KeyManager(path)
+
+            with pytest.raises(RuntimeError, match="refusing to write keys"):
+                km.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
+            assert not os.path.exists(path)

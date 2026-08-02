@@ -81,12 +81,10 @@ class NfcSource(MediaSource):
         self,
         settings: dict,
         key_manager=None,
-        signature_manager=None,
         logger=None,
     ):
         self._settings = settings
         self._key_manager = key_manager
-        self._signature_manager = signature_manager
         self._logger = logger
         self._reader = None
         # Legacy field retained for compatibility with existing reader module
