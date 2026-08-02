@@ -540,6 +540,45 @@ class TestScanExistingDevices:
         uris = {e.uri for e in src._pending}
         assert uris == {"steam://run/1", "steam://run/2"}
 
+    @pytest.mark.asyncio
+    async def test_scan_registers_a_drive_plugged_in_before_startup(self):
+        """`_drives` became a devnode→category dict when drive categories
+        landed, but this scan still called `.add()` on it. The AttributeError
+        went straight into the scan's broad handler, so the loop died at the
+        first removable drive — a floppy drive plugged in before the plugin
+        started never appeared in the panel at all."""
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        device = MagicMock()
+        device.device_node = "/dev/sda"
+        src._context = MagicMock()
+        src._context.list_devices.return_value = [device]
+
+        with patch("builtins.open", mock_open(read_data="")), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
+             patch.object(src, "_has_media", return_value=False):
+            await src._scan_existing_devices()
+
+        assert src.has_drive() is True
+        assert src._drives["/dev/sda"] == DriveKind.FLOPPY
+
+    @pytest.mark.asyncio
+    async def test_scan_load_events_carry_the_drive_category(self):
+        """Same orphaning bug as rearm(): a disk already mounted at startup
+        needs its category or the panel cannot place it in a row."""
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        payload = {"version": 1, "uri": "steam://run/42", "title": "", "icon": ""}
+        mounts_text = "/dev/sda /mnt/floppy vfat ro 0 0\n"
+        with patch("builtins.open", mock_open(read_data=mounts_text)), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
+             patch.object(src, "_read_payload", return_value=payload):
+            await src._scan_existing_devices()
+
+        assert src._pending[0].payload["drive_kind"] == DriveKind.FLOPPY
+
 
 # ── Unmountable media / event-loop safety ─────────────────────────────────────
 

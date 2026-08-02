@@ -336,6 +336,27 @@ class StorageSource(MediaSource):
     def _is_relevant_device(self, devnode: str) -> bool:
         return any(devnode.startswith(p) for p in _DEVICE_PREFIXES)
 
+    def _load_event(self, devnode: str, uri: str, **payload) -> MediaEvent:
+        """Build a LOAD event for a disk.
+
+        Every LOAD goes through here so the fields the panel depends on cannot
+        be omitted by one call site. `rearm()` used to build its own event and
+        left out `drive_kind`; the panel matches a medium to its row by drive
+        category, so a freshly paired disk was orphaned from its own row until
+        it was ejected and reinserted. The startup scan had the same gap.
+        """
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.STORAGE,
+            source_id=self.source_id,
+            media_id=devnode,
+            uri=uri,
+            payload={
+                **payload,
+                "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
+            },
+        )
+
     async def _handle_device_added(self, devnode: str) -> Optional[MediaEvent]:
         """Find or create a mount, read payload, return LOAD event or None."""
         mountpoint = self._find_mount_point(devnode)
@@ -374,20 +395,13 @@ class StorageSource(MediaSource):
             # nothing at all is indistinguishable from a broken plugin; the
             # panel needs to be able to say *why* nothing happened.
             self._active_media[devnode] = ""
-            return MediaEvent(
-                kind=MediaEventKind.LOAD,
-                source_type=SourceType.STORAGE,
-                source_id=self.source_id,
-                media_id=devnode,
-                uri="",
-                payload={
-                    "unreadable": True,
-                    # Shown verbatim in a panel row, so it has to fit one. The
-                    # full diagnosis is in the log line above, where there is
-                    # room for it.
-                    "error": "Unformatted disk",
-                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
-                },
+            return self._load_event(
+                devnode,
+                "",
+                unreadable=True,
+                # Shown verbatim in a panel row, so it has to fit one. The full
+                # diagnosis is in the log line above, where there is room.
+                error="Unformatted disk",
             )
 
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
@@ -403,34 +417,15 @@ class StorageSource(MediaSource):
                     f"{PAYLOAD_FILENAME} — reporting as blank media, ready to pair"
                 )
             self._active_media[devnode] = ""
-            return MediaEvent(
-                kind=MediaEventKind.LOAD,
-                source_type=SourceType.STORAGE,
-                source_id=self.source_id,
-                media_id=devnode,
-                uri="",
-                payload={
-                    "blank": True,
-                    "mountpoint": mountpoint,
-                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
-                },
-            )
+            return self._load_event(devnode, "", blank=True, mountpoint=mountpoint)
 
         uri = payload.get("uri", "")
         self._active_media[devnode] = uri
         if self._logger:
             self._logger.info(f"StorageSource: loaded {devnode} uri={uri}")
 
-        return MediaEvent(
-            kind=MediaEventKind.LOAD,
-            source_type=SourceType.STORAGE,
-            source_id=self.source_id,
-            media_id=devnode,
-            uri=uri,
-            payload={
-                **{k: v for k, v in payload.items() if k != "uri"},
-                "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
-            },
+        return self._load_event(
+            devnode, uri, **{k: v for k, v in payload.items() if k != "uri"}
         )
 
     async def _handle_device_removed(self, devnode: str) -> Optional[MediaEvent]:
@@ -479,18 +474,9 @@ class StorageSource(MediaSource):
         "No disk" until the disk was ejected and reinserted.
         """
         for devnode, uri in list(self._active_media.items()):
-            self._pending.append(MediaEvent(
-                kind=MediaEventKind.LOAD,
-                source_type=SourceType.STORAGE,
-                source_id=self.source_id,
-                media_id=devnode,
-                uri=uri,
-                payload={
-                    "blank": not uri,
-                    "rearmed": True,
-                    "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
-                },
-            ))
+            self._pending.append(
+                self._load_event(devnode, uri, blank=not uri, rearmed=True)
+            )
 
     async def write_uri(self, media_id: str, uri: str, title: str = "", icon: str = ""):
         """Write ``decky-links.json`` to the disk's filesystem root.
@@ -692,17 +678,13 @@ class StorageSource(MediaSource):
 
             uri = payload.get("uri", "")
             self._active_media[devnode] = uri
+            self._note_drive(devnode)
             if self._logger:
                 self._logger.info(
                     f"StorageSource: found existing media {devnode} uri={uri}"
                 )
-            self._pending.append(MediaEvent(
-                kind=MediaEventKind.LOAD,
-                source_type=SourceType.STORAGE,
-                source_id=self.source_id,
-                media_id=devnode,
-                uri=uri,
-                payload={k: v for k, v in payload.items() if k != "uri"},
+            self._pending.append(self._load_event(
+                devnode, uri, **{k: v for k, v in payload.items() if k != "uri"}
             ))
 
         # 2. Unmounted drives that currently hold media. Without this, a disk
@@ -719,8 +701,12 @@ class StorageSource(MediaSource):
                     continue
                 # Record the drive itself before considering its media, so a
                 # drive that starts up empty still shows the source as active.
-                if self._is_removable(devnode):
-                    self._drives.add(devnode)
+                # `_drives` became a devnode→category dict when drive
+                # categories landed and this call site kept using `.add()`,
+                # which raised straight into the broad handler below — the
+                # whole scan died at the first removable drive, so a drive
+                # plugged in before the plugin started never appeared at all.
+                self._note_drive(devnode)
                 # Filter here as well as in _handle_device_added so the Deck's
                 # internal partitions don't each log a refusal on every start.
                 if not self._is_removable(devnode):

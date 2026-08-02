@@ -1,5 +1,12 @@
 import { FC, ReactNode } from "react";
-import { ButtonItem, Field, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
+import {
+  ButtonItem,
+  DialogButton,
+  Field,
+  PanelSection,
+  PanelSectionRow,
+  ToggleField,
+} from "@decky/ui";
 import { FaGamepad, FaLink } from "react-icons/fa";
 import {
   SourceType,
@@ -192,23 +199,34 @@ const MediaRow: FC<{
     );
   }
 
+  // A Field with its own DialogButton rather than ButtonItem: ButtonItem's
+  // inline layout sizes the button from the row instead of from its label, so
+  // "Pair" came out ~500px wide and overhung the panel's right padding, which
+  // every other control respects. Styling the button directly is the only way
+  // to pin it to its content — ButtonItem exposes no style hook.
   return (
     <PanelSectionRow>
-      <ButtonItem
+      <Field
         icon={icon}
         label={state.text}
-        layout="inline"
-        // Without this the button stretches to fill the row and overhangs the
-        // panel's right padding, which every other control respects.
         childrenContainerWidth="min"
         bottomSeparator="standard"
-        onClick={() => void pairRow(row, target!)}
       >
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <DialogButton
+          onClick={() => void pairRow(row, target!)}
+          style={{
+            minWidth: 0,
+            width: "fit-content",
+            padding: "8px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
           <FaLink size={12} />
           {state.action}
-        </span>
-      </ButtonItem>
+        </DialogButton>
+      </Field>
     </PanelSectionRow>
   );
 };

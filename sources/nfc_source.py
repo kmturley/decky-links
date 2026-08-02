@@ -43,6 +43,18 @@ except ImportError as _e:
     _READER_IMPORT_ERROR = _e
 
 
+# NTAG21x capability container. Page 3 holds magic / version / size÷8 / access;
+# reading it is how the real capacity of a tag is known rather than assumed.
+_NTAG_CC_PAGE = 3
+_NTAG_NDEF_MAGIC = 0xE1
+# NTAG215 user memory, the layout this code assumed for every tag before the CC
+# was read. Still the fallback when a tag will not report its own size.
+_NTAG_FALLBACK_USER_PAGES = 130
+# NTAG216 is the largest of the family at 888 bytes; anything claiming more is
+# a misread, not a bigger tag.
+_NTAG_MAX_USER_PAGES = 222
+
+
 # USB-serial bridge chips used by PN532/PN5180 UART modules. Auto-detection is
 # restricted to these so it can never land on an unrelated CDC-ACM device.
 _KNOWN_USB_SERIAL_VIDS = frozenset({
@@ -102,6 +114,11 @@ class NfcSource(MediaSource):
 
         # Tag classification cache (UID hex -> metadata dict) with LRU eviction
         self._tag_classification_cache: OrderedDict = OrderedDict()
+        # uid hex → user page count read from the tag's capability container.
+        # Without it the CC is re-read on every classification *and* every NDEF
+        # read of the same tag, which is both wasteful and, more to the point,
+        # makes the number of reader round-trips depend on the call path.
+        self._ntag_pages_cache: Dict[str, int] = {}
         self._tag_cache_max_size: int = 128
 
     @property
@@ -509,7 +526,7 @@ class NfcSource(MediaSource):
                     meta["type"] = "ntag21x"
                     if len(uid) == 7:
                         meta["type"] = "ultralight"
-                    pages = list(self._iter_ntag_pages())
+                    pages = list(self._iter_ntag_pages(uid_hex))
                     meta["capacity_bytes"] = len(pages) * 4
             except Exception:
                 meta["protected"] = True
@@ -529,9 +546,51 @@ class NfcSource(MediaSource):
 
     # ── NDEF Read ──────────────────────────────────────────────────────
 
-    def _iter_ntag_pages(self):
-        """Yield user-writable pages for NTAG21x devices."""
-        for page in range(4, 134):
+    def _read_ntag_user_pages(self, uid_hex: Optional[str] = None) -> Optional[int]:
+        """Number of user pages, read from the tag's Capability Container.
+
+        Page 3 of every NTAG21x is a 4-byte CC: magic ``0xE1``, version,
+        size/8, access. Byte 2 times 8 is the NDEF data area in bytes, which is
+        exactly the user memory — 144 bytes on an NTAG213, 504 on a 215, 872 on
+        a 216. Returns None when the CC cannot be read or is not an NDEF tag,
+        leaving the caller to fall back.
+        """
+        if uid_hex and uid_hex in self._ntag_pages_cache:
+            return self._ntag_pages_cache[uid_hex]
+
+        try:
+            cc = self._reader.ntag2xx_read_block(_NTAG_CC_PAGE)
+        except Exception:
+            return None
+        if not cc or len(cc) < 3 or cc[0] != _NTAG_NDEF_MAGIC:
+            return None
+        pages = (cc[2] * 8) // 4
+        if pages <= 0 or pages > _NTAG_MAX_USER_PAGES:
+            return None
+        if uid_hex:
+            self._ntag_pages_cache[uid_hex] = pages
+        return pages
+
+    def _iter_ntag_pages(self, uid_hex: Optional[str] = None):
+        """Yield user-writable pages for NTAG21x devices.
+
+        Sized from the tag itself. This used to return pages 4–133
+        unconditionally — the NTAG215 layout — so a long URI written to a
+        smaller NTAG213 ran past the end of the tag, page writes failing
+        silently one by one while the write reported success.
+        """
+        pages = self._read_ntag_user_pages(uid_hex)
+        if pages is None:
+            # Unreadable CC: keep the historic NTAG215 assumption rather than
+            # refusing to write at all. Wrong only for tags that already could
+            # not tell us anything.
+            pages = _NTAG_FALLBACK_USER_PAGES
+            self._log_once(
+                "ntag-cc-unreadable", "warning",
+                "NFC: could not read tag capability container; assuming "
+                f"{pages} user pages ({pages * 4} bytes)",
+            )
+        for page in range(4, 4 + pages):
             yield page
 
     def _iter_mifare_data_blocks(self):
@@ -556,7 +615,7 @@ class NfcSource(MediaSource):
 
         data = bytearray()
         if is_ntag:
-            blocks_iter = self._iter_ntag_pages()
+            blocks_iter = self._iter_ntag_pages(uid.hex().upper())
             read_fn = self._reader.ntag2xx_read_block
         else:
             blocks_iter = self._iter_mifare_data_blocks()
@@ -674,15 +733,14 @@ class NfcSource(MediaSource):
             blocks = list(self._iter_mifare_data_blocks())
             max_payload = len(blocks) * 16
         else:
-            pages = list(self._iter_ntag_pages())
+            pages = list(self._iter_ntag_pages(uid.hex().upper()))
             max_payload = len(pages) * 4
 
         estimated_size = 2 + 4 + 1 + len(uri_bytes) + 1
         if estimated_size > max_payload:
-            msg = (
-                f"URI too long: estimated {estimated_size} bytes "
-                f"exceeds limit of {max_payload} bytes."
-            )
+            # Checked before the first page write, so a tag that cannot hold
+            # the URI is left exactly as it was rather than half-written.
+            msg = f"Tag too small: needs {estimated_size} bytes, holds {max_payload}"
             return False, msg
 
         try:
@@ -711,12 +769,12 @@ class NfcSource(MediaSource):
                 while len(tlv) % 4 != 0:
                     tlv.append(0x00)
 
-                pages = list(self._iter_ntag_pages())
+                pages = list(self._iter_ntag_pages(uid.hex().upper()))
                 required_pages = len(tlv) // 4
                 if required_pages > len(pages):
                     return False, (
-                        f"URI too long for NTAG pages: needs {required_pages}, "
-                        f"available {len(pages)}."
+                        f"Tag too small: needs {required_pages} pages, "
+                        f"holds {len(pages)}"
                     )
 
                 for i in range(0, len(tlv), 4):

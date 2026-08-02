@@ -650,6 +650,10 @@ class TestReaderInit:
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
         plugin.nfc_source._reader.mifare_classic_read_block.return_value = b"\x00\x00\x00\x00"
         plugin.nfc_source._reader.ntag2xx_read_block.side_effect = [
+            # Page 3, the capability container: NDEF magic, version, 0x3E×8 =
+            # 496 bytes of user memory (an NTAG215). Read first now that the
+            # page range comes from the tag instead of being assumed.
+            bytes([0xE1, 0x10, 0x3E, 0x00]),
             bytes([0x03, 0x01, 0x00, 0xFE]), b"\x00\x00\x00\x00"
         ]
 
@@ -971,6 +975,64 @@ class TestAudioFeedback:
 
 # ── §3.3 — NTAG/Mifare Capacity Enforcement ──────────────────────────────────
 
+class TestNTAGCapacityDetection:
+    """Capacity used to be the NTAG215 layout applied to every tag, so a long
+    URI on a smaller NTAG213 was written past the end of the tag — pages
+    failing one by one while the write reported success."""
+
+    def _cc(self, plugin, block):
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = block
+        return list(plugin.nfc_source._iter_ntag_pages())
+
+    def test_ntag213_is_sized_from_its_capability_container(self, plugin):
+        pages = self._cc(plugin, bytes([0xE1, 0x10, 0x12, 0x00]))   # 0x12×8 = 144 B
+        assert len(pages) * 4 == 144
+        assert pages[0] == 4 and pages[-1] == 39
+
+    def test_ntag215(self, plugin):
+        assert len(self._cc(plugin, bytes([0xE1, 0x10, 0x3E, 0x00]))) * 4 == 496
+
+    def test_ntag216(self, plugin):
+        assert len(self._cc(plugin, bytes([0xE1, 0x10, 0x6D, 0x00]))) * 4 == 872
+
+    def test_unreadable_cc_falls_back_to_the_old_assumption(self, plugin):
+        """Wrong only for tags that already could not tell us anything, and
+        refusing to write at all would be worse."""
+        assert len(self._cc(plugin, None)) == 130
+
+    def test_non_ndef_magic_falls_back(self, plugin):
+        assert len(self._cc(plugin, bytes([0x00, 0x00, 0x12, 0x00]))) == 130
+
+    def test_implausible_size_falls_back(self, plugin):
+        """A misread claiming a tag bigger than any NTAG is a misread."""
+        assert len(self._cc(plugin, bytes([0xE1, 0x10, 0xFF, 0x00]))) == 130
+
+    def test_capability_container_is_read_once_per_tag(self, plugin):
+        """Classification and the NDEF read both need the page range. Without a
+        memo the tag is interrogated twice for an answer that cannot change
+        while it is sitting on the reader."""
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = bytes(
+            [0xE1, 0x10, 0x12, 0x00]
+        )
+        list(plugin.nfc_source._iter_ntag_pages("DEADBEEF"))
+        plugin.nfc_source._reader.ntag2xx_read_block.reset_mock()
+        list(plugin.nfc_source._iter_ntag_pages("DEADBEEF"))
+        plugin.nfc_source._reader.ntag2xx_read_block.assert_not_called()
+
+    def test_a_uri_that_fits_a_215_is_refused_by_a_213(self, plugin):
+        uid = _make_uid()
+        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = bytes(
+            [0xE1, 0x10, 0x12, 0x00]                                 # NTAG213
+        )
+        uri = "https://" + "a" * 200      # 208 bytes: fits a 215, not a 213
+        success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
+        assert success is False
+        assert "tag too small" in (err or "").lower()
+        # Refused before the first page write, so the tag is untouched.
+        plugin.nfc_source._reader.ntag2xx_write_block.assert_not_called()
+
+
 class TestNTAGCapacity:
 
     def test_short_uri_within_limit(self, plugin):
@@ -986,7 +1048,7 @@ class TestNTAGCapacity:
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
         success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
         assert success is False
-        assert "too long" in (err or "").lower()
+        assert "tag too small" in (err or "").lower()
 
     def test_uri_exactly_at_limit_is_allowed(self, plugin):
         uid = _make_uid()
@@ -1057,7 +1119,7 @@ class TestNTAG21xSupport:
 
         success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
         assert success is False
-        assert "too long" in (err or "").lower()
+        assert "tag too small" in (err or "").lower()
 
     def test_classic_capacity_detection_blocks(self, plugin):
         uid = _make_uid()
@@ -1066,7 +1128,7 @@ class TestNTAG21xSupport:
             long_uri = "https://" + "x" * 100
             success, err = plugin.nfc_source.write_ndef_uri(uid, long_uri)
         assert success is False
-        assert "exceeds limit" in (err or "").lower()
+        assert "tag too small" in (err or "").lower()
 
     def test_classic_capacity_allows_small_write(self, plugin):
         uid = _make_uid()
@@ -1084,7 +1146,7 @@ class TestNTAG21xSupport:
             uri = "https://"
             success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
         assert success is False
-        assert "exceeds limit" in (err or "").lower()
+        assert "tag too small" in (err or "").lower()
 
 
 # ── Multiple tag detection ─────────────────────────────────────────────────────
