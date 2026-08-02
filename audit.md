@@ -57,11 +57,15 @@ Remaining in D: the event loop and media handlers (~350 lines) still sit on
 rather than incidentally so. Splitting them needs a decision about who owns
 state transitions, not a file move.
 
-**Phase E is partly done** — the frontend half (`E5`, `E6`). The competing
-`tagUid` model is gone, which fixes a removal on one trigger blanking every
-other trigger's row, and the RPC polls dropped from 2/second to 0.4/second.
-`E1`–`E4` (backend source registry, the `drive_kinds_present` duck-type,
-self-registration, and the NFC-shaped event names) are untouched.
+**Phase E is done except `E4`.** The competing `tagUid` model is gone (E5),
+the RPC polls dropped from 2/second to 0.4/second (E6), the source registry is
+now the only record of what exists (E1), `sub_devices()` replaced the
+`drive_kinds_present` duck-type in the `MediaSource` contract (E2), and
+`sources.source_classes()` is the single place a source is declared (E3).
+
+`E4` — the NFC-shaped event names (`tag_detected`, `tag_removed`,
+`reader_status`) and the orphaned `get_tag_status` RPC — is the remaining
+item, and the only one that changes the frontend/backend event contract.
 
 ### What extraction found
 
@@ -278,9 +282,9 @@ rpc/sources.py   → statuses, per-source settings
 
 ### Phase E — Pay down the abstraction leak (ongoing)
 
-- **E1.** Delete the six named source attributes on `Plugin`; make `SourceManager` the single registry and `_all_sources()` unnecessary.
-- **E2.** Promote `drive_kinds_present()` into the `MediaSource` contract (default `{}`) so `main.py` stops `hasattr`-probing and stops importing `DEFAULT_DRIVE_KINDS`.
-- **E3.** Add source self-registration (a `SOURCE_REGISTRY` dict) so a new source is one file plus one entry, not eight edits.
+- ~~**E1.**~~ **Done** — `nfc_source`/`storage_source` are lookups by type; `SourceManager.replace()` added because substituting a source now goes through the registry.
+- ~~**E2.**~~ **Done** — `sub_devices()` returns presence *and* enablement, so the plugin no longer recomputes the latter from the source's own settings plus an imported copy of its defaults.
+- ~~**E3.**~~ **Done** — `sources.source_classes()` plus `build_all()`. Constructor extras are matched against each class's signature, so NFC keeps its key manager without every other source growing an unused parameter.
 - **E4.** Rename the NFC-flavoured events (`tag_detected` → `media_detected`, etc.) behind a compatibility shim, then retire the shim.
 - ~~**E5.**~~ **Done, `d6adef6`** — the global slot turned out to be write-only: no component ever read it. Removing it fixed the "removal clears every row" bug and a uid-normalisation bug where `uri_detected` used the source type of whatever was presented last.
 - ~~**E6.**~~ **Done, `d6adef6`** — the loop cannot stop when the panel closes (game state has no backend event to push, and drives auto-close), but the RPC polls that duplicate backend pushes moved to the 5s tick. 2 RPC/s → 0.4 RPC/s. Only the local `Router.MainRunningApp` read stays at 2 Hz.
