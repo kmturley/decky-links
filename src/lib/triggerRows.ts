@@ -144,6 +144,9 @@ export function mediaStateFor(
     if (armed) {
       return { text: `Present a ${row.noun}…`, action: null, dim: false, busy: true };
     }
+    // A generated trigger has no medium to be missing — the camera is either
+    // watching or it is not, and "No code" would read as a fault.
+    if (row.generated) return { text: "Ready", action: null, dim: false };
     return { text: `No ${row.noun}`, action: null, dim: true };
   }
 
@@ -159,6 +162,15 @@ export function mediaStateFor(
 
   if (armed) {
     return { text: `Writing to ${row.noun}…`, action: null, dim: false, busy: true };
+  }
+  // Nothing is ever written to a generated trigger, so a code in view is
+  // reported and never offered a Pair button.
+  if (row.generated) {
+    return {
+      text: medium.uri ? launchTargetName(medium.uri) : `Unrecognised ${row.noun}`,
+      action: null,
+      dim: false,
+    };
   }
   if (!medium.uri) {
     return { text: `Empty ${row.noun}`, action: target ? "Pair" : null, dim: false };

@@ -48,8 +48,9 @@ const TriggerLine: FC<{
 
   // Unlike the Quick Access panel, a connected row is always pairable here:
   // the modal is where you tap a tag you have not presented yet, so waiting
-  // for a medium is the normal flow rather than an error.
-  const canPair = connected && !armed && !state.busy;
+  // for a medium is the normal flow rather than an error. Generated triggers
+  // are the exception — there is nothing to write to a camera.
+  const canPair = connected && !armed && !state.busy && !row.generated;
 
   return (
     <div style={{
@@ -145,11 +146,10 @@ const CardPanel: FC<{ target: PairTarget }> = ({ target }) => {
       </div>
 
       {/* Deliberately not "scan this". A phone that scans it gets a steam://
-          URI it cannot open, which reads as a broken feature. Photographing it
-          and showing the photo to the camera is the actual workflow. */}
+          URI it cannot open, which reads as a broken feature. The code is
+          something to show to the camera, not something to open. */}
       <div style={{ fontSize: "0.75em", opacity: 0.75, textAlign: "center", maxWidth: 220 }}>
-        Photograph this to trigger the game from your phone, or save a printable
-        card for a box or sticker.
+        Present this QR code either printed or on a screen to a connected camera.
       </div>
 
       <DialogButton
@@ -187,10 +187,13 @@ export const PairModal: FC<{
 
   // Only rows the user has switched on. A disabled trigger is not a thing they
   // can present, and listing all nine here would bury the two that work.
-  const rows = TRIGGER_ROWS.filter((row) => {
-    const status = statusFor(row, state.sourceStatuses);
-    return isRowEnabled(row, status) && !row.generated;
-  });
+  //
+  // Camera is included even though it cannot be paired: it is the trigger that
+  // reads the code on the right, and seeing that it is enabled and connected is
+  // exactly what someone would otherwise open the sidebar to check.
+  const rows = TRIGGER_ROWS.filter((row) =>
+    isRowEnabled(row, statusFor(row, state.sourceStatuses)),
+  );
 
   return (
     <div
@@ -218,11 +221,9 @@ export const PairModal: FC<{
         </div>
 
         <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
-          {/* Left: generated media. Nothing is written, so there is no Pair
-              button — the code exists the moment the game does. */}
-          <CardPanel target={target} />
-
-          {/* Right: physical media, which has to be written to. */}
+          {/* Left: physical media, which has to be written to. First because
+              it is the list that changes as you plug things in — the code on
+              the right is the same every time you open this game. */}
           <div style={{ flex: 1, minWidth: 0 }}>
             {rows.length === 0 ? (
               <div style={{ fontSize: "0.8em", opacity: 0.7, padding: "8px 4px" }}>
@@ -249,6 +250,10 @@ export const PairModal: FC<{
               ))
             )}
           </div>
+
+          {/* Right: generated media. Nothing is written, so there is no Pair
+              button — the code exists the moment the game does. */}
+          <CardPanel target={target} />
         </div>
       </div>
     </div>
