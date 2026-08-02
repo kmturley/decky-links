@@ -52,11 +52,16 @@ and `media_registry.py`. Suite is **872 passed, 0 failed**.
 Extraction found three real bugs that the old shape hid — see "What
 extraction found" below.
 
-Remaining: the event loop and media handlers (~350 lines) still sit on
+Remaining in D: the event loop and media handlers (~350 lines) still sit on
 `Plugin`, because they are genuinely coupled to `self.state` and `decky.emit`
 rather than incidentally so. Splitting them needs a decision about who owns
-state transitions, not a file move. **Phase E** (the NFC abstraction leak) is
-untouched.
+state transitions, not a file move.
+
+**Phase E is partly done** — the frontend half (`E5`, `E6`). The competing
+`tagUid` model is gone, which fixes a removal on one trigger blanking every
+other trigger's row, and the RPC polls dropped from 2/second to 0.4/second.
+`E1`–`E4` (backend source registry, the `drive_kinds_present` duck-type,
+self-registration, and the NFC-shaped event names) are untouched.
 
 ### What extraction found
 
@@ -277,8 +282,8 @@ rpc/sources.py   → statuses, per-source settings
 - **E2.** Promote `drive_kinds_present()` into the `MediaSource` contract (default `{}`) so `main.py` stops `hasattr`-probing and stops importing `DEFAULT_DRIVE_KINDS`.
 - **E3.** Add source self-registration (a `SOURCE_REGISTRY` dict) so a new source is one file plus one entry, not eight edits.
 - **E4.** Rename the NFC-flavoured events (`tag_detected` → `media_detected`, etc.) behind a compatibility shim, then retire the shim.
-- **E5.** Frontend: delete `sharedState.tagUid`/`tagUri`; derive them from `activeMedia` so there is one model. Fixes the "removal clears every row" bug at [BackgroundManager.tsx:296](src/BackgroundManager.tsx#L296) by construction.
-- **E6.** Have the frontend poll loop stop when the panel closes, and drop the polls that duplicate the `source_statuses` push.
+- ~~**E5.**~~ **Done, `d6adef6`** — the global slot turned out to be write-only: no component ever read it. Removing it fixed the "removal clears every row" bug and a uid-normalisation bug where `uri_detected` used the source type of whatever was presented last.
+- ~~**E6.**~~ **Done, `d6adef6`** — the loop cannot stop when the panel closes (game state has no backend event to push, and drives auto-close), but the RPC polls that duplicate backend pushes moved to the 5s tick. 2 RPC/s → 0.4 RPC/s. Only the local `Router.MainRunningApp` read stays at 2 Hz.
 
 ---
 
