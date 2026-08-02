@@ -62,6 +62,12 @@ ALLOWED_URI_SCHEMES = ("https://",)
 # Regex for validating Steam app IDs (1-10 digits, max ~4 billion)
 STEAM_APPID_PATTERN = re.compile(r'^[0-9]{1,10}$')
 
+# How often the event loop wakes with no event to re-check source status.
+# Drives appear and disappear without producing a media event, and the storage
+# source never disconnects, so a change would otherwise never reach the panel.
+# Only differences are emitted, so an idle plugin sends nothing.
+STATUS_TICK_SECONDS = 2.0
+
 TOP_LEVEL_SETTING_KEYS = {
     "auto_launch",
     "auto_close",
@@ -304,6 +310,7 @@ class Plugin:
         # Which medium launched the running game, so only that medium can quit it.
         self._launch_origin = None
         self._pending_launch_origin = None
+        self._last_statuses = None
 
     # --- Lifecycle ---
 
@@ -414,19 +421,47 @@ class Plugin:
         This is the main loop that replaced the old ``_nfc_loop``.
         SourceManager feeds events from all registered sources into
         ``self._event_queue``; this loop processes them sequentially.
+
+        The wait has a timeout so statuses are re-checked even when no event
+        arrives. Plugging in a floppy *drive* produces no media event — there
+        is no disk in it yet — and the storage source never disconnects, so
+        without this the panel's view of which drives are attached was frozen
+        at whatever it was when the source first connected. That is why a
+        connected drive kept reading "Not connected".
         """
         while True:
             try:
-                event = await self._event_queue.get()
+                try:
+                    event = await asyncio.wait_for(
+                        self._event_queue.get(), timeout=STATUS_TICK_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    await self._publish_statuses()
+                    continue
+
                 if isinstance(event, SourceEvent):
                     await self._handle_source_event(event)
                 elif isinstance(event, MediaEvent):
                     await self._handle_media_event(event)
+                await self._publish_statuses()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 decky.logger.error(f"Event loop error: {e}")
                 decky.logger.error(traceback.format_exc())
+
+    async def _publish_statuses(self, force: bool = False):
+        """Push source statuses to the panel, but only when they changed.
+
+        Called after every event and on every idle tick, so it has to be
+        silent when nothing moved — an unconditional emit here would be a
+        message per second forever.
+        """
+        statuses = await self.get_source_statuses()
+        if not force and statuses == self._last_statuses:
+            return
+        self._last_statuses = statuses
+        await decky.emit("source_statuses", statuses)
 
     def _all_sources(self):
         """Every source this plugin owns.
@@ -526,8 +561,7 @@ class Plugin:
             elif self.state == PluginState.CARD_PRESENT and not self._active_media:
                 self._set_state(PluginState.READY)
 
-        statuses = await self.get_source_statuses()
-        await decky.emit("source_statuses", statuses)
+        await self._publish_statuses()
 
     async def _handle_media_event(self, event: MediaEvent):
         """Handle media interaction events (tag tap, floppy insert, etc.)."""
@@ -1382,8 +1416,18 @@ class Plugin:
             # _handle_media_unload only quits it for that medium. A launch the
             # user started by hand has no pending origin and is attributed to
             # nothing, which correctly means no medium can quit it.
-            self._launch_origin = self._pending_launch_origin
-            self._pending_launch_origin = None
+            #
+            # Only a *new* origin, or a genuinely different game, may change the
+            # attribution. The frontend reports the running game repeatedly —
+            # "Running game updated: 400 → 400" a second after the launch — and
+            # unconditionally taking the (now empty) pending origin wiped the
+            # attribution immediately after setting it. Auto-close then refused
+            # to quit anything, because every game had been "launched by None".
+            if self._pending_launch_origin is not None:
+                self._launch_origin = self._pending_launch_origin
+                self._pending_launch_origin = None
+            elif appid != prev:
+                self._launch_origin = None
             if self._launch_origin:
                 decky.logger.info(f"Game {appid} attributed to {self._launch_origin}")
             self._set_state(PluginState.GAME_RUNNING)
@@ -1654,4 +1698,15 @@ class Plugin:
         sources.setdefault(source_type, {})[key] = value
         self.settings.save()
         decky.logger.info(f"Source setting updated: {source_type}.{key} = {value!r}")
+
+        # Switching a category on has to pick up media that is already sitting
+        # in the drive. udev fired when it went in, we declined it because the
+        # category was off, and udev will not fire again.
+        if source_type == "storage" and self.storage_source is not None:
+            try:
+                await self.storage_source.rescan()
+            except Exception as e:
+                decky.logger.warning(f"set_source_setting: rescan failed: {e}")
+
+        await self._publish_statuses(force=True)
         return True

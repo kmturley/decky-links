@@ -170,7 +170,8 @@ echo
 echo "── import check ──"
 if [ -n "$plugin_dir" ]; then
     PYTHONPATH="$plugin_dir/py_modules" python3 - <<'PY'
-for mod in ("serial", "ndef", "adafruit_pn532.uart", "cryptography", "pyudev", "paho.mqtt.client"):
+for mod in ("serial", "ndef", "adafruit_pn532.uart", "cryptography", "pyudev",
+            "paho.mqtt.client", "zxingcpp", "PIL.Image"):
     try:
         __import__(mod)
         print(f"  OK   {mod}")

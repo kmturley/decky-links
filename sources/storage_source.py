@@ -259,6 +259,26 @@ class StorageSource(MediaSource):
 
         return None
 
+    async def rescan(self) -> None:
+        """Reconsider drives we have already seen but never read.
+
+        Switching a category on has to pick up the disk that is already in the
+        drive. udev fired when it was inserted, we declined to mount it because
+        the category was off, and udev will not fire again — so without this the
+        row stayed empty until the user physically removed and reinserted the
+        media, which is exactly what was reported for a USB stick.
+        """
+        for devnode, kind in list(self._drives.items()):
+            if devnode in self._active_media or devnode in self._unmountable:
+                continue
+            if not self._drive_kind_enabled(kind):
+                continue
+            if not self._has_media(devnode):
+                continue
+            event = await self._begin_load(devnode)
+            if event is not None:
+                self._pending.append(event)
+
     async def _begin_load(self, devnode: str) -> Optional[PluginEvent]:
         """Report a disk as loading, then mount it on the following poll.
 
@@ -390,8 +410,36 @@ class StorageSource(MediaSource):
 
     # ── Device handling ────────────────────────────────────────────────
 
+    def _has_partitions(self, devnode: str) -> bool:
+        """True when this whole-disk device is carved into partitions.
+
+        sysfs nests a partition inside its parent: /sys/class/block/sda/sda1.
+        """
+        name = os.path.basename(devnode)
+        try:
+            return any(
+                entry.startswith(name) and entry != name
+                for entry in os.listdir(f"/sys/class/block/{name}")
+            )
+        except OSError:
+            return False
+
     def _is_relevant_device(self, devnode: str) -> bool:
-        return any(devnode.startswith(p) for p in _DEVICE_PREFIXES)
+        """Is this a device we should try to read media from?
+
+        A partitioned USB stick presents both /dev/sda and /dev/sda1, and taking
+        both meant two devnodes fighting over one registry slot — the log filled
+        with "Multiple media on storage:udev: /dev/sda, /dev/sda1" and pairing
+        wrote to whichever was recorded last. That was /dev/sda, the whole disk,
+        which is not the thing that is mounted: hence "/dev/sda is not mounted".
+
+        So a whole disk that has partitions is ignored in favour of them. A
+        floppy has no partition table, so /dev/sda is itself the filesystem and
+        is still handled.
+        """
+        if not any(devnode.startswith(p) for p in _DEVICE_PREFIXES):
+            return False
+        return not self._has_partitions(devnode)
 
     def _load_event(self, devnode: str, uri: str, **payload) -> MediaEvent:
         """Build a LOAD event for a disk.

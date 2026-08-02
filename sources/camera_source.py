@@ -64,16 +64,21 @@ class CameraSource(MediaSource):
         """Verify device presence and that zxing-cpp/Pillow are importable."""
         if not os.path.exists(self._device):
             return False
-        try:
-            import zxingcpp            # noqa: F401
-            from PIL import Image      # noqa: F401
-        except ImportError:
-            if self._logger:
-                self._logger.warning(
-                    "CameraSource: zxing-cpp/Pillow not available — camera "
-                    "source disabled"
-                )
-            return False
+        # Imported one at a time, and the real exception is logged. Reporting
+        # "zxing-cpp/Pillow not available" for either failure said nothing about
+        # which module, or why — and the interesting failure for a compiled
+        # wheel is not ImportError-because-missing but a missing shared library,
+        # which reports as ImportError too with the reason in its message.
+        for module, package in (("zxingcpp", "zxing-cpp"), ("PIL.Image", "Pillow")):
+            try:
+                __import__(module)
+            except Exception as e:
+                if self._logger:
+                    self._logger.warning(
+                        f"CameraSource: cannot import {module} ({package}): "
+                        f"{type(e).__name__}: {e} — camera source disabled"
+                    )
+                return False
 
         self._active = True
         if self._logger:

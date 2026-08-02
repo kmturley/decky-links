@@ -733,6 +733,16 @@ class NfcSource(MediaSource):
             blocks = list(self._iter_mifare_data_blocks())
             max_payload = len(blocks) * 16
         else:
+            # No Classic authentication and no readable capability container
+            # means this is neither a Classic tag nor an NDEF-formatted NTAG.
+            # Writing anyway is what produced "Write failed at page 4" on a
+            # keyring fob: every page write is rejected, one at a time, and the
+            # first refusal is reported as if it were a transient error.
+            if self._read_ntag_user_pages(uid.hex().upper()) is None:
+                return False, (
+                    "Unsupported tag — not a Mifare Classic or an NDEF-"
+                    "formatted NTAG. It may need formatting as NDEF first."
+                )
             pages = list(self._iter_ntag_pages(uid.hex().upper()))
             max_payload = len(pages) * 4
 

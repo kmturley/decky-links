@@ -1347,3 +1347,93 @@ class TestLoadingState:
         assert first is not None
         assert second is None, "the second event must not announce loading again"
         assert len(src._deferred_mounts) == 1
+
+
+# ── Partitioned devices ───────────────────────────────────────────────────────
+
+class TestPartitions:
+    """A partitioned USB stick presents both /dev/sda and /dev/sda1. Taking
+    both put two devnodes in one registry slot — the log filled with "Multiple
+    media on storage:udev: /dev/sda, /dev/sda1" and pairing wrote to whichever
+    was recorded last, which was the whole disk. That is not what is mounted,
+    hence "Pairing failed: /dev/sda is not mounted"."""
+
+    def test_whole_disk_with_partitions_is_ignored(self):
+        src = _make_source()
+        with patch("os.listdir", return_value=["sda1", "queue", "size"]):
+            assert src._is_relevant_device("/dev/sda") is False
+
+    def test_the_partition_itself_is_used(self):
+        src = _make_source()
+        with patch("os.listdir", return_value=["queue", "size", "partition"]):
+            assert src._is_relevant_device("/dev/sda1") is True
+
+    def test_an_unpartitioned_disk_is_still_used(self):
+        """A floppy has no partition table: /dev/sda *is* the filesystem."""
+        src = _make_source()
+        with patch("os.listdir", return_value=["queue", "size", "removable"]):
+            assert src._is_relevant_device("/dev/sda") is True
+
+    def test_missing_sysfs_does_not_hide_a_device(self):
+        """Unplugging removes sysfs before the remove event is handled, and a
+        remove we ignore is a mount we never release."""
+        src = _make_source()
+        with patch("os.listdir", side_effect=OSError("gone")):
+            assert src._is_relevant_device("/dev/sda") is True
+
+
+# ── rescan() ──────────────────────────────────────────────────────────────────
+
+class TestRescan:
+    """Reported from hardware: with USB storage off, inserting a stick and then
+    switching the category on left the row empty. udev fired when the stick went
+    in, we declined it, and udev does not fire again."""
+
+    @pytest.mark.asyncio
+    async def test_enabling_a_category_picks_up_media_already_inserted(self):
+        from sources.base import MediaEventKind
+        from sources.storage_source import DriveKind
+        src = _make_source({"drive_kinds": {DriveKind.USB: False}})
+        src._drives["/dev/sda1"] = DriveKind.USB
+
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.USB):
+            await src.rescan()
+            assert len(src._pending) == 0, "a disabled category must stay ignored"
+
+            src._settings["drive_kinds"] = {DriveKind.USB: True}
+            await src.rescan()
+
+        assert len(src._pending) == 1
+        assert src._pending[0].kind == MediaEventKind.LOADING
+
+    @pytest.mark.asyncio
+    async def test_rescan_does_not_reload_media_already_read(self):
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        src._drives["/dev/sda"] = DriveKind.FLOPPY
+        src._active_media["/dev/sda"] = "steam://run/1"
+        with patch.object(src, "_has_media", return_value=True):
+            await src.rescan()
+        assert len(src._pending) == 0
+
+    @pytest.mark.asyncio
+    async def test_rescan_does_not_retry_an_unmountable_disk(self):
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        src._drives["/dev/sda"] = DriveKind.FLOPPY
+        src._unmountable.add("/dev/sda")
+        with patch.object(src, "_has_media", return_value=True):
+            await src.rescan()
+        assert len(src._pending) == 0
+
+    @pytest.mark.asyncio
+    async def test_rescan_ignores_an_empty_drive(self):
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        src._drives["/dev/sda"] = DriveKind.FLOPPY
+        with patch.object(src, "_has_media", return_value=False):
+            await src.rescan()
+        assert len(src._pending) == 0

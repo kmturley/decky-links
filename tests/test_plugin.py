@@ -1457,10 +1457,48 @@ class TestHandleSourceEvent:
         from sources.base import SourceEvent, SourceEventKind, SourceType
         for source_type in [SourceType.NFC, SourceType.STORAGE, SourceType.MQTT]:
             mock_decky.emit.reset_mock()
+            plugin._last_statuses = None          # nothing published yet
             event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=source_type, source_id=f"{source_type.value}:test")
             await plugin._handle_source_event(event)
             emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
             assert "source_statuses" in emitted, f"Missing source_statuses for {source_type}"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_statuses_are_not_re_emitted(self, plugin, mock_decky):
+        """The event loop now re-checks status on a timer, because drives come
+        and go without producing any event. That only works if an unchanged
+        status is silent — otherwise it is a message per tick, forever."""
+        await plugin._publish_statuses()
+        mock_decky.emit.reset_mock()
+        await plugin._publish_statuses()
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "source_statuses" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_a_newly_attached_drive_reaches_the_panel(self, plugin, mock_decky):
+        """The bug this was all for: plugging in a floppy drive produces no
+        media event and the storage source never disconnects, so the panel's
+        view of attached drives was frozen and the row read "Not connected"
+        with the drive plugged in."""
+        from sources.storage_source import StorageSource, DriveKind
+        storage = StorageSource({"drive_kinds": {DriveKind.FLOPPY: True}}, logger=MagicMock())
+        storage._monitor = MagicMock()
+        plugin.source_manager = MagicMock()
+        plugin.source_manager.sources = [storage]
+        plugin.settings.get_source_settings = lambda _t: {
+            "drive_kinds": {DriveKind.FLOPPY: True}
+        }
+
+        await plugin._publish_statuses()
+        mock_decky.emit.reset_mock()
+
+        storage._drives["/dev/sda"] = DriveKind.FLOPPY      # drive plugged in
+        await plugin._publish_statuses()
+
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert "source_statuses" in calls
+        entry = calls["source_statuses"][0]
+        assert entry["drive_kinds"][DriveKind.FLOPPY]["present"] is True
 
     @pytest.mark.asyncio
     async def test_disconnected_event_emits_source_statuses(self, plugin, mock_decky):
@@ -1935,3 +1973,94 @@ class TestDriveKindStatus:
         entry = next(e for e in statuses if e["source_type"] == "storage")
         assert entry["drive_kinds"]["floppy"] == {"present": True, "enabled": True}
         assert entry["drive_kinds"]["usb"] == {"present": False, "enabled": False}
+
+
+# ── Launch attribution survives repeated running-game reports ────────────────
+
+class TestLaunchOriginPersistence:
+    """Reported from hardware: auto-close never fired. The log showed the game
+    attributed to the tag, and one second later "that game was launched by
+    None" when the tag came off."""
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_report_of_the_same_game_keeps_the_origin(self, plugin):
+        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        await plugin.set_running_game(400)
+        assert plugin._launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
+
+        # The frontend reports the running game repeatedly; taking the (now
+        # empty) pending origin again wiped the attribution.
+        await plugin.set_running_game(400)
+        assert plugin._launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
+
+    @pytest.mark.asyncio
+    async def test_a_hand_launched_game_is_attributed_to_nothing(self, plugin):
+        await plugin.set_running_game(400)
+        assert plugin._launch_origin is None
+
+    @pytest.mark.asyncio
+    async def test_switching_games_without_a_medium_clears_the_origin(self, plugin):
+        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        await plugin.set_running_game(400)
+        await plugin.set_running_game(500)          # started by hand
+        assert plugin._launch_origin is None
+
+    @pytest.mark.asyncio
+    async def test_a_new_medium_takes_over_attribution(self, plugin):
+        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        await plugin.set_running_game(400)
+        plugin._pending_launch_origin = {"source_id": "storage:udev", "media_id": "/dev/sda"}
+        await plugin.set_running_game(400)
+        assert plugin._launch_origin["source_id"] == "storage:udev"
+
+    @pytest.mark.asyncio
+    async def test_the_launching_medium_can_still_quit_the_game(self, plugin, mock_decky):
+        """End to end: the attribution surviving is what makes auto-close work."""
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        from main import PluginState
+        plugin.settings.settings["auto_close"] = True
+        plugin._pending_launch_origin = {"source_id": "nfc:/dev/ttyUSB0", "media_id": "AABB"}
+        await plugin.set_running_game(400)
+        await plugin.set_running_game(400)          # the duplicate report
+        plugin.state = PluginState.GAME_RUNNING
+        plugin._active_media["nfc:/dev/ttyUSB0"] = {
+            "source_id": "nfc:/dev/ttyUSB0", "source_type": "nfc",
+            "media_id": "AABB", "uri": "steam://run/400",
+        }
+
+        await plugin._handle_media_unload(MediaEvent(
+            kind=MediaEventKind.UNLOAD,
+            source_type=SourceType.NFC,
+            source_id="nfc:/dev/ttyUSB0",
+            media_id="AABB",
+            uri="steam://run/400",
+        ))
+
+        calls = {c.args[0]: c.args[1] for c in mock_decky.emit.call_args_list}
+        assert "card_removed_during_game" in calls, "auto-close never fired"
+        assert calls["card_removed_during_game"]["action"] == "close"
+
+
+class TestUnsupportedTagWrite:
+    """Reported from hardware: an NFC keyring read as an empty tag, and pairing
+    failed with "Write failed at page 4" — the first of many refusals, reported
+    as if it were a transient error."""
+
+    def test_a_tag_that_is_neither_classic_nor_ndef_is_refused(self, plugin):
+        uid = _make_uid()
+        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = None  # no CC
+        success, err = plugin.nfc_source.write_ndef_uri(uid, "steam://run/1")
+        assert success is False
+        assert "unsupported tag" in (err or "").lower()
+        plugin.nfc_source._reader.ntag2xx_write_block.assert_not_called()
+
+    def test_a_readable_ntag_is_still_written(self, plugin):
+        uid = _make_uid()
+        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = bytes(
+            [0xE1, 0x10, 0x3E, 0x00]
+        )
+        plugin.nfc_source._reader.ntag2xx_write_block.return_value = True
+        success, err = plugin.nfc_source.write_ndef_uri(uid, "steam://run/1")
+        assert success is True, err
