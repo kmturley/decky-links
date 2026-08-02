@@ -2064,3 +2064,88 @@ class TestUnsupportedTagWrite:
         plugin.nfc_source._reader.ntag2xx_write_block.return_value = True
         success, err = plugin.nfc_source.write_ndef_uri(uid, "steam://run/1")
         assert success is True, err
+
+
+# ── Printable cards ──────────────────────────────────────────────────────────
+
+class TestCardRpcs:
+    """A QR is the one trigger medium that costs nothing to produce, so these
+    RPCs generate rather than pair — there is nothing to write to."""
+
+    @pytest.mark.asyncio
+    async def test_preview_returns_a_data_uri(self, plugin, monkeypatch):
+        from PIL import Image
+        monkeypatch.setattr("cards.qr_image", lambda uri, module_px=6: Image.new("L", (40, 40), 255))
+        result = await plugin.get_qr_preview("steam://rungameid/220")
+        assert result["ok"] is True
+        assert result["data_uri"].startswith("data:image/png;base64,")
+
+    @pytest.mark.asyncio
+    async def test_preview_refuses_a_uri_outside_the_allowlist(self, plugin):
+        """The same validation as launching: a QR is a launch instruction, and
+        generating one for javascript: would be handing out a loaded gun."""
+        result = await plugin.get_qr_preview("javascript:alert(1)")
+        assert result["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_preview_works_while_the_camera_is_off(self, plugin, monkeypatch):
+        """Printing codes before owning a webcam is reasonable."""
+        from PIL import Image
+        plugin.settings.settings.setdefault("sources", {})["camera"] = {"enabled": False}
+        monkeypatch.setattr("cards.qr_image", lambda uri, module_px=6: Image.new("L", (40, 40), 255))
+        assert (await plugin.get_qr_preview("steam://rungameid/220"))["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_preview_reports_a_generator_failure(self, plugin, monkeypatch):
+        def boom(uri, module_px=6):
+            raise RuntimeError("no encoder")
+        monkeypatch.setattr("cards.qr_image", boom)
+        result = await plugin.get_qr_preview("steam://rungameid/220")
+        assert result["ok"] is False and "no encoder" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_save_writes_to_the_users_documents(self, plugin, monkeypatch, tmp_path):
+        monkeypatch.setattr(plugin, "_card_output_dir", lambda: str(tmp_path / "decky-links"))
+        captured = {}
+
+        def fake_save(uri, title, appid, out_dir, home, dpi, owner):
+            captured.update(uri=uri, title=title, appid=appid, out_dir=out_dir)
+            return {"front": out_dir + "/f.png", "back": out_dir + "/b.png"}
+
+        monkeypatch.setattr("cards.save_card", fake_save)
+        result = await plugin.save_game_card("steam://rungameid/220", "Half-Life 2", "220")
+        assert result["ok"] is True
+        assert set(result["paths"]) == {"front", "back"}
+        assert captured["title"] == "Half-Life 2"
+        assert captured["appid"] == "220"
+
+    @pytest.mark.asyncio
+    async def test_save_refuses_an_invalid_uri(self, plugin):
+        result = await plugin.save_game_card("file:///etc/passwd", "x", "1")
+        assert result["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_save_does_not_block_the_event_loop(self, plugin, monkeypatch, tmp_path):
+        """Rendering two 1200x1800 cards takes long enough to stall every source
+        if it runs on the loop — the same mistake mounting made."""
+        import time
+        monkeypatch.setattr(plugin, "_card_output_dir", lambda: str(tmp_path))
+        ticks = []
+
+        def slow_save(*args, **kwargs):
+            time.sleep(0.05)
+            return {"front": "f", "back": "b"}
+
+        monkeypatch.setattr("cards.save_card", slow_save)
+
+        async def ticker():
+            for _ in range(10):
+                ticks.append(1)
+                await asyncio.sleep(0.005)
+
+        await asyncio.gather(plugin.save_game_card("steam://rungameid/220"), ticker())
+        assert len(ticks) == 10
+
+    def test_output_dir_is_under_the_user_home(self, plugin):
+        import os as _os
+        assert plugin._card_output_dir().endswith(_os.path.join("Documents", "decky-links"))

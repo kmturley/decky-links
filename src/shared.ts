@@ -222,6 +222,20 @@ export const listTagKeys = callable<[], string[]>("list_tag_keys");
 export const getSectorInfo = callable<[uid?: string], SectorInfo[]>("get_sector_info");
 export const lockSector = callable<[uid: string, sector: number, key_a: string, key_b: string], boolean>("lock_sector");
 export const getSourceStatuses = callable<[], SourceStatus[]>("get_source_statuses");
+
+/** A QR code for a launch URI, as a PNG data URI. Generation, not pairing:
+ *  nothing is written to anything, so this works whether or not the camera
+ *  trigger is switched on. */
+export const getQrPreview = callable<
+  [uri: string, module_px?: number],
+  { ok: boolean; data_uri?: string; size?: number; error?: string }
+>("get_qr_preview");
+
+/** Write a two-sided printable card to the user's Documents folder. */
+export const saveGameCard = callable<
+  [uri: string, title?: string, appid?: string],
+  { ok: boolean; dir?: string; paths?: Record<string, string>; error?: string }
+>("save_game_card");
 export const setSourceSetting = callable<[source_type: string, key: string, value: any], boolean>("set_source_setting");
 
 // Pairing listener may want to suppress the toast when our custom modal is

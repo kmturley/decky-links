@@ -1,4 +1,15 @@
-# Product Requirements Document: Decky Links
+# Product vision: Decky Links
+
+> [!NOTE]
+> **What this is.** The *why* behind the plugin — the experience it is aiming
+> at, and the hardware it wants to cover. It is not a status report and not a
+> plan; for what works today see [the README](../README.md), and for what is
+> outstanding see `audit.md` in the workspace root.
+>
+> **Shipped:** NFC, storage (floppy / optical / memory card / USB), QR codes via
+> webcam, MQTT, serial and file-watch triggers; per-trigger pairing; printable
+> cards. **Deferred:** dynamic argument handover (passing a ROM to a fixed
+> launcher), artwork handover for bridge launchers, Amiibo and Skylanders.
 
 ---
 
@@ -58,7 +69,7 @@ A user has one "DOSBox" or "RetroArch" shortcut in Steam. Inserting different ph
 | :--- | :--- |
 | **NFC** | PN532 (USB/UART), ACR122U, NTAG213/215, Amiibo, Mifare, FeliCa |
 | **Storage** | USB Floppy Drives, USB-C Keys, External Optical Drives (CD/DVD), MicroSD |
-| **Vision** | Webcams (QR codes), Dedicated Hardware Scanners |
+| **Vision** | Webcams (QR codes) — dedicated hardware scanners not attempted |
 | **Virtual** | MQTT, Simple Serial Protocols, Local File Watchers |
 
 ---

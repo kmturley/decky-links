@@ -1,8 +1,22 @@
 # 🎴 Decky Links – Specification v1
 
+> [!IMPORTANT]
+> **Scope.** This spec was written when NFC was the only trigger, and the code
+> still cites it by section (`Spec §6.4`, `Spec §7` …) — those references are
+> live, and the state machine, launch rules, pairing flow, audio feedback and
+> error handling below are all still what the plugin does.
+>
+> **Read "card" as "medium" throughout.** A disk in a drive or a QR code in
+> frame is governed by the same rules as a tag on a reader. Where the two
+> genuinely differ, the section says so. Sections superseded since v1 are marked
+> inline. For the trigger list and architecture see [the README](README.md).
+
 ## 1. Overview
 
-Decky Links enables launching games and other URIs on SteamOS by tapping NFC cards. Each NFC tag contains a portable URI payload. When tapped, the system launches the associated URI if no game is currently running.
+Decky Links enables launching games and other URIs on SteamOS by presenting
+physical media — tapping an NFC tag, inserting a disk, showing a QR code. Each
+medium carries a portable URI payload. When presented, the system launches the
+associated URI if no game is currently running.
 
 The system is designed to:
 
@@ -20,15 +34,18 @@ The system is designed to:
 
 1. **URI-Based Launching**
 
-   * NFC tags store a `uri` string.
+   * Media store a `uri` string — in an NDEF record on a tag, in
+     `decky-links.json` on a disk, encoded directly in a QR code.
    * The system validates URI protocol against an allowlist.
    * `steam://` URIs are launched through Steam client APIs.
    * `https://` URIs are launched through system URI handling (`xdg-open`).
 
-2. **Single Active Card Model**
+2. **One Active Medium Per Source** *(superseded: was "Single Active Card")*
 
-   * Only the first detected NFC tag is considered active.
-   * Additional tags are ignored while a game is running.
+   * Each source holds at most one medium. A tag on the reader and a disk in the
+     drive are both active at once, each with its own state.
+   * A second medium on the *same* source is reported as a collision and ignored.
+   * Only the medium that launched the running game may quit it.
 
 3. **No Game Stacking**
 
@@ -47,15 +64,18 @@ The system is designed to:
      * Default: Open Steam menu (Steam button)
      * Optional: Force quit (Steam button + B button hold for several seconds)
 
-6. **Portable Tags**
+6. **Portable Media**
 
-   * Tags are writable.
-   * Tags are not permanently locked.
-   * All required launch data is stored on the tag.
+   * Media are writable and never permanently locked.
+   * All required launch data is stored on the medium itself, so it works on any
+     Deck running the plugin — there is no database to carry with it.
 
 ---
 
-## 3. NFC Tag Format
+## 3. Media Payload Formats
+
+The NFC format is specified in full because it is the most constrained.
+Other media are covered in §3.5.
 
 Decky Links is written to communicate with **ISO14443‑A** type tags.  Two
 families are explicitly supported:
@@ -73,8 +93,6 @@ These two formats are functionally equivalent from the user's perspective –
 both can encode a single NDEF URI record – but the plugin handles them
 slightly differently under the hood.  Choosing either family will work as
 long as the card has sufficient capacity for the URI (see §3.3 below).
-
-## 3. NFC Tag Format
 
 ### 3.1 Storage Format
 
@@ -106,11 +124,15 @@ where `<gameID64>` is Steam's 64-bit game identifier for the shortcut.
 The URI is written/read using an NDEF TLV wrapper (Type `0x03` / Length / Value / `0xFE` terminator),
 as is standard for Type 2 and Mifare Classic NFC tags.
 
-### 3.3 Requirements
+### 3.3 Capacity
 
 * `uri` (string): approved URI (see §4 allowlist)
 * Must be UTF-8 encoded
-* Total NDEF payload must fit within NTAG213 minimum capacity (~140 bytes usable after TLV overhead)
+* Capacity is **read from the tag**, not assumed: page 3 of an NTAG21x holds a
+  capability container whose third byte is the usable size divided by 8 (144
+  bytes on an NTAG213, 496 on a 215, 872 on a 216)
+* A payload that does not fit is refused **before the first page write**, so a
+  failed pair leaves the tag's previous value intact
 * For Mifare Classic tags, writes must avoid sector trailer blocks (key/access-bit blocks)
 
 ### 3.4 Compatibility
@@ -122,6 +144,16 @@ Because the format is standard NDEF, tags written by this plugin can be read by:
 * Other Decky Links installations
 
 The system must gracefully ignore tags that contain NDEF records of unexpected types.
+
+### 3.5 Other media
+
+Added after v1. All carry the same URI and obey the same allowlist.
+
+| Medium | Format |
+| --- | --- |
+| Storage (floppy, optical, memory card, USB) | `decky-links.json` at the filesystem root: `{"version": 1, "uri": "…", "title": "…", "icon": "…"}`. Mounted read-only; remounted read-write only for the moment of a pair. |
+| QR code | The URI encoded directly, at error-correction level Q. Generated by the plugin rather than written to — see [the README](README.md#features). |
+| MQTT / serial / file watch | The URI as a message or file, opt-in and off by default. |
 
 ---
 
@@ -340,10 +372,13 @@ If NDEF URI parsing fails:
 * Desktop Mode support
 * Cross-platform support
 * Parental restrictions
-* Multiple simultaneous card management
 * Custom UI overlays for quitting
-* Metadata storage (title, art, etc.)
 * Tag locking
+
+Since shipped, and no longer non-goals:
+
+* **Multiple simultaneous media** — one per source, tracked independently.
+* **Metadata storage** — storage payloads carry optional `title` and `icon`.
 
 ---
 
@@ -367,20 +402,7 @@ Key technical unknowns to validate early:
 
 ---
 
-## 15. Suggested Initial Development Milestones
-
-1. Prototype NFC detection and UID logging.
-2. Implement NDEF URI parsing.
-3. Implement URI launch test.
-4. Implement game-running detection.
-5. Implement state machine controller.
-6. Add pairing write flow.
-7. Add removal-triggered quit behavior.
-8. Add audio feedback.
-
----
-
-## 16. Design Constraints
+## 15. Design Constraints
 
 * Must behave deterministically.
 * Must never auto-launch over an active game.
