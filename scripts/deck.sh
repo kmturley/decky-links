@@ -118,7 +118,17 @@ echo "── mounted filesystems of interest ──"
 grep -E "^/dev/(sd|sr|fd|mmcblk)" /proc/mounts 2>/dev/null || echo "  none mounted"
 echo
 echo "── python ──"
-python3 -V
+echo "  system python3 (NOT what runs the plugin): $(python3 -V 2>&1)"
+# Decky Loader is a frozen binary carrying its own interpreter. Building against
+# the system python3 shipped extensions that could not load — `undefined symbol:
+# PyObject_GetTypeData` from a cp312-abi3 wheel on an older interpreter. The
+# plugin logs its own version at startup; that is the one to build against.
+runtime=$(grep -h "Python runtime:" "$HOME/homebrew/logs/"*ecky*ink*/*.log 2>/dev/null | tail -1)
+if [ -n "$runtime" ]; then
+    echo "  plugin runtime: ${runtime#*Python runtime: }"
+else
+    echo "  plugin runtime: unknown — restart the plugin and re-run (needs a build with the startup runtime log)"
+fi
 echo
 # -type d matters: a leftover "Decky Links.zip" sits alongside the extracted
 # "Decky-Links" directory and sorts first (space < '-'), so a plain glob picks

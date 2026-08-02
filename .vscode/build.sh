@@ -4,12 +4,17 @@ set -euo pipefail
 CLI_LOCATION="$(pwd)/cli"
 echo "Building plugin in $(pwd)"
 
-# Must match the Python that decky-loader runs plugins with on the Deck.
-# SteamOS ships 3.13.5 as of 2026-07. Native extensions are tagged with the
-# interpreter version (e.g. _cffi_backend.cpython-313-x86_64-linux-gnu.so) and
-# will NOT load under a different one, so a mismatch here silently disables
-# cryptography, Pillow and pyzbar on-device.
-# Check with: ssh deck@steamdeck.local python3 -V   (or `pnpm deck:status`)
+# Must match the Python that decky-loader runs plugins with — which is NOT the
+# SteamOS `python3`. Decky Loader is a frozen binary carrying its own
+# interpreter; SteamOS shipped 3.13.5 while the loader ran something older, and
+# building against the system version silently shipped extensions that could not
+# load. Native extensions are tagged with the interpreter version (e.g.
+# _imaging.cpython-313-x86_64-linux-gnu.so) and abi3 extensions carry a minimum
+# version; both are checked below.
+#
+# Source of truth: the plugin logs it at startup —
+#   pnpm logs | grep "Python runtime"
+# which prints the exact DECK_PYTHON to use.
 DECK_PYTHON="${DECK_PYTHON:-3.13}"
 
 # ---------------------------------------------------------------------------
@@ -47,15 +52,41 @@ if find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) | grep -q .; the
     exit 1
 fi
 
-# Guard: every version-tagged extension must match the Deck's interpreter.
-# abi3 wheels are version-independent and are correctly ignored here.
+# Guard: every version-tagged extension must match the target interpreter.
 expected_tag="cpython-${DECK_PYTHON//./}"
 if mismatched=$(find py_modules -name "*.cpython-*.so" ! -name "*${expected_tag}*" | grep .); then
     echo "ERROR: extensions built for the wrong Python (expected ${expected_tag}):" >&2
     echo "$mismatched" >&2
-    echo "Set DECK_PYTHON to the Deck's version (ssh deck@… python3 -V)." >&2
+    echo "Set DECK_PYTHON to the version the plugin logs at startup." >&2
     exit 1
 fi
+
+# Guard: abi3 wheels have a *minimum* version, not no version at all.
+#
+# This guard used to skip them as "version-independent", which cost a release:
+# zxing-cpp's cp312-abi3 wheel installed cleanly under python 3.13 here and then
+# failed on the Deck with `undefined symbol: PyObject_GetTypeData` — a symbol
+# that only exists from 3.12. A wheel tagged cp312-abi3 runs on 3.12 and above
+# and nothing below, so the floor has to be compared against DECK_PYTHON.
+python3 - "$DECK_PYTHON" <<'GUARD'
+import sys, glob, re, os
+target = tuple(int(x) for x in sys.argv[1].split("."))
+bad = []
+for wheel_meta in glob.glob("py_modules/*.dist-info/WHEEL"):
+    dist = os.path.basename(os.path.dirname(wheel_meta))
+    for line in open(wheel_meta):
+        if not line.startswith("Tag:"):
+            continue
+        tag = line.split(":", 1)[1].strip()
+        m = re.match(r"cp(\d)(\d+)-abi3-", tag)
+        if m and (int(m.group(1)), int(m.group(2))) > target:
+            bad.append(f"  {dist}: {tag} needs >= {m.group(1)}.{m.group(2)}")
+if bad:
+    print("ERROR: abi3 wheels require a newer Python than DECK_PYTHON="
+          f"{'.'.join(map(str, target))}:", file=sys.stderr)
+    print("\n".join(sorted(set(bad))), file=sys.stderr)
+    sys.exit(1)
+GUARD
 
 # ---------------------------------------------------------------------------
 # Local packages

@@ -314,6 +314,37 @@ class Plugin:
 
     # --- Lifecycle ---
 
+    def _log_runtime(self):
+        """Report the interpreter this plugin actually runs under, and whether
+        each compiled dependency loaded.
+
+        Decky Loader is a frozen binary carrying its own Python, which is *not*
+        the SteamOS `python3` that `deck:status` reports. When they differ,
+        every version-tagged extension we vendor is built for the wrong one —
+        and it fails at import with a message that names a missing symbol
+        rather than a version, which is how `undefined symbol:
+        PyObject_GetTypeData` (a Python 3.12 addition) turned out to mean "this
+        interpreter is older than 3.12".
+
+        Cheap, once, at startup, and it turns that class of bug into one line.
+        """
+        v = sys.version_info
+        decky.logger.info(
+            f"Python runtime: {v.major}.{v.minor}.{v.micro} "
+            f"(build this plugin with DECK_PYTHON={v.major}.{v.minor}) "
+            f"executable={sys.executable}"
+        )
+        # Pure-Python dependencies import under any version and prove nothing;
+        # only the compiled ones can be wrong.
+        for module in ("cryptography.hazmat.backends", "PIL.Image", "zxingcpp"):
+            try:
+                __import__(module)
+                decky.logger.info(f"  compiled dep OK   {module}")
+            except Exception as e:
+                decky.logger.warning(
+                    f"  compiled dep FAIL {module}: {type(e).__name__}: {e}"
+                )
+
     async def _main(self):
         # euid is the ground truth for the plugin.json "root" flag: it is fixed
         # when this process spawns, so a deploy without a loader restart leaves
@@ -322,6 +353,7 @@ class Plugin:
             f"Decky Links starting... (euid={os.geteuid()}, "
             f"{'root — storage mounts available' if os.geteuid() == 0 else 'unprivileged — storage mounts will fail'})"
         )
+        self._log_runtime()
         self.settings = SettingsManager(
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
         )
