@@ -47,6 +47,7 @@ import decky
 
 from cards import PRINT_DPI
 from decky_links import settings_schema
+from decky_links import uri as uri_rules
 from nfc.key_manager import KeyManager
 
 
@@ -54,16 +55,11 @@ from nfc.key_manager import KeyManager
 # Constants
 # -----------------------------------------------------------------------
 
-# URI allowlist (restricted).
-# Steam links are intentionally narrowed to launch endpoints only.
-ALLOWED_STEAM_URI_PREFIXES = (
-    "steam://run/",
-    "steam://rungameid/",
-)
-ALLOWED_URI_SCHEMES = ("https://",)
-
-# Regex for validating Steam app IDs (1-10 digits, max ~4 billion)
-STEAM_APPID_PATTERN = re.compile(r'^[0-9]{1,10}$')
+# Re-exported for existing references; defined in decky_links.uri next to the
+# rules that use them.
+ALLOWED_STEAM_URI_PREFIXES = uri_rules.ALLOWED_STEAM_URI_PREFIXES
+ALLOWED_URI_SCHEMES = uri_rules.ALLOWED_URI_SCHEMES
+STEAM_APPID_PATTERN = uri_rules.STEAM_APPID_PATTERN
 
 # How often the event loop wakes with no event to re-check source status.
 # Drives appear and disappear without producing a media event, and the storage
@@ -81,47 +77,6 @@ ALLOWED_SETTING_KEYS = TOP_LEVEL_SETTING_KEYS | NFC_SETTING_KEYS
 # -----------------------------------------------------------------------
 # State Machine (Spec §5)
 # -----------------------------------------------------------------------
-
-def _is_local_host(hostname: str) -> bool:
-    """True when a hostname literal points at this machine or its network.
-
-    Scope, stated because the old check invited a bigger reading than it
-    delivered: this stops a tapped card opening the Deck's own services or a
-    box on the same LAN in the Steam browser. It is a check on the *literal*
-    in the URI, so it cannot stop a public name that resolves to a private
-    address — doing that means resolving at launch time and racing DNS, which
-    is not worth it for the threat here (the user physically taps the card).
-
-    What it does now cover, and did not before, is everything other than the
-    three exact strings 'localhost', '127.0.0.1' and '::1': the rest of
-    127.0.0.0/8, the bracketed IPv6 form, IPv4-mapped IPv6, the RFC1918
-    ranges, link-local including the cloud metadata address, and .local names.
-    """
-    host = hostname.strip().strip('[]').lower()
-    if not host:
-        return True
-
-    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-        return True
-
-    try:
-        # ip_address handles IPv4, IPv6 and the ::ffff:127.0.0.1 mapped form,
-        # so the numeric variants do not need enumerating by hand.
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-
-    if getattr(addr, "ipv4_mapped", None) is not None:
-        addr = addr.ipv4_mapped
-
-    return (
-        addr.is_loopback
-        or addr.is_private
-        or addr.is_link_local      # includes 169.254.169.254
-        or addr.is_reserved
-        or addr.is_unspecified
-    )
-
 
 class PluginState(Enum):
     """Plugin state machine (Spec §5).
@@ -906,44 +861,17 @@ class Plugin:
     # ── URI Validation ─────────────────────────────────────────────────
 
     def _validate_uri(self, uri: str) -> bool:
-        """
-        Returns True when uri is permitted by the protocol allowlist.
-        Allowed: steam://run/*, steam://rungameid/*, and https:// only.
-        
-        Validates format strictly to prevent injection attacks.
-        """
-        if not isinstance(uri, str) or not uri or len(uri) > 2048:
-            return False
-        
-        # Validate Steam URIs
-        for prefix in ALLOWED_STEAM_URI_PREFIXES:
-            if uri.startswith(prefix):
-                # Extract and validate app ID
-                remainder = uri[len(prefix):]
-                app_id = remainder.split('/')[0]  # Get first path component
-                
-                if not app_id or not STEAM_APPID_PATTERN.match(app_id):
-                    decky.logger.warning(f"Invalid Steam app ID: {app_id}")
-                    return False
-                
-                # Ensure no path traversal after app ID
-                if '/' in remainder and not remainder.startswith(app_id + '/'):
-                    decky.logger.warning(f"Suspicious Steam URI format: {uri}")
-                    return False
-                
-                return True
-        
-        # Validate HTTPS URIs
-        if uri.startswith("https://"):
-            try:
-                parsed = urlparse(uri)
-                if not parsed.hostname or '.' not in parsed.netloc:
-                    return False
-                return not _is_local_host(parsed.hostname)
-            except Exception:
-                return False
+        """Whether this URI may be acted on. The rules live in decky_links.uri.
 
-        return False
+        They moved because this is the plugin's trust boundary and had no
+        business needing a Plugin instance — with settings, a key manager and
+        six sources — to evaluate a string. This wrapper stays to log the
+        reason, which is what tells a blocked card apart from a broken reader.
+        """
+        ok, reason = uri_rules.validate(uri)
+        if not ok:
+            decky.logger.warning(f"URI rejected: {reason} ({uri!r})")
+        return ok
 
     def _validate_setting(self, key, value) -> bool:
         """Thin adapter over settings_schema.
