@@ -16,7 +16,7 @@ class TestSteamUris:
     @pytest.mark.parametrize("value", [
         "steam://run/220",
         "steam://rungameid/220",
-        "steam://rungameid/13440066923975639040",
+        "steam://rungameid/12086264277099347968",   # real shortcut gameID64
         "steam://run/1",
         "steam://run/4294967295",
     ])
@@ -48,24 +48,44 @@ class TestSteamUris:
     def test_trailing_path_after_app_id_allowed(self):
         assert uri.is_valid("steam://rungameid/220/extra")
 
-    @pytest.mark.parametrize("game_id", [
-        "13440066923975639040",   # a real non-Steam shortcut gameID64
-        "18446744073709551615",   # uint64 max
-    ])
-    def test_non_steam_shortcut_gameid64_allowed(self, game_id):
-        """rungameid carries a gameID64 for non-Steam shortcuts, not an app
-        id — it packs the app id into the high 32 bits. Checking it against
-        the uint32 app-id pattern rejected every shortcut, so pairing one
-        failed in start_pairing with only a log line to say why."""
+    @pytest.mark.parametrize("appid", [2814052691, 3183009179, 2147483649])
+    def test_non_steam_shortcut_gameid64_allowed(self, appid):
+        """steam://run/ does not launch non-Steam shortcuts at all, so the
+        panel builds a gameID64 instead. Checking it against the uint32
+        app-id pattern rejected every shortcut, and pairing one failed inside
+        start_pairing with only a log line to say why.
+
+        Mirrors shortcutAppIdToGameId64 in src/lib/steamIds.ts — if that
+        formula ever changes, this fails.
+        """
+        game_id = ((appid | 0x80000000) << 32) | 0x02000000
         assert uri.is_valid(f"steam://rungameid/{game_id}")
 
-    def test_run_endpoint_still_takes_only_an_app_id(self):
-        """steam://run/ really does take an app id, so it keeps the tighter
-        bound — widening both would have been the lazy fix."""
-        assert not uri.is_valid("steam://run/13440066923975639040")
+    def test_run_endpoint_never_takes_a_gameid64(self):
+        """steam://run/ really does take an app id. Widening both endpoints
+        would have been the lazy fix."""
+        game_id = ((2814052691 | 0x80000000) << 32) | 0x02000000
+        assert not uri.is_valid(f"steam://run/{game_id}")
 
-    def test_gameid_is_still_bounded(self):
-        assert not uri.is_valid("steam://rungameid/" + "9" * 21)
+    @pytest.mark.parametrize("value", [
+        "12345678901234567890",   # 20 digits, but not a gameID64
+        "99999999999999999999",
+        "18446744073709551615",   # uint64 max: wrong low word
+        "12086264277099347969",   # a real one with the low word disturbed
+    ])
+    def test_arbitrary_long_numbers_are_not_gameids(self, value):
+        """The structure is checked, not the digit count — 'any 20 digits'
+        would hand Steam numbers it would do something unpredictable with."""
+        assert not uri.is_valid(f"steam://rungameid/{value}")
+
+    def test_shortcut_flag_is_required(self):
+        """Right type bits, but no shortcut flag in the high word."""
+        without_flag = (2814052691 & 0x7FFFFFFF) << 32 | 0x02000000
+        assert not uri.is_shortcut_gameid64(str(without_flag))
+
+    def test_appid_zero_rejected(self):
+        assert not uri.is_valid("steam://run/0")
+        assert not uri.is_valid("steam://rungameid/0")
 
 
 class TestHttps:
@@ -174,3 +194,28 @@ class TestAppIds:
     ])
     def test_invalid(self, value):
         assert not uri.is_valid_appid(value)
+
+
+class TestSteamGamesAreUnaffected:
+    """Pinned separately from the shortcut work.
+
+    Widening rungameid to admit shortcut gameID64s must not change anything
+    about ordinary Steam games, in either URI form. These values are what the
+    old validator accepted, so a failure here means a regression, not a new
+    rule.
+    """
+
+    @pytest.mark.parametrize("appid", [
+        "1",
+        "220",          # Half-Life 2
+        "1174180",      # Red Dead Redemption 2
+        "4294967295",   # uint32 max
+    ])
+    @pytest.mark.parametrize("prefix", ["steam://run/", "steam://rungameid/"])
+    def test_ordinary_app_ids_still_launch_by_either_form(self, prefix, appid):
+        assert uri.is_valid(f"{prefix}{appid}")
+
+    @pytest.mark.parametrize("appid", ["4294967296", "12345678901", "abc", "-1", ""])
+    @pytest.mark.parametrize("prefix", ["steam://run/", "steam://rungameid/"])
+    def test_things_that_were_rejected_still_are(self, prefix, appid):
+        assert not uri.is_valid(f"{prefix}{appid}")

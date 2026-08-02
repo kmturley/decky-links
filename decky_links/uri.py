@@ -26,21 +26,56 @@ ALLOWED_URI_SCHEMES = ("https://",)
 # 1-10 digits: an app id is a uint32, so this is the widest it can be.
 STEAM_APPID_PATTERN = re.compile(r"^[0-9]{1,10}$")
 
-# rungameid does NOT carry an app id. For a non-Steam shortcut it carries a
-# gameID64, which packs the app id into the high 32 bits — see
-# shortcutAppIdToGameId64 in src/lib/steamIds.ts, which is what the panel's
-# "Pair Current Game" button produces. Those are up to 20 digits, so checking
-# them against the uint32 pattern rejected every non-Steam shortcut: pairing
-# one failed at start_pairing with nothing but a log line to say why.
-STEAM_GAMEID_PATTERN = re.compile(r"^[0-9]{1,20}$")
-
-# Which pattern applies to which endpoint.
-_ID_PATTERNS = {
-    "steam://run/": STEAM_APPID_PATTERN,
-    "steam://rungameid/": STEAM_GAMEID_PATTERN,
-}
+# rungameid takes one of two things, and they are not interchangeable.
+#
+# A Steam game is named by its plain app id. A non-Steam shortcut cannot be —
+# steam://run/ does not launch shortcuts at all — so the panel builds a
+# gameID64 instead, via shortcutAppIdToGameId64 in src/lib/steamIds.ts:
+#
+#     gameID64 = ((appid | 0x80000000) << 32) | 0x02000000
+#
+# which is a 20-digit number. Checking both against the uint32 app-id pattern
+# rejected every shortcut, so pairing one failed inside start_pairing with
+# only a log line to say why.
+#
+# The fix is to accept that second form *structurally* rather than by widening
+# the digit count: a gameID64 has a fixed shape, and "any 20 digits" would
+# admit arbitrary numbers that Steam would do something unpredictable with.
+SHORTCUT_FLAG = 0x80000000      # set in the high word for a shortcut
+SHORTCUT_TYPE = 0x02000000      # CGameID type 2, in the low word
+U32_MASK = 0xFFFFFFFF
+MAX_APPID = U32_MASK
 
 MAX_URI_LENGTH = 2048
+
+
+def is_shortcut_gameid64(value: str) -> bool:
+    """True for a gameID64 of the exact shape the panel builds for shortcuts.
+
+    Deliberately strict. The low word must be exactly the shortcut type and
+    the high word must carry the flag, which is every value
+    ``shortcutAppIdToGameId64`` can produce and nothing else.
+    """
+    if not value.isdigit():
+        return False
+    n = int(value)
+    if n <= U32_MASK or n > 0xFFFFFFFFFFFFFFFF:
+        return False
+    return (n & U32_MASK) == SHORTCUT_TYPE and bool((n >> 32) & SHORTCUT_FLAG)
+
+
+def _valid_launch_id(prefix: str, value: str) -> bool:
+    """Whether ``value`` is a launchable id for this endpoint.
+
+    ``steam://run/`` really does take an app id and keeps the tighter bound.
+    ``steam://rungameid/`` additionally accepts a shortcut gameID64, because
+    that is the only way a non-Steam game can be launched.
+    """
+    if STEAM_APPID_PATTERN.match(value) and 0 < int(value) <= MAX_APPID:
+        return True
+    if prefix == "steam://rungameid/":
+        return is_shortcut_gameid64(value)
+    return False
 
 
 def is_valid_appid(appid) -> bool:
@@ -109,7 +144,7 @@ def validate(uri) -> Tuple[bool, Optional[str]]:
         if uri.startswith(prefix):
             remainder = uri[len(prefix):]
             game_id = remainder.split("/")[0]
-            if not game_id or not _ID_PATTERNS[prefix].match(game_id):
+            if not game_id or not _valid_launch_id(prefix, game_id):
                 return False, f"invalid Steam app id {game_id!r}"
             # Nothing may sit between the prefix and the id.
             if "/" in remainder and not remainder.startswith(game_id + "/"):
