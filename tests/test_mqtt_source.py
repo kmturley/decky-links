@@ -311,3 +311,43 @@ class TestIntegration:
 
         # No more pending
         assert await src.poll() is None
+
+
+# ── Buffer bounds ─────────────────────────────────────────────────────────────
+
+class TestPendingBufferIsBounded:
+    """poll() drains one message per 0.1s cycle — a hard 10/s ceiling — while
+    paho appends from its own thread as fast as the broker sends. Unbounded,
+    that is a publisher-controlled memory leak on a device with no headroom."""
+
+    def test_buffer_does_not_grow_without_limit(self):
+        src = _make_source()
+        for i in range(src.MAX_PENDING * 3):
+            src._on_message(None, None, _make_mqtt_msg(
+                json.dumps({"uri": f"https://example.com/{i}"}).encode()
+            ))
+        assert len(src._pending) == src.MAX_PENDING
+
+    def test_oldest_are_dropped_so_the_newest_intent_survives(self):
+        """This is a trigger: the most recent message is the one worth acting
+        on, and a backlog of stale ones is what should be shed."""
+        src = _make_source()
+        for i in range(src.MAX_PENDING + 10):
+            src._on_message(None, None, _make_mqtt_msg(
+                json.dumps({"uri": f"https://example.com/{i}"}).encode()
+            ))
+        assert src._pending[-1] == f"https://example.com/{src.MAX_PENDING + 9}"
+        assert "https://example.com/0" not in src._pending
+
+    def test_drops_are_counted_and_reported(self):
+        """deque(maxlen) discards silently, and a trigger that vanishes with no
+        trace is indistinguishable from a broken broker."""
+        logger = MagicMock()
+        src = _make_source()
+        src._logger = logger
+        for i in range(src.MAX_PENDING + 5):
+            src._on_message(None, None, _make_mqtt_msg(
+                json.dumps({"uri": f"https://example.com/{i}"}).encode()
+            ))
+        assert src._dropped == 5
+        assert any("buffer full" in str(c) for c in logger.warning.call_args_list)

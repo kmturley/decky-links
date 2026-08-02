@@ -466,8 +466,9 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  // polling loop omitted for brevity
-
+  // Backstop for the event stream above: game state has no backend event to
+  // push (only the frontend can see Router.MainRunningApp), and the rest
+  // re-syncs anything a missed event would have left stale.
   const pollLoop = async () => {
     let sourcePollTick = 0;
     while (active) {

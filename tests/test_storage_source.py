@@ -1508,3 +1508,39 @@ class TestRescan:
         with patch.object(src, "_has_media", return_value=False):
             await src.rescan()
         assert len(src._pending) == 0
+
+
+# ── write_uri and mount ownership ─────────────────────────────────────────────
+
+class TestWriteUriRemountOwnership:
+    """Pairing may target a mount the system created rather than one of ours.
+    Flipping that to rw and then forcing it back to ro would leave the user's
+    own mount read-only with no indication why."""
+
+    @pytest.mark.asyncio
+    async def test_our_own_mount_is_remounted_around_the_write(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", new_callable=AsyncMock) as remount:
+            remount.return_value = True
+            ok, err = await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        assert ok is True, err
+        assert [c[0][1] for c in remount.call_args_list] == ["rw", "ro"]
+
+    @pytest.mark.asyncio
+    async def test_system_mount_is_left_alone(self, tmp_path):
+        src = _make_source()  # not in _our_mounts
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            with patch.object(src, "_remount", new_callable=AsyncMock) as remount:
+                ok, err = await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        assert ok is True, err
+        remount.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_payload_is_written_either_way(self, tmp_path):
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        written = json.loads((tmp_path / "decky-links.json").read_text())
+        assert written["uri"] == "steam://rungameid/220"
+        assert written["version"] == 1

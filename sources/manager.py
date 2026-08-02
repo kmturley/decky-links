@@ -206,6 +206,15 @@ class SourceManager:
                 # Mark source as needing reconnect on next iteration
                 was_connected = False
 
+                # Back off here too, not just on a failed start(). A source
+                # raising on every poll used to fall straight through to the
+                # poll_interval sleep below — 0.1s for MQTT and serial — and
+                # hot-loop at 10Hz writing a full traceback each time, which
+                # buries every other log line and burns battery doing it.
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(RECONNECT_MAX, reconnect_delay * 2)
+                continue
+
             await asyncio.sleep(source.poll_interval)
 
     # ── Introspection ──────────────────────────────────────────────────

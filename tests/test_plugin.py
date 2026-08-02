@@ -2081,6 +2081,32 @@ class TestCardRpcs:
         assert result["data_uri"].startswith("data:image/png;base64,")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_appid", [
+        "../../../etc/passwd",
+        "220/../../../../root/.ssh/id_rsa",
+        "..",
+        "220; rm -rf /",
+        "not-a-number",
+    ])
+    async def test_save_card_refuses_an_app_id_that_is_not_an_app_id(self, plugin, bad_appid):
+        """appid is interpolated into a filesystem path by cards.find_art and
+        this process runs as root, so a traversal value would have read an
+        arbitrary file and rendered it into a PNG the caller gets back."""
+        result = await plugin.save_game_card(
+            "steam://rungameid/220", "Half-Life 2", bad_appid
+        )
+        assert result["ok"] is False
+        assert result["error"] == "Invalid app id"
+
+    @pytest.mark.asyncio
+    async def test_find_art_refuses_traversal_independently(self):
+        """Checked at the helper too — it is module-level and reachable by any
+        future caller."""
+        from cards.qr import find_art
+        assert find_art("../../../etc") is None
+        assert find_art("") is None
+
+    @pytest.mark.asyncio
     async def test_preview_refuses_a_uri_outside_the_allowlist(self, plugin):
         """The same validation as launching: a QR is a launch instruction, and
         generating one for javascript: would be handing out a loaded gun."""

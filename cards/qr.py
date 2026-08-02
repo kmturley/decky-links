@@ -134,7 +134,14 @@ def qr_image(uri: str, module_px: int = QR_MODULE_PX, quiet_modules: int = QR_QU
 
 
 def find_art(appid: str, home: Optional[str] = None) -> Optional[str]:
-    """Path to Steam's cached vertical capsule for ``appid``, if it has one."""
+    """Path to Steam's cached vertical capsule for ``appid``, if it has one.
+
+    ``appid`` goes straight into a path template, so it is checked here as
+    well as at the RPC boundary. Defence in depth: this is a module-level
+    helper that any future caller can reach, and the process is root.
+    """
+    if not appid or not str(appid).isdigit():
+        return None
     home = home or os.path.expanduser("~")
     for template in _ART_CANDIDATES:
         path = template.format(home=home, appid=appid)

@@ -628,12 +628,20 @@ class StorageSource(MediaSource):
         read-write and puts it back afterwards regardless of outcome.
         """
         devnode = media_id
-        mountpoint = self._our_mounts.get(devnode) or self._find_mount_point(devnode)
+        ours = self._our_mounts.get(devnode)
+        mountpoint = ours or self._find_mount_point(devnode)
         if not mountpoint:
             return False, f"{devnode} is not mounted"
 
-        if not await self._remount(mountpoint, "rw"):
-            return False, f"could not remount {mountpoint} read-write"
+        # Only remount a mount we made. A system mount (udisks in desktop mode,
+        # say) is already writable and belongs to whoever created it — flipping
+        # it to rw and then forcing it back to ro afterwards would leave the
+        # user's own mount read-only with no indication why.
+        remounted = False
+        if ours:
+            if not await self._remount(mountpoint, "rw"):
+                return False, f"could not remount {mountpoint} read-write"
+            remounted = True
 
         try:
             path = os.path.join(mountpoint, PAYLOAD_FILENAME)
@@ -651,7 +659,8 @@ class StorageSource(MediaSource):
                 self._logger.error(f"StorageSource: failed writing {devnode}: {e}")
             return False, str(e)
         finally:
-            await self._remount(mountpoint, "ro")
+            if remounted:
+                await self._remount(mountpoint, "ro")
 
         self._active_media[devnode] = uri
         if self._logger:

@@ -36,11 +36,22 @@ class MqttSource(MediaSource):
 
     source_type = SourceType.MQTT
 
+    # Messages waiting to be drained. Bounded because poll() takes exactly one
+    # per cycle at a 0.1s interval — a hard ceiling of 10/s — while paho's I/O
+    # thread appends as fast as the broker sends. An unbounded deque there is a
+    # publisher-controlled memory leak on a device with no headroom to spare.
+    #
+    # Oldest are dropped rather than newest: this is a trigger, so the most
+    # recent intent is the one worth acting on, and a backlog of stale ones is
+    # exactly what should be shed.
+    MAX_PENDING = 100
+
     def __init__(self, settings: dict, logger=None):
         self._settings = settings
         self._logger = logger
         self._client = None
-        self._pending: deque = deque()
+        self._pending: deque = deque(maxlen=self.MAX_PENDING)
+        self._dropped = 0
         self._active = False
 
     @property
@@ -148,6 +159,18 @@ class MqttSource(MediaSource):
             if self._logger:
                 self._logger.warning("MqttSource: message rejected (wrong secret)")
             return
+
+        # deque(maxlen=...) discards silently, and a trigger that vanishes with
+        # no trace is indistinguishable from a broken broker. Count and report.
+        if len(self._pending) == self._pending.maxlen:
+            self._dropped += 1
+            if self._logger and self._dropped % 100 == 1:
+                self._logger.warning(
+                    f"MqttSource: buffer full ({self._pending.maxlen}); dropping "
+                    f"the oldest trigger. {self._dropped} dropped so far — the "
+                    f"topic is publishing faster than 10/s, which is the rate "
+                    f"this source can act on."
+                )
 
         self._pending.append(uri)
 

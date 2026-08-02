@@ -8,7 +8,9 @@ hardware nobody had asked it to use.
 """
 import asyncio
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from sources.base import SourceType
 
 from sources.base import MediaSource, SourceEventKind, SourceType
 
@@ -143,3 +145,71 @@ class TestDisabledSources:
             kinds.append(manager._queue.get_nowait().kind)
         assert SourceEventKind.CONNECTED in kinds
         assert SourceEventKind.DISCONNECTED in kinds
+
+
+# ── Backoff on the poll-exception path ────────────────────────────────────────
+
+class TestPollExceptionBacksOff:
+    """A source raising on every poll used to fall through to the poll_interval
+    sleep — 0.1s for MQTT and serial — and hot-loop at 10Hz writing a full
+    traceback each time."""
+
+    @pytest.mark.asyncio
+    async def test_repeated_poll_errors_back_off_exponentially(self):
+        import sources.manager as mgr
+
+        source = MagicMock()
+        source.source_id = "flaky:0"
+        source.source_type = SourceType.NFC
+        source.poll_interval = 0.1
+        source.is_enabled.return_value = True
+        source.is_active.return_value = True
+        source.poll = AsyncMock(side_effect=RuntimeError("hardware fell over"))
+
+        sleeps = []
+
+        async def _record_sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) >= 4:
+                raise asyncio.CancelledError
+
+        queue = asyncio.Queue()
+        manager = mgr.SourceManager(queue, logger=MagicMock())
+
+        with patch.object(mgr.asyncio, "sleep", _record_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await manager._run_source(source)
+
+        # Doubling from RECONNECT_MIN, not a flat poll_interval.
+        assert sleeps[:3] == [
+            mgr.RECONNECT_MIN,
+            mgr.RECONNECT_MIN * 2,
+            mgr.RECONNECT_MIN * 4,
+        ], f"expected exponential backoff, got {sleeps}"
+        assert source.poll_interval not in sleeps[:3]
+
+    @pytest.mark.asyncio
+    async def test_backoff_is_capped(self):
+        import sources.manager as mgr
+
+        source = MagicMock()
+        source.source_id = "flaky:0"
+        source.source_type = SourceType.NFC
+        source.poll_interval = 0.1
+        source.is_enabled.return_value = True
+        source.is_active.return_value = True
+        source.poll = AsyncMock(side_effect=RuntimeError("still broken"))
+
+        sleeps = []
+
+        async def _record_sleep(delay):
+            sleeps.append(delay)
+            if len(sleeps) >= 30:
+                raise asyncio.CancelledError
+
+        manager = mgr.SourceManager(asyncio.Queue(), logger=MagicMock())
+        with patch.object(mgr.asyncio, "sleep", _record_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await manager._run_source(source)
+
+        assert max(sleeps) == mgr.RECONNECT_MAX

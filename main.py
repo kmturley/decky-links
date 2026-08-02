@@ -1045,9 +1045,31 @@ class Plugin:
         
         decky.logger.info(f"Launching URI via xdg-open: {uri}")
         try:
-            subprocess.Popen(["xdg-open", uri], shell=False)
+            self._spawn(["xdg-open", uri])
         except Exception as e:
             decky.logger.error(f"Launch failed: {e}")
+
+    # --- Child processes ---
+
+    def _spawn(self, argv, env=None):
+        """Start a fire-and-forget child, reaping any that have finished.
+
+        Nothing ever waited on these, so each one stayed a zombie in the
+        process table for the life of the plugin — and _play_sound runs on
+        every single scan, so it accumulated one per tap indefinitely.
+
+        We do not want to block on them either: the point is that a sound or a
+        launch happens alongside the plugin, not in front of it. So sweep the
+        previous ones on the way past, which is enough because spawning is the
+        only thing that creates the debt.
+        """
+        self._children = [p for p in getattr(self, "_children", []) if p.poll() is None]
+        # start_new_session detaches the child from our process group, so a
+        # signal sent to the plugin does not also kill the game the user just
+        # launched.
+        proc = subprocess.Popen(argv, shell=False, env=env, start_new_session=True)
+        self._children.append(proc)
+        return proc
 
     # --- Audio ---
 
@@ -1086,7 +1108,7 @@ class Plugin:
                 decky.logger.error(f"Sound path is not a regular file: {sound_path}")
                 return
             
-            subprocess.Popen(["paplay", sound_path], env=self._audio_env())
+            self._spawn(["paplay", sound_path], env=self._audio_env())
         except Exception as e:
             decky.logger.error(f"Failed to play sound {filename}: {e}")
 
@@ -1541,6 +1563,17 @@ class Plugin:
         """
         if not self._validate_uri(uri):
             return {"ok": False, "error": "Invalid URI"}
+
+        # appid is interpolated into a filesystem path by cards.find_art, and
+        # this process is root. `uri` was validated and `title` is sanitised
+        # for the filename, but appid reached the path builder untouched, so
+        # a traversal value would have read an arbitrary file and rendered it
+        # into a PNG the caller gets back. Same shape as a Steam app id
+        # elsewhere in this file, and empty stays allowed — it means "no art".
+        appid = str(appid or "")
+        if appid and not STEAM_APPID_PATTERN.match(appid):
+            decky.logger.warning(f"save_game_card: rejected app id {appid!r}")
+            return {"ok": False, "error": "Invalid app id"}
 
         try:
             from cards import save_card
