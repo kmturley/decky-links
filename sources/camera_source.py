@@ -12,6 +12,7 @@ QR removal is debounced over :attr:`DEBOUNCE_THRESHOLD` consecutive empty
 frames to avoid flicker when the code briefly leaves the sensor.
 """
 
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -97,26 +98,28 @@ class CameraSource(MediaSource):
     # ── Poll ───────────────────────────────────────────────────────────
 
     async def poll(self) -> Optional[PluginEvent]:
-        """Capture one frame and emit an event if QR state changed."""
+        """Capture one frame and emit an event if QR state changed.
+
+        Capture and decode run on a worker thread. This was the single worst
+        stall in the plugin: ``ffmpeg`` is a subprocess with a 5s timeout and
+        the decode is CPU-bound, and both ran on the event loop that every
+        other source and every frontend RPC shares — so switching the camera
+        trigger on made the whole plugin unresponsive for seconds at a time.
+
+        Both halves go in one hop so the PIL image never crosses back to the
+        loop; only the decoded string does.
+        """
         if not self._active:
             return None
 
-        frame = self._capture_frame()
-        if frame is None:
+        captured, uri = await asyncio.to_thread(self._capture_and_decode)
+        if not captured:
             if self._logger:
                 self._logger.warning(
                     f"CameraSource: frame capture failed on {self._device}"
                 )
             self._active = False
             return None
-
-        try:
-            uri = self._decode_qr(frame)
-        finally:
-            try:
-                frame.close()
-            except Exception:
-                pass
 
         if uri:
             self._missing_count = 0
@@ -153,6 +156,24 @@ class CameraSource(MediaSource):
         return None
 
     # ── Frame capture ──────────────────────────────────────────────────
+
+    def _capture_and_decode(self) -> "tuple[bool, Optional[str]]":
+        """Capture a frame and decode it. Blocking; runs on a worker thread.
+
+        Returns ``(captured, uri)``. The flag keeps a camera that has gone
+        away — which must deactivate the source — distinguishable from a
+        frame that simply held no QR code, which is the normal idle case.
+        """
+        frame = self._capture_frame()
+        if frame is None:
+            return False, None
+        try:
+            return True, self._decode_qr(frame)
+        finally:
+            try:
+                frame.close()
+            except Exception:
+                pass
 
     def _capture_frame(self):
         """Capture one JPEG frame from the webcam using ffmpeg.

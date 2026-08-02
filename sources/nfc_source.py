@@ -14,6 +14,7 @@ It does NOT own:
 - Audio playback (plugin's job)
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -286,7 +287,24 @@ class NfcSource(MediaSource):
     # ── Poll ───────────────────────────────────────────────────────────
 
     async def poll(self) -> Optional[PluginEvent]:
-        """One poll cycle: read UID, detect arrival/removal, return event."""
+        """One poll cycle: read UID, detect arrival/removal, return event.
+
+        The work happens on a worker thread because all of it blocks: the UID
+        read waits on the serial line, classification sleeps between key
+        attempts, and an NDEF read is dozens of round trips to the tag. On the
+        event loop that is a ~200ms stall on a bare poll and far worse with a
+        tag present — and it is shared with every other source and every
+        frontend RPC. The proxmark backend shells out to its client binary
+        with a 5s timeout, so this is the difference between a responsive
+        plugin and a frozen one.
+        """
+        if not self._reader:
+            return None
+
+        return await asyncio.to_thread(self._poll_blocking)
+
+    def _poll_blocking(self) -> Optional[PluginEvent]:
+        """The synchronous body of :meth:`poll`. Never call from the loop."""
         if not self._reader:
             return None
 
@@ -687,12 +705,17 @@ class NfcSource(MediaSource):
         """Source-generic pairing entry point.
 
         ``media_id`` is the tag UID as hex, the form carried by MediaEvents.
+
+        Offloaded for the same reason as :meth:`poll`: writing a tag is a
+        page-at-a-time conversation with sleeps between key attempts, and it
+        is awaited from the event loop during pairing. Blocking there froze
+        the panel at exactly the moment it is showing the user a spinner.
         """
         try:
             uid = bytes.fromhex(media_id)
         except (ValueError, TypeError):
             return False, f"invalid tag UID {media_id!r}"
-        return self.write_ndef_uri(uid, uri)
+        return await asyncio.to_thread(self.write_ndef_uri, uid, uri)
 
     def write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         """Write a URI as an NDEF URI record to the tag.

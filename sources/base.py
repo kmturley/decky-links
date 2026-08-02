@@ -198,4 +198,21 @@ class MediaSource(ABC):
         or ``None`` if there is nothing to report.  The caller
         (:class:`SourceManager`) sleeps for :attr:`poll_interval` seconds
         between calls.
+
+        **This runs on the plugin's only event loop.** Every source task, the
+        event loop that drains the queue, and every RPC from the frontend
+        share it, so a blocking call here does not stall one source — it
+        stalls the whole plugin, including the panel's twice-a-second status
+        poll. Being declared ``async`` does not make a serial read, a
+        ``subprocess.run`` or a ``time.sleep`` cooperative; it only hides
+        them.
+
+        So anything that blocks — serial, subprocess, filesystem, or a
+        CPU-bound decode — must be pushed to a worker thread::
+
+            async def poll(self):
+                return await asyncio.to_thread(self._poll_blocking)
+
+        The same applies to :meth:`write_uri` and :meth:`start`, which are
+        awaited from the same loop.
         """
