@@ -44,9 +44,38 @@ now one `settings_schema` table, save failures propagate, MQTT requires a
 shared secret, and the HTTPS loopback check covers more than three literal
 strings. Suite is **742 passed, 0 failed**.
 
-Next by leverage: **Phase D** (break up `main.py`, still ~1,600 lines) and
-**Phase E** (the NFC abstraction leak). Neither is a correctness problem —
-they are evolution cost.
+**Phase D is substantially complete.** `main.py` is **1,834 → 1,258 lines
+(-31%)**, with five modules extracted into a `decky_links/` package:
+`uri.py`, `settings.py`, `settings_schema.py`, `card_rpcs.py`, `nfc_rpcs.py`
+and `media_registry.py`. Suite is **872 passed, 0 failed**.
+
+Extraction found three real bugs that the old shape hid — see "What
+extraction found" below.
+
+Remaining: the event loop and media handlers (~350 lines) still sit on
+`Plugin`, because they are genuinely coupled to `self.state` and `decky.emit`
+rather than incidentally so. Splitting them needs a decision about who owns
+state transitions, not a file move. **Phase E** (the NFC abstraction leak) is
+untouched.
+
+### What extraction found
+
+Each of these was invisible while the code was a method on a 1,800-line class,
+and obvious within minutes of the extracted module having its own tests:
+
+1. **`settings_schema.py` was never packaged.** The decky CLI zips a fixed
+   allowlist; a top-level module next to `main.py` is not copied. The plugin
+   would have failed to start on a Deck with `ImportError`. `tests/test_packaging.py`
+   now parses `main.py`'s imports and fails if any local one is missing from
+   `build.sh` — the one failure mode the suite structurally could not see,
+   because pytest runs from the repo root.
+2. **Non-Steam shortcuts could never be paired.** `steam://rungameid/` carries
+   a gameID64 for shortcuts, not an app id, and both endpoints were checked
+   against `^[0-9]{1,10}$` — a uint32. Every shortcut was rejected inside
+   `start_pairing` with only a log line.
+3. **`get_sector_info`/`lock_sector` raised with no reader attached**, calling
+   `nfc_source._classify_tag` unguarded — an RPC error in the panel instead of
+   the empty result the rest of the function expects.
 
 ---
 
