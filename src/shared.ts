@@ -32,7 +32,10 @@ export interface ActiveMedium {
     media_id: string;
     uri: string | null;
     drive_kind?: string | null;
-    problem?: "blank" | "unreadable" | "blocked" | null;
+    /** "loading" is a medium we know is there but cannot read yet — a floppy
+     *  takes up to a minute to mount, and the row must not read "No disk"
+     *  for that whole time. Always replaced by a real state. */
+    problem?: "blank" | "unreadable" | "blocked" | "loading" | null;
     error?: string;
 }
 
@@ -125,7 +128,7 @@ export interface SharedState {
   tagSourceType: SourceType | null;
   /** Why the current medium carries no URI. "blank" is ready to pair;
    *  "unreadable" is the user's problem to fix and must say so. */
-  mediaProblem: { kind: "blank" | "unreadable" | "blocked"; error?: string } | null;
+  mediaProblem: { kind: "blank" | "unreadable" | "blocked" | "loading"; error?: string } | null;
   /** Every medium presented anywhere, keyed by source_id. The single tagUid
    *  slot above cannot express "a tag AND a disk are both here", which is
    *  exactly what the Triggers list has to show. */

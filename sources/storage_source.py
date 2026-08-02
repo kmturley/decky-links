@@ -90,6 +90,8 @@ class StorageSource(MediaSource):
         self._active_media: Dict[str, str] = {}  # devnode → URI (needed for UNLOAD)
         self._drives: Dict[str, str] = {}  # devnode → DriveKind, disk or no disk
         self._unmountable: set = set()   # media that already failed to mount
+        self._deferred_mounts: deque = deque()  # announced loading, not yet mounted
+        self._loading: set = set()       # devnodes currently being mounted
 
     @property
     def source_id(self) -> str:
@@ -142,6 +144,8 @@ class StorageSource(MediaSource):
         self._drives.clear()
         self._unmountable.clear()
         self._pending.clear()
+        self._deferred_mounts.clear()
+        self._loading.clear()
 
     def is_active(self) -> bool:
         return self._monitor is not None
@@ -176,6 +180,16 @@ class StorageSource(MediaSource):
         """Drain one pending event, then check for new udev events."""
         if self._pending:
             return self._pending.popleft()
+
+        # A disk announced as loading on the previous poll. Mounting it here
+        # rather than in the poll that noticed it is what lets the panel show a
+        # loading state instead of "No disk" for the length of the mount.
+        if self._deferred_mounts:
+            devnode = self._deferred_mounts.popleft()
+            try:
+                return await self._handle_device_added(devnode)
+            finally:
+                self._loading.discard(devnode)
 
         if not self._monitor:
             return None
@@ -223,11 +237,12 @@ class StorageSource(MediaSource):
                         f"waiting for a disk"
                     )
                 return None
-            return await self._handle_device_added(devnode)
+            return await self._begin_load(devnode)
 
         if action == "remove":
             self._drives.pop(devnode, None)
             self._unmountable.discard(devnode)
+            self._loading.discard(devnode)
             return await self._handle_device_removed(devnode)
 
         if action == "change":
@@ -236,12 +251,54 @@ class StorageSource(MediaSource):
             # left plugged in never reports anything at all.
             self._note_drive(devnode)
             if has_media and devnode not in self._active_media:
-                return await self._handle_device_added(devnode)
+                return await self._begin_load(devnode)
             if not has_media and devnode in self._active_media:
+                self._loading.discard(devnode)
                 return await self._handle_device_removed(devnode)
             return None
 
         return None
+
+    async def _begin_load(self, devnode: str) -> Optional[PluginEvent]:
+        """Report a disk as loading, then mount it on the following poll.
+
+        Mounting a floppy takes anywhere up to the timeout — a minute is normal
+        for a tired drive and a dusty disk. Doing it inside the same poll that
+        noticed the disk means nothing reaches the panel until it finishes, so
+        the row reads "No disk" for the whole wait and looks broken.
+
+        Splitting it costs one poll interval before the mount starts, which is
+        nothing against the mount itself, and needs no background task: the
+        deferred devnode is picked up at the top of the next poll.
+        """
+        if devnode in self._loading:
+            return None
+        if self._find_mount_point(devnode):
+            # Already mounted by the system — reading the payload is a file
+            # read, far too quick to be worth announcing.
+            return await self._handle_device_added(devnode)
+
+        # Only announce work we are actually going to do. A drive we would
+        # refuse to mount must not be left saying "Loading" forever.
+        if not self._is_removable(devnode):
+            return None
+        if not self._drive_kind_enabled(self.classify_drive(devnode)):
+            return None
+
+        self._loading.add(devnode)
+        self._deferred_mounts.append(devnode)
+        if self._logger:
+            self._logger.info(f"StorageSource: {devnode} has media — mounting")
+        return MediaEvent(
+            kind=MediaEventKind.LOADING,
+            source_type=SourceType.STORAGE,
+            source_id=self.source_id,
+            media_id=devnode,
+            uri="",
+            payload={
+                "drive_kind": self._drives.get(devnode) or self.classify_drive(devnode),
+            },
+        )
 
     def _note_drive(self, devnode: str) -> None:
         """Record a connected drive and its category.

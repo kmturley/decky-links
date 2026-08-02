@@ -5,6 +5,7 @@ import {
   Field,
   PanelSection,
   PanelSectionRow,
+  Spinner,
   ToggleField,
 } from "@decky/ui";
 import { FaGamepad, FaLink } from "react-icons/fa";
@@ -140,6 +141,8 @@ interface MediaState {
   action: string | null;
   /** Dim the row — no hardware, so nothing here is actionable. */
   dim: boolean;
+  /** Work is in progress; show a spinner in place of the medium icon. */
+  busy?: boolean;
 }
 
 /** Reduce a trigger's hardware + medium into the one line the panel shows. */
@@ -152,6 +155,9 @@ export function mediaStateFor(
   if (!connected) return { text: "Not connected", action: null, dim: true };
   if (!medium) return { text: `No ${row.noun}`, action: null, dim: true };
 
+  if (medium.problem === "loading") {
+    return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
+  }
   if (medium.problem === "unreadable") {
     return { text: medium.error || `Unreadable ${row.noun}`, action: null, dim: false };
   }
@@ -181,9 +187,12 @@ const MediaRow: FC<{
   const state = mediaStateFor(row, connected, medium, target);
 
   // The medium's own icon, so a glance says "there is a disk in there".
-  const icon: ReactNode = (
-    <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{row.icon}</span>
-  );
+  // While reading, a spinner takes its place: the disk is in the drive but
+  // there is nothing to say about it yet, and a static icon next to
+  // "Reading disk…" reads as stalled.
+  const icon: ReactNode = state.busy
+    ? <Spinner style={{ width: "1.1em", height: "1.1em" }} />
+    : <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{row.icon}</span>;
 
   if (!state.action) {
     return (

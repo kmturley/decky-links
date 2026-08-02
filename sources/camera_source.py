@@ -1,10 +1,10 @@
 """Camera media source — USB webcam QR code scanning.
 
 Captures frames from a USB webcam (``/dev/video*``) using ffmpeg,
-decodes QR codes via ``pyzbar`` and ``Pillow``, and emits MediaEvents
+decodes QR codes via ``zxing-cpp`` and ``Pillow``, and emits MediaEvents
 for QR code arrival and departure.
 
-Gracefully degrades when pyzbar/Pillow are not installed or no camera
+Gracefully degrades when zxing-cpp/Pillow are not installed or no camera
 device is present — ``start()`` returns False and the source stays inactive.
 
 Capture strategy: one JPEG frame per :attr:`poll_interval` (default 1 s).
@@ -31,7 +31,7 @@ class CameraSource(MediaSource):
     """USB webcam QR-code scanning source.
 
     Captures frames at :attr:`poll_interval` using ffmpeg, decodes QR codes
-    via pyzbar, and emits LOAD/UNLOAD events for QR code arrival/departure.
+    via zxing-cpp, and emits LOAD/UNLOAD events for QR code arrival/departure.
     """
 
     source_type = SourceType.CAMERA
@@ -61,16 +61,17 @@ class CameraSource(MediaSource):
     # ── Lifecycle ──────────────────────────────────────────────────────
 
     async def start(self) -> bool:
-        """Verify device presence and that pyzbar/Pillow are importable."""
+        """Verify device presence and that zxing-cpp/Pillow are importable."""
         if not os.path.exists(self._device):
             return False
         try:
-            from pyzbar import pyzbar  # noqa: F401
+            import zxingcpp            # noqa: F401
             from PIL import Image      # noqa: F401
         except ImportError:
             if self._logger:
                 self._logger.warning(
-                    "CameraSource: pyzbar/Pillow not available — camera source disabled"
+                    "CameraSource: zxing-cpp/Pillow not available — camera "
+                    "source disabled"
                 )
             return False
 
@@ -193,14 +194,26 @@ class CameraSource(MediaSource):
     # ── QR decode ──────────────────────────────────────────────────────
 
     def _decode_qr(self, image) -> Optional[str]:
-        """Return the data string of the first QR code found, or None."""
+        """Return the data string of the first QR code found, or None.
+
+        zxing-cpp rather than pyzbar: pyzbar is a thin wrapper over the *system*
+        libzbar0, which a stock SteamOS does not have and no Python wheel can
+        supply, so this source could never work on an unmodified Deck. zxing-cpp
+        ships the decoder inside its own manylinux wheel.
+        """
         try:
-            from pyzbar import pyzbar
-            for symbol in pyzbar.decode(image):
-                if symbol.type == "QRCODE":
-                    data = symbol.data.decode("utf-8", errors="ignore").strip()
-                    if data:
-                        return data
+            import zxingcpp
+            # Greyscale first: the decoder wants a single channel anyway, and
+            # this makes the call independent of whatever mode the capture path
+            # produced (JPEG frames arrive as RGB, but a palette or 1-bit image
+            # would otherwise be a decode failure with no explanation).
+            results = zxingcpp.read_barcodes(
+                image.convert("L"), formats=zxingcpp.BarcodeFormat.QRCode
+            )
+            for result in results:
+                data = (result.text or "").strip()
+                if data:
+                    return data
         except Exception as e:
             if self._logger:
                 self._logger.error(f"CameraSource: QR decode error: {e}")

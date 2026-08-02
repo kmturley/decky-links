@@ -1,8 +1,8 @@
 """
 test_camera_source.py — unit tests for CameraSource.
 
-All hardware-level dependencies (ffmpeg subprocess, pyzbar, Pillow, /dev/video*)
-are mocked so the suite runs on any platform.
+All hardware-level dependencies (ffmpeg subprocess, zxing-cpp, Pillow,
+/dev/video*) are mocked so the suite runs on any platform.
 """
 import asyncio
 import os
@@ -18,31 +18,28 @@ def _make_source(settings=None):
     return CameraSource(settings or {}, logger=MagicMock())
 
 
-def _make_pyzbar_symbol(data: bytes, sym_type: str = "QRCODE"):
-    sym = MagicMock()
-    sym.type = sym_type
-    sym.data = data
-    return sym
+def _make_zxing_result(text: str):
+    """A zxing-cpp Result. Unlike pyzbar symbols it carries decoded text, not
+    raw bytes, and the format filter is applied by the library rather than by
+    us inspecting each symbol."""
+    result = MagicMock()
+    result.text = text
+    return result
 
 
-def _stub_pyzbar_and_pil(monkeypatch, decoded_symbols=None):
-    """Install minimal pyzbar and PIL stubs into sys.modules."""
-    mock_pyzbar_mod = MagicMock()
-    mock_pyzbar_mod.decode.return_value = decoded_symbols or []
+def _stub_zxing_and_pil(monkeypatch, results=None):
+    """Install minimal zxingcpp and PIL stubs into sys.modules."""
+    mock_zxing = MagicMock()
+    mock_zxing.read_barcodes.return_value = results or []
 
-    mock_pyzbar_pkg = MagicMock()
-    mock_pyzbar_pkg.pyzbar = mock_pyzbar_mod
-
-    mock_image_cls = MagicMock()
     mock_pil_pkg = MagicMock()
     mock_pil_pkg.Image = MagicMock()
 
-    monkeypatch.setitem(sys.modules, "pyzbar", mock_pyzbar_pkg)
-    monkeypatch.setitem(sys.modules, "pyzbar.pyzbar", mock_pyzbar_mod)
+    monkeypatch.setitem(sys.modules, "zxingcpp", mock_zxing)
     monkeypatch.setitem(sys.modules, "PIL", mock_pil_pkg)
     monkeypatch.setitem(sys.modules, "PIL.Image", mock_pil_pkg.Image)
 
-    return mock_pyzbar_mod, mock_pil_pkg
+    return mock_zxing, mock_pil_pkg
 
 
 # ── source_id / poll_interval ─────────────────────────────────────────────────
@@ -91,10 +88,10 @@ class TestStart:
         assert not src.is_active()
 
     @pytest.mark.asyncio
-    async def test_start_returns_false_when_pyzbar_missing(self):
+    async def test_start_returns_false_when_the_decoder_is_missing(self):
         src = _make_source()
         with patch("os.path.exists", return_value=True):
-            with patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None}):
+            with patch.dict(sys.modules, {"zxingcpp": None}):
                 ok = await src.start()
         assert ok is False
         assert not src.is_active()
@@ -102,10 +99,9 @@ class TestStart:
     @pytest.mark.asyncio
     async def test_start_returns_false_when_pillow_missing(self):
         src = _make_source()
-        mock_pyzbar = MagicMock()
+        mock_zxing = MagicMock()
         with patch("os.path.exists", return_value=True):
-            with patch.dict(sys.modules, {"pyzbar": mock_pyzbar,
-                                          "pyzbar.pyzbar": mock_pyzbar.pyzbar,
+            with patch.dict(sys.modules, {"zxingcpp": mock_zxing,
                                           "PIL": None, "PIL.Image": None}):
                 ok = await src.start()
         assert ok is False
@@ -113,7 +109,7 @@ class TestStart:
     @pytest.mark.asyncio
     async def test_start_returns_true_when_ready(self, monkeypatch):
         src = _make_source()
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
         with patch("os.path.exists", return_value=True):
             ok = await src.start()
         assert ok is True
@@ -122,7 +118,7 @@ class TestStart:
     @pytest.mark.asyncio
     async def test_start_logs_ready(self, monkeypatch):
         src = _make_source({"device": "/dev/video0"})
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
         with patch("os.path.exists", return_value=True):
             await src.start()
         src._logger.info.assert_called()
@@ -291,7 +287,7 @@ class TestCaptureFrame:
 
     def test_successful_capture_returns_image(self, monkeypatch, tmp_path):
         src = _make_source({"device": "/dev/video0"})
-        mock_pyzbar, mock_pil = _stub_pyzbar_and_pil(monkeypatch)
+        mock_zxing, mock_pil = _stub_zxing_and_pil(monkeypatch)
 
         mock_img = MagicMock()
         mock_pil.Image.open.return_value = mock_img
@@ -308,7 +304,7 @@ class TestCaptureFrame:
 
     def test_ffmpeg_failure_returns_none(self, monkeypatch, tmp_path):
         src = _make_source({"device": "/dev/video0"})
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -323,7 +319,7 @@ class TestCaptureFrame:
 
     def test_subprocess_exception_returns_none(self, monkeypatch, tmp_path):
         src = _make_source({"device": "/dev/video0"})
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
 
         with patch("subprocess.run", side_effect=Exception("timeout")):
             with patch("tempfile.NamedTemporaryFile") as mock_tmp:
@@ -335,7 +331,7 @@ class TestCaptureFrame:
 
     def test_ffmpeg_called_with_v4l2_and_device(self, monkeypatch, tmp_path):
         src = _make_source({"device": "/dev/video2"})
-        mock_pyzbar, mock_pil = _stub_pyzbar_and_pil(monkeypatch)
+        mock_zxing, mock_pil = _stub_zxing_and_pil(monkeypatch)
         mock_img = MagicMock()
         mock_pil.Image.open.return_value = mock_img
         mock_img.copy.return_value = mock_img
@@ -354,7 +350,7 @@ class TestCaptureFrame:
 
     def test_tempfile_is_deleted_on_success(self, monkeypatch, tmp_path):
         src = _make_source()
-        mock_pyzbar, mock_pil = _stub_pyzbar_and_pil(monkeypatch)
+        mock_zxing, mock_pil = _stub_zxing_and_pil(monkeypatch)
         mock_img = MagicMock()
         mock_pil.Image.open.return_value = mock_img
         mock_img.copy.return_value = mock_img
@@ -371,7 +367,7 @@ class TestCaptureFrame:
 
     def test_tempfile_is_deleted_on_failure(self, monkeypatch, tmp_path):
         src = _make_source()
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
         tmppath = str(tmp_path / "frame.jpg")
 
         with patch("subprocess.run") as mock_run:
@@ -390,63 +386,63 @@ class TestDecodeQr:
 
     def test_qr_symbol_returns_uri(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        symbol = _make_pyzbar_symbol(b"steam://run/12345", "QRCODE")
-        mock_pyzbar.decode.return_value = [symbol]
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.return_value = [_make_zxing_result("steam://run/12345")]
 
         result = src._decode_qr(MagicMock())
         assert result == "steam://run/12345"
 
-    def test_non_qr_symbol_returns_none(self, monkeypatch):
+    def test_only_qr_codes_are_requested(self, monkeypatch):
+        """Format filtering moved into the library: asking zxing-cpp for QR
+        only is both the filter and a speed-up, since it stops trying every
+        other symbology on every frame."""
+        import sources.camera_source  # noqa: F401
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        symbol = _make_pyzbar_symbol(b"1234567890", "EAN13")
-        mock_pyzbar.decode.return_value = [symbol]
-
-        result = src._decode_qr(MagicMock())
-        assert result is None
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        src._decode_qr(MagicMock())
+        _, kwargs = mock_zxing.read_barcodes.call_args
+        assert kwargs["formats"] is mock_zxing.BarcodeFormat.QRCode
 
     def test_no_symbols_returns_none(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        mock_pyzbar.decode.return_value = []
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.return_value = []
 
         result = src._decode_qr(MagicMock())
         assert result is None
 
     def test_returns_first_qr_symbol(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        s1 = _make_pyzbar_symbol(b"steam://run/1", "QRCODE")
-        s2 = _make_pyzbar_symbol(b"steam://run/2", "QRCODE")
-        mock_pyzbar.decode.return_value = [s1, s2]
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.return_value = [
+            _make_zxing_result("steam://run/1"), _make_zxing_result("steam://run/2"),
+        ]
 
         result = src._decode_qr(MagicMock())
         assert result == "steam://run/1"
 
-    def test_skips_barcode_before_qr(self, monkeypatch):
+    def test_skips_a_result_with_no_text(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        barcode = _make_pyzbar_symbol(b"0123456789", "EAN13")
-        qr = _make_pyzbar_symbol(b"steam://run/42", "QRCODE")
-        mock_pyzbar.decode.return_value = [barcode, qr]
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.return_value = [
+            _make_zxing_result(""), _make_zxing_result("steam://run/42"),
+        ]
 
         result = src._decode_qr(MagicMock())
         assert result == "steam://run/42"
 
     def test_empty_data_skipped(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        empty = _make_pyzbar_symbol(b"   ", "QRCODE")
-        mock_pyzbar.decode.return_value = [empty]
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.return_value = [_make_zxing_result("   ")]
 
         result = src._decode_qr(MagicMock())
         assert result is None
 
     def test_decode_exception_returns_none(self, monkeypatch):
         src = _make_source()
-        mock_pyzbar, _ = _stub_pyzbar_and_pil(monkeypatch)
-        mock_pyzbar.decode.side_effect = RuntimeError("pyzbar exploded")
+        mock_zxing, _ = _stub_zxing_and_pil(monkeypatch)
+        mock_zxing.read_barcodes.side_effect = RuntimeError("zxing exploded")
 
         result = src._decode_qr(MagicMock())
         assert result is None
@@ -526,7 +522,7 @@ class TestIntegration:
     async def test_start_to_qr_detect_to_remove(self, monkeypatch):
         from sources.base import MediaEventKind
         src = _make_source({"device": "/dev/video0"})
-        _stub_pyzbar_and_pil(monkeypatch)
+        _stub_zxing_and_pil(monkeypatch)
 
         with patch("os.path.exists", return_value=True):
             ok = await src.start()

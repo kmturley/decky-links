@@ -535,6 +535,25 @@ class Plugin:
             await self._handle_media_load(event)
         elif event.kind == MediaEventKind.UNLOAD:
             await self._handle_media_unload(event)
+        elif event.kind == MediaEventKind.LOADING:
+            await self._handle_media_loading(event)
+
+    async def _handle_media_loading(self, event: MediaEvent):
+        """Announce a medium that is present but not yet readable.
+
+        Deliberately does not touch the media registry or the plugin state: the
+        medium may still turn out to be unreadable, and a half-entry would let
+        the rest of the plugin treat it as pairable. It is purely something for
+        the panel to show while a slow read is in progress, and is always
+        superseded by a LOAD.
+        """
+        decky.logger.info(f"Media loading on {event.source_id}: {event.media_id}")
+        await decky.emit("media_loading", {
+            "source_id":   event.source_id,
+            "source_type": event.source_type.value,
+            "media_id":    event.media_id,
+            "drive_kind":  event.payload.get("drive_kind"),
+        })
 
     async def _handle_media_load(self, event: MediaEvent):
         """Handle a new media presentation (tag detected, disk inserted, etc.).

@@ -36,6 +36,11 @@ class MediaEventKind(Enum):
 
     LOAD = "load"      # media inserted / tag tapped / QR scanned
     UNLOAD = "unload"  # media ejected / tag removed / QR left frame
+    # Media is present but not yet readable. Emitted by sources whose read is
+    # slow enough to look like a hang: a floppy can take a minute to mount, and
+    # until this existed the panel said "No disk" for that whole minute. Always
+    # followed by a LOAD (readable, blank or unreadable) for the same medium.
+    LOADING = "loading"
 
 
 # ── Events ─────────────────────────────────────────────────────────────────

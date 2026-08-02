@@ -232,6 +232,29 @@ export function startBackgroundManager(): () => void {
   };
   init();
 
+  // A medium is present but not yet readable. Recorded as a normal entry with
+  // problem: "loading" so it occupies its row the same way a real medium does
+  // — the row is what the user is watching, and it has to stop saying "No
+  // disk" the moment the disk goes in, not a minute later when it mounts.
+  // Always superseded by tag_detected/uri_detected for the same source.
+  const loadingListener = addEventListener<[data: {
+    source_id?: string, source_type?: string, media_id?: string, drive_kind?: string,
+  }]>("media_loading", (data) => {
+    if (!data?.source_id) return;
+    sharedState.activeMedia = {
+      ...sharedState.activeMedia,
+      [data.source_id]: {
+        source_id: data.source_id,
+        source_type: (data.source_type as SourceType) ?? SourceType.STORAGE,
+        media_id: data.media_id ?? "",
+        uri: null,
+        drive_kind: data.drive_kind ?? null,
+        problem: "loading",
+      },
+    };
+    notifySubscribers();
+  });
+
   // event listeners
   const tagListener = addEventListener<[data: {
     uid: string, source_type?: string, source_id?: string, drive_kind?: string,
@@ -511,6 +534,7 @@ export function startBackgroundManager(): () => void {
 
   stopBackgroundManagerFn = () => {
     active = false;
+    removeEventListener("media_loading", loadingListener);
     removeEventListener("tag_detected", tagListener);
     removeEventListener("tag_removed", removeListener);
     removeEventListener("reader_status", statusListener);

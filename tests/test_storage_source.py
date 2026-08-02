@@ -160,10 +160,18 @@ class TestPoll:
 
     @pytest.mark.asyncio
     async def test_poll_dispatches_add_event(self):
+        """An `add` carrying media is announced as loading and mounted on the
+        following poll, so it takes two polls to reach _handle_device_added."""
         src = _make_source()
         src._monitor = MagicMock()
         src._monitor.poll.return_value = _make_udev_device("add", "/dev/sdb1")
-        with patch.object(src, "_handle_device_added", AsyncMock(return_value=None)) as mock_add:
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "_handle_device_added", AsyncMock(return_value=None)) as mock_add:
+            await src.poll()
+            mock_add.assert_not_called()
+            src._monitor.poll.return_value = None
             await src.poll()
         mock_add.assert_called_once_with("/dev/sdb1")
 
@@ -587,8 +595,17 @@ class TestUnmountableMedia:
     event turns the drive into a permanent stall."""
 
     async def _insert(self, src, action="change"):
+        """One udev event, driven to completion.
+
+        A disk is announced as loading on the poll that notices it and mounted
+        on the next, so exercising a mount takes two polls — the second with no
+        udev event, which is what drains the deferred queue.
+        """
         src._monitor.poll.return_value = _make_udev_device(action, "/dev/sda")
-        return await src.poll()
+        first = await src.poll()
+        src._monitor.poll.return_value = None
+        second = await src.poll()
+        return second if second is not None else first
 
     def _source_with_unmountable_disk(self):
         src = _make_source()
@@ -1212,3 +1229,121 @@ class TestMediaChangeEvents:
 
         (sysfs / "size").write_text("0\n")      # drive present, no disk
         assert src._has_media("/dev/sdb") is False
+
+
+# ── Loading state ─────────────────────────────────────────────────────────────
+
+class TestLoadingState:
+    """Mounting a floppy takes anywhere up to the timeout — a minute is normal
+    for a tired drive and a dusty disk. Done inside the poll that noticed the
+    disk, nothing reaches the panel until it finishes, so the row reads "No
+    disk" for the whole wait and looks broken."""
+
+    def _udev(self, action, devnode="/dev/sda"):
+        return _make_udev_device(action, devnode)
+
+    async def _poll_with(self, src, device):
+        src._monitor = MagicMock()
+        src._monitor.poll.return_value = device
+        return await src.poll()
+
+    @pytest.mark.asyncio
+    async def test_insert_announces_loading_before_mounting(self):
+        from sources.base import MediaEventKind
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
+             patch.object(src, "_mount_device", new_callable=AsyncMock) as mount:
+            event = await self._poll_with(src, self._udev("change"))
+            mount.assert_not_called()
+
+        assert event.kind == MediaEventKind.LOADING
+        assert event.media_id == "/dev/sda"
+        assert event.payload["drive_kind"] == DriveKind.FLOPPY
+
+    @pytest.mark.asyncio
+    async def test_the_mount_happens_on_the_next_poll(self):
+        from sources.base import MediaEventKind
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
+             patch.object(src, "_mount_device", AsyncMock(return_value="/tmp/m")), \
+             patch.object(src, "_read_payload", return_value={"uri": "steam://run/7"}):
+            await self._poll_with(src, self._udev("change"))
+            event = await self._poll_with(src, None)
+
+        assert event.kind == MediaEventKind.LOAD
+        assert event.uri == "steam://run/7"
+
+    @pytest.mark.asyncio
+    async def test_an_already_mounted_disk_skips_the_loading_state(self):
+        """Reading the payload off a mounted filesystem is a file read, far too
+        quick to be worth announcing."""
+        from sources.base import MediaEventKind
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value="/mnt/floppy"), \
+             patch.object(src, "_read_payload", return_value={"uri": "steam://run/7"}):
+            event = await self._poll_with(src, self._udev("change"))
+        assert event.kind == MediaEventKind.LOAD
+
+    @pytest.mark.asyncio
+    async def test_a_drive_we_will_not_mount_never_says_loading(self):
+        """A row left saying "Reading disk…" forever is worse than one that
+        says nothing, so only work we are actually going to do is announced."""
+        from sources.storage_source import DriveKind
+        src = _make_source({"drive_kinds": {DriveKind.FLOPPY: False}})
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY):
+            event = await self._poll_with(src, self._udev("change"))
+        assert event is None
+        assert len(src._deferred_mounts) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_fixed_disk_never_says_loading(self):
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=False):
+            event = await self._poll_with(src, self._udev("change"))
+        assert event is None
+
+    @pytest.mark.asyncio
+    async def test_ejecting_while_loading_clears_the_pending_mount(self):
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY):
+            await self._poll_with(src, self._udev("change"))
+        assert "/dev/sda" in src._loading
+
+        with patch.object(src, "_has_media", return_value=False):
+            await self._poll_with(src, self._udev("remove"))
+        assert "/dev/sda" not in src._loading
+
+    @pytest.mark.asyncio
+    async def test_repeated_events_do_not_queue_two_mounts(self):
+        """udev is chatty — a single insertion can produce several `change`
+        events before the mount runs, and each one must not add another
+        20-second attempt to the queue."""
+        from sources.storage_source import DriveKind
+        src = _make_source()
+        with patch.object(src, "_has_media", return_value=True), \
+             patch.object(src, "_find_mount_point", return_value=None), \
+             patch.object(src, "_is_removable", return_value=True), \
+             patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY):
+            first = await src._begin_load("/dev/sda")
+            second = await src._begin_load("/dev/sda")
+        assert first is not None
+        assert second is None, "the second event must not announce loading again"
+        assert len(src._deferred_mounts) == 1

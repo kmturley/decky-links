@@ -62,3 +62,6 @@ cli/decky
 .venv/
 wiki/
 py_modules/
+
+# Hardware test captures (docs/hardware-test.md)
+test-run/

@@ -85,10 +85,11 @@ def test_paho_mqtt_importable():
     )
 
 
-def test_pyzbar_importable():
-    """pyzbar — QR code decoding for CameraSource."""
-    assert _can_import("pyzbar"), (
-        "pyzbar not installed. Run: pip install pyzbar"
+def test_zxingcpp_importable():
+    """zxing-cpp — QR decoding for CameraSource. Replaced pyzbar, which needed
+    the system libzbar0 that a stock SteamOS does not ship."""
+    assert _can_import("zxingcpp"), (
+        "zxing-cpp not installed. Run: pip install zxing-cpp"
     )
 
 
