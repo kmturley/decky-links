@@ -1,28 +1,20 @@
 import React, { FC, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FaLink, FaTimes } from "react-icons/fa";
+import { FaLink } from "react-icons/fa";
 import {
-  getSourceStatuses,
-  startPairing,
   cancelPairing,
   addEventListener,
   removeEventListener,
   setPairingToastSuppressed,
-  type SourceStatus,
+  sharedState,
+  notifySubscribers,
 } from "./shared";
-import useAppId from "./hooks/useAppId";
-import {
-  sourceIcon,
-  sourceLabel,
-  presentMediaVerb,
-  mediumNoun,
-  joinWithOr,
-} from "./lib/sourceIcons";
+import { useViewedApp } from "./hooks/useAppId";
+import { mediumNoun } from "./lib/sourceIcons";
+import PairModal, { type PairTarget } from "./PairModal";
 
 const RETRY_DELAY_MS = 500;
-const MODAL_CLOSE_DELAY_MS = 1500;
-const MODAL_ERROR_CLOSE_DELAY_MS = 4000;
-const MODAL_WAITING_TEXT = "Waiting for media…";
+const MODAL_WAITING_TEXT = "Pair this game to a trigger, or print a code.";
 
 // Helper lifted from protondb plugin; used to watch for fullscreen mode so we
 // can hide our button when the header disappears.
@@ -84,15 +76,18 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   const [show, setShow] = useState<boolean>(true);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>(MODAL_WAITING_TEXT);
-  // Which pairable devices are connected, so the modal can show what the user
-  // may present rather than naming one hard-coded device.
-  const [readySources, setReadySources] = useState<SourceStatus[]>([]);
   const ref = useRef<HTMLDivElement | null>(null);
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   const topCapsuleRetryRef = useRef<number | null>(null);
   const anchorRetryRef = useRef<number | null>(null);
-  const modalCloseTimerRef = useRef<number | null>(null);
-  const launchTarget = useAppId();
+  const viewedApp = useViewedApp();
+  const target: PairTarget | null = viewedApp?.launchTarget
+    ? {
+        uri: viewedApp.launchTarget,
+        label: viewedApp.name || `App ${viewedApp.appId}`,
+        appid: viewedApp.appId,
+      }
+    : null;
 
   // Watch for the page header being hidden in fullscreen.
   useEffect(() => {
@@ -138,6 +133,8 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     try {
       await cancelPairing();
     } finally {
+      sharedState.pairing = false;
+      notifySubscribers();
       setPairingToastSuppressed(false);
       setModalVisible(false);
     }
@@ -145,7 +142,6 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
 
   useEffect(() => {
     return () => {
-      clearTimer(modalCloseTimerRef);
       clearTimer(anchorRetryRef);
       clearTimer(topCapsuleRetryRef);
       void cancelPairing();
@@ -183,45 +179,16 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     };
   }, [embedded]);
 
-  // start pairing when the dialog opens
+  // Nothing is armed when the modal opens. Every trigger gets its own Pair
+  // button, so arming all of them up front would write to whichever medium the
+  // backend happened to see first — the exact ambiguity per-trigger pairing
+  // exists to remove. Suppress the global toast while the modal is showing the
+  // result itself.
   useEffect(() => {
     if (!modalVisible) return;
-
-    (async () => {
-      // Any source that can be written to will do. start_pairing arms all of
-      // them at once, so whichever medium the user presents first wins — there
-      // is nothing to choose between here, only something to report.
-      const statuses = await getSourceStatuses();
-      const pairable = statuses.filter((s) => s.can_pair && s.active);
-      setReadySources(pairable);
-
-      if (pairable.length === 0) {
-        const known = statuses.filter((s) => s.can_pair).map((s) => sourceLabel(s.source_type));
-        setStatusMessage(
-          known.length > 0
-            ? `No pairable device connected. Connect ${joinWithOr(known.map((k) => k.toLowerCase()))} and try again.`
-            : "No pairable device connected."
-        );
-        return;
-      }
-
-      if (!launchTarget) {
-        setStatusMessage("Unable to determine launch target. Open a game's page or start a game first.");
-        return;
-      }
-
-      setPairingToastSuppressed(true);
-      const ok = await startPairing(launchTarget);
-      if (!ok) {
-        setPairingToastSuppressed(false);
-        setStatusMessage("Failed to initiate pairing. Check device status in Decky Links settings.");
-      } else {
-        setStatusMessage(
-          `Pairing mode active – ${joinWithOr(pairable.map((s) => presentMediaVerb(s.source_type)))}`
-        );
-      }
-    })();
-  }, [modalVisible, launchTarget]);
+    setPairingToastSuppressed(true);
+    return () => setPairingToastSuppressed(false);
+  }, [modalVisible]);
 
   // A medium was presented — say so immediately. Mounting a floppy takes
   // several seconds, during which an unchanged "insert a disk" prompt looks
@@ -240,7 +207,13 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     return () => removeEventListener("tag_detected", listener);
   }, [modalVisible]);
 
-  // listen for pairing results so we can show status and close the modal
+  // Report the result, but leave the modal open.
+  //
+  // It used to close itself after a successful pair, which made sense when it
+  // did one thing. Now it is a hub — pair a tag, then a disk, then save a
+  // printable card — and closing after the first of those throws away the rest.
+  // sharedState.pairing is cleared by the background manager, which is what
+  // releases the armed row in the list.
   useEffect(() => {
     const listener = addEventListener<[data: { success: boolean; uid: string; error?: string; source_type?: string }]>(
       "pairing_result",
@@ -254,48 +227,14 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
             ? `Paired to ${noun} ${label}`
             : `Pairing failed: ${data.error || "unknown"}`
         );
-        clearTimer(modalCloseTimerRef);
-        modalCloseTimerRef.current = window.setTimeout(
-          () => { void closeModal(); },
-          // A failure needs long enough to actually read.
-          data.success ? MODAL_CLOSE_DELAY_MS : MODAL_ERROR_CLOSE_DELAY_MS,
-        );
       }
     );
-    return () => {
-      removeEventListener("pairing_result", listener);
-      clearTimer(modalCloseTimerRef);
-    };
-  }, [modalVisible, closeModal]);
+    return () => removeEventListener("pairing_result", listener);
+  }, [modalVisible]);
 
   const onClickButton = () => {
     setStatusMessage(MODAL_WAITING_TEXT);
-    setReadySources([]);
     setModalVisible(true);
-  };
-
-  // modal styling
-  const modalStyle: React.CSSProperties = {
-    position: "fixed",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,0,0,0.7)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 10000,
-  };
-
-  const boxStyle: React.CSSProperties = {
-    backgroundColor: "#222",
-    padding: 20,
-    borderRadius: 8,
-    width: "80%",
-    maxWidth: 400,
-    textAlign: "center",
-    position: "relative",
   };
 
   const icon = (
@@ -327,34 +266,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   );
 
   const modal = modalVisible ? (
-    <div style={modalStyle} onClick={closeModal}>
-      <div style={boxStyle} onClick={(e) => e.stopPropagation()}>
-        <FaTimes
-          style={{ position: "absolute", top: 8, right: 8, cursor: "pointer" }}
-          onClick={closeModal}
-        />
-        {readySources.length > 0 && (
-          <div style={{
-            display: "flex",
-            justifyContent: "center",
-            gap: 16,
-            marginBottom: 12,
-          }}>
-            {readySources.map((s) => (
-              <div
-                key={s.source_id}
-                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}
-                title={s.source_id}
-              >
-                <div style={{ fontSize: 22, color: "#4CAF50" }}>{sourceIcon(s.source_type)}</div>
-                <span style={{ fontSize: "0.7rem", opacity: 0.8 }}>{sourceLabel(s.source_type)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        <p style={{ margin: 0 }}>{statusMessage}</p>
-      </div>
-    </div>
+    <PairModal target={target} statusMessage={statusMessage} onClose={closeModal} />
   ) : null;
 
   let iconNode: React.ReactNode = null;
