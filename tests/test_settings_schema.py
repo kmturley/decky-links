@@ -11,7 +11,7 @@ the refactor: that all three entry points now give the same answer.
 
 import pytest
 
-import settings_schema as schema
+from decky_links import settings_schema as schema
 
 
 class TestTopLevel:

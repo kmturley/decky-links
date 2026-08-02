@@ -45,8 +45,8 @@ from sources.file_watch_source import FileWatchSource
 
 import decky
 
-import settings_schema
 from cards import PRINT_DPI
+from decky_links import settings_schema
 from nfc.key_manager import KeyManager
 
 
