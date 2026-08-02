@@ -48,6 +48,8 @@ import decky
 from cards import PRINT_DPI
 from decky_links import settings_schema
 from decky_links import uri as uri_rules
+from decky_links import card_rpcs
+from decky_links import nfc_rpcs
 from decky_links.settings import SettingsManager
 from nfc.key_manager import KeyManager
 
@@ -1076,172 +1078,31 @@ class Plugin:
         """Return current plugin state string (for frontend debugging / tests)."""
         return self.state.value
 
+    # --- Mifare Classic keys and sectors ---
+    #
+    # Thin delegations: these need a key manager and a reader, not the state
+    # machine or the media registry, so the bodies live in
+    # decky_links.nfc_rpcs. The names here are the RPC surface.
+
     async def set_tag_key(self, uid: str, key_a: str, key_b: str):
-        """Store custom Mifare Classic authentication keys for a tag UID.
-
-        Args:
-            uid: Tag UID as hex string (e.g. "04A1B2C3D4E5F6")
-            key_a: Key A as 12-char hex string (6 bytes)
-            key_b: Key B as 12-char hex string (6 bytes)
-
-        Returns:
-            True if keys were stored successfully, False otherwise.
-        """
-        # Validate UID format
-        if not isinstance(uid, str) or not uid:
-            decky.logger.warning("Invalid UID: must be non-empty string")
-            return False
-        
-        try:
-            bytes.fromhex(uid)  # Validate hex format
-        except ValueError:
-            decky.logger.warning(f"Invalid UID format (not hex): {uid}")
-            return False
-        
-        try:
-            self.key_manager.set_key(uid.upper(), key_a, key_b)
-            decky.logger.info(f"Stored custom keys for tag {uid.upper()}")
-            return True
-        except ValueError as e:
-            decky.logger.warning(f"Invalid key format: {e}")
-            return False
-        except Exception as e:
-            decky.logger.error(f"Failed to store keys: {e}")
-            return False
+        return await nfc_rpcs.set_tag_key(decky, self.key_manager, uid, key_a, key_b)
 
     async def get_tag_key(self, uid: str):
-        """Retrieve stored Mifare Classic authentication keys for a tag UID.
-
-        Args:
-            uid: Tag UID as hex string
-
-        Returns:
-            Dict with 'key_a' and 'key_b' if found, empty dict otherwise.
-        """
-        try:
-            keys = self.key_manager.get_keys(uid)
-            if keys:
-                return {"key_a": keys[0], "key_b": keys[1]}
-            return {}
-        except Exception as e:
-            decky.logger.error(f"Failed to retrieve keys: {e}")
-            return {}
+        return await nfc_rpcs.get_tag_key(decky, self.key_manager, uid)
 
     async def list_tag_keys(self):
-        """List all stored tag UIDs with custom keys.
-
-        Returns:
-            List of tag UIDs that have custom keys stored.
-        """
-        try:
-            return self.key_manager.list_keys()
-        except Exception as e:
-            decky.logger.error(f"Failed to list keys: {e}")
-            return []
+        return await nfc_rpcs.list_tag_keys(decky, self.key_manager)
 
     async def get_sector_info(self, uid: Optional[str] = None):
-        """Get sector lock status for current or specified tag.
-        
-        Args:
-            uid: Optional tag UID hex string. If None, uses current tag.
-            
-        Returns:
-            List of sector info dicts, or empty list on error.
-        """
-        try:
-            # Use current tag if no UID specified
-            if uid:
-                uid_bytes = bytes.fromhex(uid)
-            elif self.current_tag_uid:
-                uid_bytes = bytes.fromhex(self.current_tag_uid)
-            else:
-                decky.logger.warning("No tag present for sector info")
-                return []
-            
-            # Get tag metadata to determine type
-            meta = self.nfc_source._classify_tag(uid_bytes)
-            if meta.get("type") != "mifare-classic":
-                decky.logger.warning(f"Sector info only supported for Mifare Classic, got {meta.get('type')}")
-                return []
-
-            # Create handler and get sector info
-            from nfc.tag_handlers import MifareClassicHandler
-            handler = MifareClassicHandler(uid_bytes, self.key_manager)
-
-            reader = self.nfc_source.reader if self.nfc_source else None
-            if not reader:
-                decky.logger.error("No reader available for sector info")
-                return []
-
-            return handler.get_sector_info(reader)
-        except Exception as e:
-            decky.logger.error(f"Failed to get sector info: {e}")
-            return []
+        return await nfc_rpcs.get_sector_info(
+            decky, self.key_manager, self.nfc_source, uid,
+            current_uid=self.current_tag_uid,
+        )
 
     async def lock_sector(self, uid: str, sector: int, key_a: str, key_b: str):
-        """Lock a sector on a Mifare Classic tag.
-        
-        Args:
-            uid: Tag UID hex string
-            sector: Sector number (0-15 for 1K, 0-39 for 4K)
-            key_a: Key A hex string (12 chars = 6 bytes)
-            key_b: Key B hex string (12 chars = 6 bytes)
-            
-        Returns:
-            True if successful, False otherwise.
-        """
-        try:
-            # Validate inputs
-            if not uid or not isinstance(uid, str):
-                decky.logger.warning("Invalid UID for sector lock")
-                return False
-            
-            if len(key_a) != 12 or len(key_b) != 12:
-                decky.logger.warning("Keys must be 12 hex characters")
-                return False
-            
-            # Convert hex strings to bytes
-            try:
-                uid_bytes = bytes.fromhex(uid)
-                key_a_bytes = bytes.fromhex(key_a)
-                key_b_bytes = bytes.fromhex(key_b)
-            except ValueError as e:
-                decky.logger.warning(f"Invalid hex format: {e}")
-                return False
-            
-            # Verify tag type and get capacity
-            meta = self.nfc_source._classify_tag(uid_bytes)
-            if meta.get("type") != "mifare-classic":
-                decky.logger.warning(f"Sector locking only supported for Mifare Classic")
-                return False
-
-            capacity = meta.get("capacity_bytes", 0)
-            max_sectors = 40 if capacity > 2048 else 16
-
-            if sector < 0 or sector >= max_sectors:
-                decky.logger.warning(f"Invalid sector {sector} for {capacity}-byte tag (max {max_sectors - 1})")
-                return False
-
-            reader = self.nfc_source.reader if self.nfc_source else None
-            if not reader:
-                decky.logger.error("No reader available for sector lock")
-                return False
-
-            # Create handler and lock sector
-            from nfc.tag_handlers import MifareClassicHandler
-            handler = MifareClassicHandler(uid_bytes, self.key_manager)
-
-            success, error = handler.lock_sector(reader, sector, key_a_bytes, key_b_bytes)
-            
-            if not success:
-                decky.logger.error(f"Failed to lock sector {sector}: {error}")
-            else:
-                decky.logger.info(f"Successfully locked sector {sector} on tag {uid}")
-            
-            return success
-        except Exception as e:
-            decky.logger.error(f"Failed to lock sector: {e}")
-            return False
+        return await nfc_rpcs.lock_sector(
+            decky, self.key_manager, self.nfc_source, uid, sector, key_a, key_b
+        )
 
     async def set_running_game(self, appid):
         """
@@ -1291,98 +1152,23 @@ class Plugin:
         return True
 
     # --- Printable cards ---
+    #
+    # Thin delegations: the rendering has nothing to do with the state
+    # machine, the sources or the reader, so it lives in decky_links.card_rpcs
+    # as plain functions. These stay because the names are the RPC surface the
+    # frontend calls.
 
     def _card_output_dir(self) -> str:
-        """Where saved cards go, and who should own them.
-
-        Under the user's home rather than the plugin's settings directory:
-        these exist to be copied off the Deck and printed, so they have to be
-        somewhere a person can find in a file manager.
-        """
-        home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
-        return os.path.join(home, "Documents", "decky-links")
+        return card_rpcs.output_dir(decky)
 
     def _card_owner(self):
-        """(uid, gid) of the user's home, or None.
-
-        The plugin runs as root so it can mount disks, so anything it writes
-        into the user's home is root-owned and cannot be deleted from the
-        desktop. Only relevant when we actually are root.
-        """
-        if os.geteuid() != 0:
-            return None
-        home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
-        try:
-            info = os.stat(home)
-            return (info.st_uid, info.st_gid)
-        except OSError:
-            return None
+        return card_rpcs.owner(decky)
 
     async def get_qr_preview(self, uri: str, module_px: int = 6):
-        """A QR for `uri` as a PNG data URI, for display in the panel.
-
-        Rendered at a small integer module size rather than by scaling a print
-        image down — the same no-resampling rule that applies to print applies
-        on screen, and a soft QR photographs badly.
-
-        Available whether or not the camera trigger is switched on: printing
-        codes before owning a webcam is a reasonable thing to do.
-        """
-        import base64
-        import io
-
-        if not self._validate_uri(uri):
-            return {"ok": False, "error": "Invalid URI"}
-
-        try:
-            from cards import qr_image
-            image = qr_image(uri, module_px=max(1, min(int(module_px), 20)))
-            buffer = io.BytesIO()
-            image.save(buffer, "PNG")
-            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-            return {
-                "ok": True,
-                "data_uri": f"data:image/png;base64,{encoded}",
-                "size": image.size[0],
-            }
-        except Exception as e:
-            decky.logger.error(f"QR preview failed: {e}")
-            return {"ok": False, "error": str(e)}
+        return await card_rpcs.qr_preview(decky, uri, module_px)
 
     async def save_game_card(self, uri: str, title: str = "", appid: str = ""):
-        """Write a two-sided printable card and return where it went.
-
-        Front is Steam's vertical capsule, back carries the QR — a 45mm code
-        block is 44% of a 101.6mm cover, so it cannot share a side with the art.
-        """
-        if not self._validate_uri(uri):
-            return {"ok": False, "error": "Invalid URI"}
-
-        # appid is interpolated into a filesystem path by cards.find_art, and
-        # this process is root. `uri` was validated and `title` is sanitised
-        # for the filename, but appid reached the path builder untouched, so
-        # a traversal value would have read an arbitrary file and rendered it
-        # into a PNG the caller gets back. Same shape as a Steam app id
-        # elsewhere in this file, and empty stays allowed — it means "no art".
-        appid = str(appid or "")
-        if appid and not STEAM_APPID_PATTERN.match(appid):
-            decky.logger.warning(f"save_game_card: rejected app id {appid!r}")
-            return {"ok": False, "error": "Invalid app id"}
-
-        try:
-            from cards import save_card
-            out_dir = self._card_output_dir()
-            home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
-            paths = await asyncio.to_thread(
-                save_card, uri, title, str(appid), out_dir, home, PRINT_DPI,
-                self._card_owner(),
-            )
-            decky.logger.info(f"Saved card for {appid or uri} to {out_dir}")
-            return {"ok": True, "dir": out_dir, "paths": paths}
-        except Exception as e:
-            decky.logger.error(f"Saving card failed: {e}")
-            decky.logger.error(traceback.format_exc())
-            return {"ok": False, "error": str(e)}
+        return await card_rpcs.save_card(decky, PRINT_DPI, uri, title, appid)
 
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
