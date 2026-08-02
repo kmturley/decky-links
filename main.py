@@ -336,7 +336,12 @@ class Plugin:
         )
         # Pure-Python dependencies import under any version and prove nothing;
         # only the compiled ones can be wrong.
-        for module in ("cryptography.hazmat.backends", "PIL.Image", "zxingcpp"):
+        # Each is the module the code actually imports, not a proxy for it:
+        # cryptography.hazmat.backends loaded on 3.11 while cryptography.fernet
+        # — what KeyManager uses — did not, because fernet pulls in _cffi_backend,
+        # a version-tagged extension. Probing the wrong one reported healthy
+        # while keys were silently being stored unencrypted.
+        for module in ("cryptography.fernet", "PIL.Image", "zxingcpp"):
             try:
                 __import__(module)
                 decky.logger.info(f"  compiled dep OK   {module}")

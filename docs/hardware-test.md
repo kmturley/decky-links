@@ -36,6 +36,18 @@ pnpm deck:status > 00-deploy.txt 2>&1
 **Pass:** `STALE` is not reported, `flags` contains `root`, and the plugin
 process user is `root`. If the user is `deck`, the loader did not restart.
 
+Then check the interpreter the plugin actually runs under:
+
+```bash
+pnpm logs | grep -A4 "Python runtime" >> 00-deploy.txt
+```
+
+**Pass:** the version matches `DECK_PYTHON` in `.vscode/build.sh`, and all three
+compiled dependencies report `OK`. They are the only ones that can be built for
+the wrong runtime — everything else we vendor is pure Python. A mismatch here
+disables the camera and silently stores NFC keys unencrypted, so it is worth
+checking on every deploy and after any Decky Loader update.
+
 ---
 
 ## 1. Clean start — no drive, no reader
@@ -239,8 +251,12 @@ ssh deck@steamdeck.local "ls -l /dev/video*" >> 10-camera.txt 2>&1
 ```
 
 **Pass:** `CameraSource: ready on /dev/videoN`, and holding the code up
-launches the game. A `zxing-cpp/Pillow not available` line means the wheel did
-not ship — check `py_modules/zxingcpp` exists inside the zip.
+launches the game.
+
+If it says `cannot import zxingcpp` or `cannot import PIL.Image`, the vendored
+wheels are built for the wrong interpreter. Check step 0's runtime line — the
+plugin runs under Decky Loader's own Python (3.11.7 as of 2026-08-01), *not*
+SteamOS's `python3` (3.13.5) — and rebuild with `DECK_PYTHON=<that version>`.
 
 ---
 

@@ -14,8 +14,11 @@ echo "Building plugin in $(pwd)"
 #
 # Source of truth: the plugin logs it at startup —
 #   pnpm logs | grep "Python runtime"
-# which prints the exact DECK_PYTHON to use.
-DECK_PYTHON="${DECK_PYTHON:-3.13}"
+# which prints the exact DECK_PYTHON to use. Measured 2026-08-01:
+#   Python runtime: 3.11.7  executable=/home/deck/homebrew/services/PluginLoader
+# Re-check after a Decky Loader update; the loader carries its own interpreter,
+# so its version can move without SteamOS changing at all.
+DECK_PYTHON="${DECK_PYTHON:-3.11}"
 
 # ---------------------------------------------------------------------------
 # Python dependencies
