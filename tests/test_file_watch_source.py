@@ -271,15 +271,19 @@ class TestReadPayload:
         assert result["title"] == ""
         assert result["icon"] == ""
 
-    def test_uri_excluded_from_poll_event_payload(self):
+    # Async rather than driving a loop by hand: asyncio.get_event_loop() only
+    # creates one when the main thread has never had it set, so this passed
+    # alone and failed in the full run, once an earlier async test had already
+    # been through. Ordering-dependent either way — let pytest-asyncio own it.
+    @pytest.mark.asyncio
+    async def test_uri_excluded_from_poll_event_payload(self):
         from sources.base import MediaEventKind
         src = _make_source()
         src._active = True
         payload = _valid_payload("steam://run/5", "My Game", "icon.png")
         with patch("os.listdir", return_value=["g.json"]):
             with patch.object(src, "_read_payload", return_value=payload):
-                import asyncio
-                event = asyncio.get_event_loop().run_until_complete(src.poll())
+                event = await src.poll()
         assert "uri" not in event.payload
         assert event.payload["title"] == "My Game"
 

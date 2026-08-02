@@ -1,0 +1,120 @@
+name: tests
+
+# No developer host can validly run this suite: the plugin targets a Steam Deck
+# (linux/amd64, on the interpreter Decky Loader carries), and a macOS or arm64
+# machine fails on the Linux wheels for reasons that have nothing to do with the
+# code. CI is therefore not a convenience here — it is the only place the tests
+# can be trusted at all.
+#
+# ubuntu-latest is already linux/amd64, so this runs natively and skips the
+# emulation .vscode/test.sh needs on a developer machine.
+
+on:
+  push:
+    branches: [main, "feature/**", "fix/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is what Decky Loader currently carries — the one that matters.
+        # See .vscode/build.sh for how that is measured and why it is not the
+        # SteamOS python3. The others are early warning for a loader update.
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            tests/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r tests/requirements.txt
+
+      - name: Run tests
+        env:
+          DECKY_TEST_NATIVE: "1"
+          DECK_PYTHON: ${{ matrix.python }}
+        run: ./.vscode/test.sh -q
+
+  wheels:
+    # The guards in build.sh caught a class of bug that had already cost a
+    # release: a cp312-abi3 wheel installed fine on the build host and then
+    # failed on the Deck with `undefined symbol: PyObject_GetTypeData`. Running
+    # them on every PR moves that discovery off the device.
+    name: vendored wheels match the target interpreter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install requirements for linux/amd64 + DECK_PYTHON
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD":/plugin -w /plugin python:3.11-slim \
+            pip install -r requirements.txt --target=./py_modules --quiet
+
+      - name: No macOS binaries
+        run: |
+          if find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) | grep -q .; then
+            echo "::error::macOS binaries found in py_modules/"
+            find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \)
+            exit 1
+          fi
+
+      - name: Extensions match the target interpreter
+        run: |
+          if mismatched=$(find py_modules -name "*.cpython-*.so" ! -name "*cpython-311*" | grep .); then
+            echo "::error::extensions built for the wrong Python (expected cpython-311)"
+            echo "$mismatched"
+            exit 1
+          fi
+
+      - name: abi3 wheels do not require a newer Python than the Deck has
+        run: |
+          python3 - <<'GUARD'
+          import glob, os, re, sys
+          target = (3, 11)
+          bad = []
+          for wheel_meta in glob.glob("py_modules/*.dist-info/WHEEL"):
+              dist = os.path.basename(os.path.dirname(wheel_meta))
+              for line in open(wheel_meta):
+                  if not line.startswith("Tag:"):
+                      continue
+                  m = re.match(r"cp(\d)(\d+)-abi3-", line.split(":", 1)[1].strip())
+                  if m and (int(m.group(1)), int(m.group(2))) > target:
+                      bad.append(f"  {dist}: needs >= {m.group(1)}.{m.group(2)}")
+          if bad:
+              print("::error::abi3 wheels require a newer Python than DECK_PYTHON=3.11")
+              print("\n".join(sorted(set(bad))))
+              sys.exit(1)
+          GUARD
+
+  frontend:
+    name: frontend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build

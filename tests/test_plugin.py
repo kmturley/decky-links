@@ -623,12 +623,15 @@ class TestReaderInit:
             await plugin._handle_media_load(event)
         mock_decky.emit.assert_any_call("tag_metadata", tag_meta)
 
-    def test_simulate_tag_sets_state_and_emits(self, plugin, mock_decky):
+    # See the note in test_file_watch_source: driving the loop by hand from a
+    # sync test depends on no earlier async test having run, which made this
+    # pass in isolation and fail in the suite.
+    @pytest.mark.asyncio
+    async def test_simulate_tag_sets_state_and_emits(self, plugin, mock_decky):
         uid = b"\xAA\xBB\xCC\xDD"
         uri = "https://foo"
         with patch.object(plugin.nfc_source, "_classify_tag", return_value={"uid": uid.hex().upper()}):
-            coro = plugin.simulate_tag(uid, uri)
-            asyncio.get_event_loop().run_until_complete(coro)
+            await plugin.simulate_tag(uid, uri)
         assert plugin.current_tag_uid == uid.hex().upper()
         assert plugin.current_tag_uri == uri
         mock_decky.emit.assert_has_calls([

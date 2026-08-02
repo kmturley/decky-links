@@ -30,8 +30,17 @@ inline.
 | 2 | Unhardened root mounts of untrusted media | ✅ `ba72cf0` |
 | 3 | Unwired signing subsystem / key material at rest | ✅ `dbb9118` |
 
-Next by leverage: **Phase B** (containerized test target + CI) — the suite has
-grown to 620 tests and still nothing runs them automatically.
+**Phase A is complete** (`022ec03`, `339bf30`) and **Phase B is complete**
+(`.vscode/test.sh` + `.github/workflows/test.yml`).
+
+The suite now runs in the environment it targets and is **656 passed, 0
+failed**. That number was previously unobtainable: the container run
+surfaced two latent order-dependent failures that predated this branch, both
+sync tests driving the loop by hand via `asyncio.get_event_loop()`, which
+passed alone and failed in the suite.
+
+Next by leverage: **Phase C** (unify the two settings-validation paths), then
+**Phase D** (break up the 1,600-line `main.py`).
 
 ---
 
@@ -191,11 +200,13 @@ This is a single-process plugin on one handheld. "Horizontal scale" is not the a
 
 The insight: `build.sh` already solved the hard problem. Reuse it rather than inventing a second answer.
 
-- **B1.** Add `.vscode/test.sh` mirroring `build.sh`'s container invocation — same `--platform linux/amd64`, same `python:${DECK_PYTHON}-slim` image — installing `requirements.txt` + `tests/requirements.txt` and running `pytest`. Repoint `npm test` at it. This makes the suite runnable from an arm64 Mac for the first time.
-- **B2.** Add `.github/workflows/test.yml` on `ubuntu-latest` (native x86_64, so no emulation cost) running the same command. Gate PRs on it. Since no developer host can validly run these tests directly, CI is not a nice-to-have here — it is the only place the suite can ever be trusted.
-- **B3.** Extend the workflow to run `build.sh`'s three wheel guards on every PR, so a wrong-ABI dependency is caught before it reaches a Deck rather than after — the failure mode `build.sh`'s own comments record having cost a release.
-- **B4.** Fix or delete `.venv` and `setup_test_env.sh`; both now describe a host-native workflow that this project cannot actually support.
-- **B5.** Regression tests for every Phase-A fix, especially the mount flags and the settings-validation unification.
+- ~~**B1.**~~ **Done** — `.vscode/test.sh` mirrors `build.sh`'s container invocation (same `--platform linux/amd64`, same `python:${DECK_PYTHON}-slim`). `pnpm test` runs it; `pnpm test:native` skips the container on a Linux x86_64 host. Pytest arguments pass through.
+- ~~**B2.**~~ **Done** — `.github/workflows/test.yml` runs the suite on `ubuntu-latest` (native x86_64, no emulation) across Python 3.11 and 3.12, plus a frontend `pnpm build` job.
+- ~~**B3.**~~ **Done** — the workflow's `wheels` job runs all three of `build.sh`'s guards on every PR: no macOS binaries, extensions match the target interpreter, and abi3 wheels do not require a newer Python than the Deck has.
+- ~~**B4.**~~ **Done** — `setup_test_env.sh` is now a signpost to the container; `npm test` no longer points at the stale `.venv`. (The `.venv` directory itself is gitignored and local — delete it by hand if you want it gone.)
+- ~~**B5.**~~ **Done** — 41 regression tests added across Phases A and B.
+
+Two latent failures surfaced the moment the suite could run in the right place, both predating this branch: `test_file_watch_source.py` and `test_plugin.py` each had a sync test driving the loop via `asyncio.get_event_loop().run_until_complete()`, which only creates a loop when the main thread has never had one set — so they passed in isolation and failed in the full run. Both are now `async` tests.
 
 ### Phase C — Unify the trust boundary (1–2 weeks)
 

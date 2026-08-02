@@ -14,7 +14,8 @@
     "stop": "./scripts/deck.sh stop",
     "start": "./scripts/deck.sh start",
     "watch": "rollup -c -w",
-    "test": ".venv/bin/pytest -q",
+    "test": "./.vscode/test.sh",
+    "test:native": "DECKY_TEST_NATIVE=1 ./.vscode/test.sh",
     "deck:udev": "./scripts/deck.sh udev",
     "deck:mount-test": "./scripts/deck.sh mount-test",
     "deck:format": "./scripts/deck.sh format"
