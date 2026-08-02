@@ -65,3 +65,9 @@ py_modules/
 
 # Hardware test captures (docs/hardware-test.md)
 test-run/
+
+# Stray card renders. The plugin writes cards to the user's Documents on the
+# Deck, never here, so a *.png at the repo root is a scratch artefact — one
+# was committed by accident.
+/front.png
+/back.png
