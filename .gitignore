@@ -45,6 +45,8 @@ yalc.lock
 # Ignore output folder
 
 backend/out
+out
+out/*
 
 # Make sure to ignore any instance of the loader's decky_plugin.py
 decky_plugin.py
@@ -60,3 +62,6 @@ cli/decky
 .venv/
 wiki/
 py_modules/
+
+# Hardware test captures (docs/hardware-test.md)
+test-run/

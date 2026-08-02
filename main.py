@@ -1,5 +1,19 @@
 import os
 import sys
+
+# Bootstrap sys.path before any local package imports.
+#
+# The decky loader appends only <plugin>/py_modules to sys.path, not the plugin
+# directory itself, so local packages (sources/, nfc/) need the plugin dir added
+# explicitly. It goes first so the checked-out tree always wins over anything
+# that may be left in py_modules/ — py_modules is for pip dependencies only.
+_plugin_dir = os.path.dirname(os.path.abspath(__file__))
+_py_modules = os.path.join(_plugin_dir, "py_modules")
+if _plugin_dir not in sys.path:
+    sys.path.insert(0, _plugin_dir)
+if _py_modules not in sys.path:
+    sys.path.append(_py_modules)
+
 import asyncio
 import time
 import json
@@ -9,24 +23,26 @@ import threading
 import re
 from enum import Enum
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any, List, Tuple
-from collections import OrderedDict
+from typing import Optional, Dict, Any, List
 
-# Add vendored modules to path
+from sources import (
+    SourceType,
+    SourceEventKind,
+    MediaEventKind,
+    SourceEvent,
+    MediaEvent,
+    PluginEvent,
+    SourceManager,
+)
+from sources.nfc_source import NfcSource
+from sources.storage_source import StorageSource, DEFAULT_DRIVE_KINDS
+from sources.camera_source import CameraSource
+from sources.mqtt_source import MqttSource
+from sources.serial_source import SerialSource
+from sources.file_watch_source import FileWatchSource
+
 import decky
-py_modules_path = os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules")
-if py_modules_path not in sys.path:
-    sys.path.insert(0, py_modules_path)
 
-# Add plugin directory to path so nfc module can be imported
-plugin_dir = decky.DECKY_PLUGIN_DIR
-if plugin_dir not in sys.path:
-    sys.path.insert(0, plugin_dir)
-
-import ndef
-
-# Reader abstraction hides hardware-specific details
-from nfc.reader import PN532UARTReader
 from nfc.key_manager import KeyManager
 from nfc.signature_manager import SignatureManager
 
@@ -46,26 +62,25 @@ ALLOWED_URI_SCHEMES = ("https://",)
 # Regex for validating Steam app IDs (1-10 digits, max ~4 billion)
 STEAM_APPID_PATTERN = re.compile(r'^[0-9]{1,10}$')
 
-# NTAG213 usable payload limit (Spec §3.3 – "~144 bytes usable").
-# Subtract 4 bytes overhead for the NDEF TLV wrapper and record header.
-NTAG213_MAX_PAYLOAD_BYTES = 140
-# NTAG215 and other NTAG21x tags offer much more user memory (504 bytes for
-# NTAG215).  We don't attempt to autodetect the exact chip, but having a
-# larger ceiling avoids rejecting perfectly good NTAG215 cards.
-NTAG21X_MAX_PAYLOAD_BYTES = 504
+# How often the event loop wakes with no event to re-check source status.
+# Drives appear and disappear without producing a media event, and the storage
+# source never disconnects, so a change would otherwise never reach the panel.
+# Only differences are emitted, so an idle plugin sends nothing.
+STATUS_TICK_SECONDS = 2.0
 
-MIFARE_CLASSIC_FIRST_DATA_BLOCK = 4
-MIFARE_CLASSIC_MAX_BLOCK = 62
-MIFARE_CLASSIC_BLOCK_SIZE = 16
+TOP_LEVEL_SETTING_KEYS = {
+    "auto_launch",
+    "auto_close",
+}
 
-ALLOWED_SETTING_KEYS = {
+NFC_SETTING_KEYS = {
     "device_path",
     "baudrate",
     "polling_interval",
-    "auto_launch",
-    "auto_close",
     "reader_type",
 }
+
+ALLOWED_SETTING_KEYS = TOP_LEVEL_SETTING_KEYS | NFC_SETTING_KEYS
 
 
 # -----------------------------------------------------------------------
@@ -76,23 +91,27 @@ class PluginState(Enum):
     """Plugin state machine (Spec §5).
     
     State transitions:
-    - IDLE → READY: Reader connected and initialized
-    - READY → CARD_PRESENT: New tag detected
-    - CARD_PRESENT → READY: Tag removed (no game running)
+    - IDLE → READY: any source became available
+    - READY → CARD_PRESENT: media presented on any source
+    - CARD_PRESENT → READY: last medium removed (no game running)
     - CARD_PRESENT → GAME_RUNNING: Game launched (auto_launch enabled)
     - GAME_RUNNING → READY: Game exited (via set_running_game)
-    - GAME_RUNNING → READY: Tag removed during game (after card_removed_during_game event)
-    - Any state → IDLE: Reader disconnected or error
-    
+    - GAME_RUNNING → READY: launching medium removed (after card_removed_during_game)
+    - Any state → IDLE: every source became unavailable
+
     Key invariants:
-    - Only one tag is active at a time (single active card model)
-    - No auto-relaunch: requires physical card reinsertion
+    - Media is tracked per source (Plugin._active_media), not in one global slot
+    - Only the medium that launched a game may quit it (Plugin._launch_origin)
+    - No auto-relaunch: requires the medium to be physically re-presented
     - Game state is authoritative from frontend (Router.MainRunningApp)
+
+    The names are NFC-flavoured for historical reasons; CARD_PRESENT means
+    "some medium is loaded on some source", which includes a disk in a drive.
     """
-    IDLE         = "IDLE"          # No NFC reader detected
-    READY        = "READY"         # Reader connected, no card, no game running
-    CARD_PRESENT = "CARD_PRESENT"  # Card detected, URI parsed, awaiting launch decision
-    GAME_RUNNING = "GAME_RUNNING"  # A game is running; active UID is locked
+    IDLE         = "IDLE"          # No source available to trigger anything
+    READY        = "READY"         # At least one source up, no media, no game
+    CARD_PRESENT = "CARD_PRESENT"  # Media loaded, URI parsed, awaiting launch decision
+    GAME_RUNNING = "GAME_RUNNING"  # A game is running; its launching medium is locked
 
 
 # -----------------------------------------------------------------------
@@ -103,18 +122,62 @@ class SettingsManager:
     def __init__(self, path):
         self.path = path
         self.settings = {
-            "device_path":      self._get_default_device_path(),
-            "baudrate":         115200,
-            "polling_interval": 0.5,
-            "auto_launch":      True,
-            "auto_close":       False,
-            "reader_type":      "pn532_uart",      # only supported type for now
+            "auto_launch": True,
+            "auto_close": False,
+            "sources": {
+                "nfc": {
+                    "enabled": True,
+                    "device_path": self._get_default_device_path(),
+                    "baudrate": 115200,
+                    "polling_interval": 0.5,
+                    "reader_type": "pn532_uart",
+                },
+                "storage": {
+                    "enabled": True,
+                    # Per-category switches, off unless the drive exists to be a
+                    # trigger. A floppy drive on a Steam Deck is there on
+                    # purpose; optical, USB and card readers are general storage
+                    # holding the user's own data. Must stay in step with
+                    # DEFAULT_DRIVE_KINDS in storage_source.py.
+                    "drive_kinds": {
+                        "floppy": True,
+                        "optical": False,
+                        "usb": False,
+                        "flash": False,
+                    },
+                },
+                "camera": {
+                    "enabled": False,
+                    "device": "/dev/video0",
+                    "poll_interval": 1.0,
+                },
+                "mqtt": {
+                    "enabled": False,
+                    "broker_host": "localhost",
+                    "broker_port": 1883,
+                    "topic": "decky-links",
+                    "secret": "",
+                },
+                "serial": {
+                    "enabled": False,
+                    "port": "/dev/ttyUSB1",
+                    "baudrate": 9600,
+                },
+                "file_watch": {
+                    "enabled": False,
+                    "watch_dir": "",
+                    "poll_interval": 2.0,
+                },
+            },
         }
         self.load()
 
     def _get_default_device_path(self):
         if sys.platform == "darwin":
             return "/dev/cu.usbserial-1440"
+        # PN532 UART boards attach via CH340/CP2102/FTDI bridges, which enumerate
+        # as ttyUSB*, not ttyACM*. NfcSource._find_serial_port() still globs both
+        # as a fallback.
         return "/dev/ttyUSB0"
 
     def load(self):
@@ -124,13 +187,7 @@ class SettingsManager:
                     loaded = json.load(f)
                     if not isinstance(loaded, dict):
                         raise ValueError("Settings file must contain a JSON object.")
-                    for key, value in loaded.items():
-                        if key in ALLOWED_SETTING_KEYS and self._validate_setting(key, value):
-                            self.settings[key] = value
-                        elif key in ALLOWED_SETTING_KEYS:
-                            decky.logger.warning(
-                                f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
-                            )
+                    self._merge_loaded_settings(loaded)
         except Exception as e:
             decky.logger.error(f"Failed to load settings: {e}")
 
@@ -150,10 +207,21 @@ class SettingsManager:
             decky.logger.error(f"Failed to save settings: {e}")
 
     def get(self, key):
+        if key in TOP_LEVEL_SETTING_KEYS:
+            return self.settings.get(key)
+        if key in NFC_SETTING_KEYS:
+            return self.settings["sources"]["nfc"].get(key)
         return self.settings.get(key)
 
     def set(self, key, value):
-        self.settings[key] = value
+        if key in TOP_LEVEL_SETTING_KEYS:
+            self.settings[key] = value
+        elif key in NFC_SETTING_KEYS:
+            self.settings["sources"]["nfc"][key] = value
+        elif key == "sources.nfc" and isinstance(value, dict):
+            self.settings["sources"]["nfc"].update(value)
+        else:
+            self.settings[key] = value
         self.save()
 
     def _validate_setting(self, key, value) -> bool:
@@ -173,6 +241,44 @@ class SettingsManager:
             return isinstance(value, str) and value in ("pn532_uart", "acr122u", "proxmark", "nfcpy")
         return False
 
+    def get_source_settings(self, source_type: str) -> Dict[str, Any]:
+        sources = self.settings.setdefault("sources", {})
+        source_settings = sources.setdefault(source_type, {})
+        return source_settings
+
+    def _merge_loaded_settings(self, loaded: Dict[str, Any]) -> None:
+        for key in TOP_LEVEL_SETTING_KEYS:
+            if key in loaded:
+                value = loaded[key]
+                if self._validate_setting(key, value):
+                    self.settings[key] = value
+                else:
+                    decky.logger.warning(
+                        f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+                    )
+
+        loaded_sources = loaded.get("sources")
+        if isinstance(loaded_sources, dict):
+            loaded_nfc = loaded_sources.get("nfc", {})
+            if isinstance(loaded_nfc, dict):
+                for key, value in loaded_nfc.items():
+                    if key in NFC_SETTING_KEYS and self._validate_setting(key, value):
+                        self.settings["sources"]["nfc"][key] = value
+                    elif key in NFC_SETTING_KEYS:
+                        decky.logger.warning(
+                            f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+                        )
+
+        for key in NFC_SETTING_KEYS:
+            if key in loaded:
+                value = loaded[key]
+                if self._validate_setting(key, value):
+                    self.settings["sources"]["nfc"][key] = value
+                else:
+                    decky.logger.warning(
+                        f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+                    )
+
 
 # -----------------------------------------------------------------------
 # Plugin
@@ -180,14 +286,79 @@ class SettingsManager:
 
 class Plugin:
 
-    RECONNECT_DELAY_MIN = 1.0
-    RECONNECT_DELAY_MAX = 30.0
-    DEBOUNCE_THRESHOLD = 3  # Consecutive None reads required to confirm tag removal
+    def __init__(self):
+        self.settings = None
+        self.key_manager = None
+        self.signature_manager = None
+        self.nfc_source = None
+        self.storage_source = None
+        self.camera_source = None
+        self.mqtt_source = None
+        self.serial_source = None
+        self.file_watch_source = None
+        self.source_manager = None
+        self.state = "IDLE"
+        self.current_tag_uid = None
+        self.current_tag_uri = None
+        self.running_game_id = None
+        self.is_pairing = False
+        self.pairing_uri = None
+        self.pairing_source_id = None
+        # source_id -> active medium. One entry per source; the authoritative
+        # record of what is currently presented anywhere.
+        self._active_media = {}
+        # Which medium launched the running game, so only that medium can quit it.
+        self._launch_origin = None
+        self._pending_launch_origin = None
+        self._last_statuses = None
 
     # --- Lifecycle ---
 
+    def _log_runtime(self):
+        """Report the interpreter this plugin actually runs under, and whether
+        each compiled dependency loaded.
+
+        Decky Loader is a frozen binary carrying its own Python, which is *not*
+        the SteamOS `python3` that `deck:status` reports. When they differ,
+        every version-tagged extension we vendor is built for the wrong one —
+        and it fails at import with a message that names a missing symbol
+        rather than a version, which is how `undefined symbol:
+        PyObject_GetTypeData` (a Python 3.12 addition) turned out to mean "this
+        interpreter is older than 3.12".
+
+        Cheap, once, at startup, and it turns that class of bug into one line.
+        """
+        v = sys.version_info
+        decky.logger.info(
+            f"Python runtime: {v.major}.{v.minor}.{v.micro} "
+            f"(build this plugin with DECK_PYTHON={v.major}.{v.minor}) "
+            f"executable={sys.executable}"
+        )
+        # Pure-Python dependencies import under any version and prove nothing;
+        # only the compiled ones can be wrong.
+        # Each is the module the code actually imports, not a proxy for it:
+        # cryptography.hazmat.backends loaded on 3.11 while cryptography.fernet
+        # — what KeyManager uses — did not, because fernet pulls in _cffi_backend,
+        # a version-tagged extension. Probing the wrong one reported healthy
+        # while keys were silently being stored unencrypted.
+        for module in ("cryptography.fernet", "PIL.Image", "zxingcpp"):
+            try:
+                __import__(module)
+                decky.logger.info(f"  compiled dep OK   {module}")
+            except Exception as e:
+                decky.logger.warning(
+                    f"  compiled dep FAIL {module}: {type(e).__name__}: {e}"
+                )
+
     async def _main(self):
-        decky.logger.info("Decky Links starting...")
+        # euid is the ground truth for the plugin.json "root" flag: it is fixed
+        # when this process spawns, so a deploy without a loader restart leaves
+        # it stale. Mounting storage media fails outright when this is not 0.
+        decky.logger.info(
+            f"Decky Links starting... (euid={os.geteuid()}, "
+            f"{'root — storage mounts available' if os.geteuid() == 0 else 'unprivileged — storage mounts will fail'})"
+        )
+        self._log_runtime()
         self.settings = SettingsManager(
             os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
         )
@@ -200,30 +371,68 @@ class Plugin:
             logger=decky.logger
         )
         self.state           = PluginState.IDLE
-        self.reader          = None
-        # legacy field, retained for compatibility with old tests
-        self.uart            = None
         self.is_pairing      = False
         self.pairing_uri     = None
+        self.pairing_source_id = None
         self.running_game_id = None
         self.current_tag_uid = None
         self.current_tag_uri = None
-        self._reconnect_delay = self.RECONNECT_DELAY_MIN
+        self._active_media   = {}
+        self._launch_origin  = None
+        self._pending_launch_origin = None
         # RPC call caching to reduce load with thread-safe lock
         self._tag_status_lock = threading.RLock()
         self._last_tag_status_query = 0
         self._tag_status_cache = None
-        # Tag classification cache (UID hex -> metadata dict) with LRU eviction
-        self._tag_classification_cache = OrderedDict()
-        self._tag_cache_max_size = 128
-        self.polling_task    = asyncio.create_task(self._nfc_loop())
+
+        # --- Source-based architecture ---
+        self._event_queue: asyncio.Queue[PluginEvent] = asyncio.Queue()
+        self.nfc_source = NfcSource(
+            settings=self.settings.get_source_settings("nfc"),
+            key_manager=self.key_manager,
+            signature_manager=self.signature_manager,
+            logger=decky.logger,
+        )
+        self.storage_source = StorageSource(
+            settings=self.settings.get_source_settings("storage"),
+            logger=decky.logger,
+        )
+        self.camera_source = CameraSource(
+            settings=self.settings.get_source_settings("camera"),
+            logger=decky.logger,
+        )
+        self.mqtt_source = MqttSource(
+            settings=self.settings.get_source_settings("mqtt"),
+            logger=decky.logger,
+        )
+        self.serial_source = SerialSource(
+            settings=self.settings.get_source_settings("serial"),
+            logger=decky.logger,
+        )
+        self.file_watch_source = FileWatchSource(
+            settings=self.settings.get_source_settings("file_watch"),
+            logger=decky.logger,
+        )
+        self.source_manager = SourceManager(
+            event_queue=self._event_queue,
+            logger=decky.logger,
+        )
+        self.source_manager.register(self.nfc_source)
+        self.source_manager.register(self.storage_source)
+        self.source_manager.register(self.camera_source)
+        self.source_manager.register(self.mqtt_source)
+        self.source_manager.register(self.serial_source)
+        self.source_manager.register(self.file_watch_source)
+
+        await self.source_manager.start_all()
+        self.polling_task = asyncio.create_task(self._event_loop())
 
     async def _unload(self):
         decky.logger.info("Decky Links unloading...")
         if hasattr(self, "polling_task"):
             self.polling_task.cancel()
-        if self.uart:
-            self.uart.close()
+        if hasattr(self, "source_manager"):
+            await self.source_manager.stop_all()
 
     # --- State Machine ---
 
@@ -241,7 +450,418 @@ class Plugin:
                 decky.logger.info(f"State: <unset> → {new_state.value}")
             self.state = new_state
 
-    # --- URI Validation (Spec §4) ---
+    # --- Event Loop (replaces old _nfc_loop) ---
+
+    async def _event_loop(self):
+        """Consume events from the shared queue and dispatch to handlers.
+
+        This is the main loop that replaced the old ``_nfc_loop``.
+        SourceManager feeds events from all registered sources into
+        ``self._event_queue``; this loop processes them sequentially.
+
+        The wait has a timeout so statuses are re-checked even when no event
+        arrives. Plugging in a floppy *drive* produces no media event — there
+        is no disk in it yet — and the storage source never disconnects, so
+        without this the panel's view of which drives are attached was frozen
+        at whatever it was when the source first connected. That is why a
+        connected drive kept reading "Not connected".
+        """
+        while True:
+            try:
+                try:
+                    event = await asyncio.wait_for(
+                        self._event_queue.get(), timeout=STATUS_TICK_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    await self._publish_statuses()
+                    continue
+
+                if isinstance(event, SourceEvent):
+                    await self._handle_source_event(event)
+                elif isinstance(event, MediaEvent):
+                    await self._handle_media_event(event)
+                await self._publish_statuses()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                decky.logger.error(f"Event loop error: {e}")
+                decky.logger.error(traceback.format_exc())
+
+    async def _publish_statuses(self, force: bool = False):
+        """Push source statuses to the panel, but only when they changed.
+
+        Called after every event and on every idle tick, so it has to be
+        silent when nothing moved — an unconditional emit here would be a
+        message per second forever.
+        """
+        statuses = await self.get_source_statuses()
+        if not force and statuses == self._last_statuses:
+            return
+        self._last_statuses = statuses
+        await decky.emit("source_statuses", statuses)
+
+    def _all_sources(self):
+        """Every source this plugin owns.
+
+        Prefers the manager's registry, falling back to the attributes so the
+        helpers below still work before ``_main`` has registered anything.
+        """
+        if self.source_manager and self.source_manager.sources:
+            return list(self.source_manager.sources)
+        return [s for s in (
+            self.nfc_source, self.storage_source, self.camera_source,
+            self.mqtt_source, self.serial_source, self.file_watch_source,
+        ) if s is not None]
+
+    def _any_source_available(self, exclude: Optional[str] = None) -> bool:
+        """True when at least one enabled source is currently usable.
+
+        Drives the IDLE transition. IDLE means "nothing can trigger a launch",
+        which is not the same as "the NFC reader is unplugged".
+
+        ``exclude`` skips a source by id — used when handling that source's own
+        DISCONNECTED event, so the answer never depends on how promptly the
+        source got round to reporting itself inactive.
+        """
+        for source in self._all_sources():
+            try:
+                if source.source_id == exclude:
+                    continue
+                if source.is_enabled() and source.is_active():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _handle_source_event(self, event: SourceEvent):
+        """Handle hardware lifecycle events (connect/disconnect)."""
+        is_nfc = event.source_type == SourceType.NFC
+
+        if event.kind == SourceEventKind.CONNECTED:
+            decky.logger.info(
+                f"Source connected: {event.source_type.value} ({event.source_id})"
+            )
+            # Any working source means the plugin can be triggered — IDLE is
+            # "nothing to trigger with", not "no NFC reader". With only a floppy
+            # drive attached the machine used to sit in IDLE indefinitely.
+            if self.state == PluginState.IDLE:
+                self._set_state(PluginState.READY)
+            if is_nfc:
+                await decky.emit("reader_status", {
+                    "connected": True,
+                    "path": self.settings.get("device_path"),
+                    "source_type": event.source_type.value,
+                })
+
+        elif event.kind == SourceEventKind.DISCONNECTED:
+            decky.logger.info(
+                f"Source disconnected: {event.source_type.value} ({event.source_id})"
+            )
+            # Hardware that has gone away cannot still be holding media. Drop
+            # its registry entry, or the medium lingers as active forever and
+            # keeps a stale claim on the running game.
+            had_media = self._active_media.pop(event.source_id, None) is not None
+            if self._launch_origin and self._launch_origin.get("source_id") == event.source_id:
+                decky.logger.info(
+                    f"Source {event.source_id} launched game {self.running_game_id} "
+                    f"but has disconnected; dropping its claim."
+                )
+                self._launch_origin = None
+
+            if is_nfc:
+                await decky.emit("reader_status", {
+                    "connected": False,
+                    "path": self.settings.get("device_path"),
+                    "source_type": event.source_type.value,
+                })
+                # If a tag was present when the reader disconnected, clear it
+                # so the frontend doesn't keep showing the old tag as active.
+                if self.current_tag_uid:
+                    self.current_tag_uid = None
+                    self.current_tag_uri = None
+                    self.current_tag_meta = None
+                    had_media = True
+
+            # Unplugging a drive with a disk in it must clear the panel the same
+            # way ejecting the disk would; otherwise it keeps showing media that
+            # is no longer attached to anything.
+            if had_media:
+                await decky.emit("tag_removed", {
+                    "source_type": event.source_type.value,
+                    "source_id": event.source_id,
+                })
+
+            # IDLE only when nothing at all is left to trigger with. Losing the
+            # NFC reader while a floppy drive is still connected is not idle.
+            if not self._any_source_available(exclude=event.source_id):
+                self._set_state(PluginState.IDLE)
+            elif self.state == PluginState.CARD_PRESENT and not self._active_media:
+                self._set_state(PluginState.READY)
+
+        await self._publish_statuses()
+
+    async def _handle_media_event(self, event: MediaEvent):
+        """Handle media interaction events (tag tap, floppy insert, etc.)."""
+        if event.kind == MediaEventKind.LOAD:
+            await self._handle_media_load(event)
+        elif event.kind == MediaEventKind.UNLOAD:
+            await self._handle_media_unload(event)
+        elif event.kind == MediaEventKind.LOADING:
+            await self._handle_media_loading(event)
+
+    async def _handle_media_loading(self, event: MediaEvent):
+        """Announce a medium that is present but not yet readable.
+
+        Deliberately does not touch the media registry or the plugin state: the
+        medium may still turn out to be unreadable, and a half-entry would let
+        the rest of the plugin treat it as pairable. It is purely something for
+        the panel to show while a slow read is in progress, and is always
+        superseded by a LOAD.
+        """
+        decky.logger.info(f"Media loading on {event.source_id}: {event.media_id}")
+        await decky.emit("media_loading", {
+            "source_id":   event.source_id,
+            "source_type": event.source_type.value,
+            "media_id":    event.media_id,
+            "drive_kind":  event.payload.get("drive_kind"),
+        })
+
+    async def _handle_media_load(self, event: MediaEvent):
+        """Handle a new media presentation (tag detected, disk inserted, etc.).
+
+        For NFC sources, this replaces the old _handle_scan logic.
+        """
+        uid_hex = event.media_id
+        uri = event.uri
+        is_nfc = event.source_type == SourceType.NFC
+
+        # Collision check (Spec §6.2) — scoped to *this* source. Comparing
+        # against a single global slot meant a floppy insert looked like an NFC
+        # tag collision, and vice versa. Only one medium can occupy one source.
+        previous = self._active_media.get(event.source_id)
+        if previous and previous["media_id"] != uid_hex:
+            decky.logger.info(
+                f"Multiple media on {event.source_id}: "
+                f"{previous['media_id']}, {uid_hex}"
+            )
+            await decky.emit("multiple_tags", {
+                "previous": previous["media_id"],
+                "current":  uid_hex,
+                "source_type": event.source_type.value,
+            })
+
+        # Registry is the source of truth for which media each source holds.
+        # A re-emitted LOAD for the *same* medium keeps the category we already
+        # know: the panel matches a medium to its row by drive_kind, so a
+        # partial payload must never downgrade it to None.
+        prior_kind = (
+            previous.get("drive_kind")
+            if previous and previous["media_id"] == uid_hex
+            else None
+        )
+        self._active_media[event.source_id] = {
+            "source_id":   event.source_id,
+            "source_type": event.source_type.value,
+            "media_id":    uid_hex,
+            "uri":         uri,
+            "drive_kind":  event.payload.get("drive_kind") or prior_kind,
+            "meta":        event.payload.get("tag_meta") if is_nfc else None,
+        }
+
+        # current_tag_* remain the NFC-specific view, kept for the existing RPC
+        # and UI contract. Non-NFC sources must not clobber them — that is what
+        # made a QR code leaving frame clear the tag shown in the panel.
+        if is_nfc:
+            self.current_tag_uid = uid_hex
+            self.current_tag_uri = uri
+            self.current_tag_meta = event.payload.get("tag_meta")
+
+        self._set_state(PluginState.CARD_PRESENT)
+
+        # Audio feedback (Spec §11)
+        self._play_sound("scan.flac")
+
+        # Pairing must be handled BEFORE any URI inspection (Spec §7).
+        # A blank tag — the normal case when pairing a new card — carries no URI,
+        # so deferring this until after the `if not uri: return` guard below made
+        # pairing impossible for exactly the tags users want to pair.
+        armed_for_this_source = (
+            not self.pairing_source_id or self.pairing_source_id == event.source_id
+        )
+        if (
+            self.is_pairing
+            and armed_for_this_source
+            and self._pairable_source(event.source_id) is not None
+        ):
+            await decky.emit("tag_detected", {
+                "uid": uid_hex,
+                "source_type": event.source_type.value,
+                "source_id": event.source_id,
+                "drive_kind": event.payload.get("drive_kind"),
+            })
+            await self._handle_pairing(uid_hex, source_id=event.source_id)
+            return
+
+        # Emit tag_detected immediately — matches old _handle_scan behavior where
+        # the UID appeared in the UI as soon as the card was read.
+        await decky.emit("tag_detected", {
+            "uid": uid_hex,
+            "source_type": event.source_type.value,
+            "source_id": event.source_id,
+            "drive_kind": event.payload.get("drive_kind"),
+        })
+
+        # Emit NDEF records if available (NFC-specific)
+        if "ndef_records" in event.payload:
+            await decky.emit("ndef_detected", {"records": event.payload["ndef_records"]})
+
+        # Emit tag metadata if available
+        if event.source_type == SourceType.NFC and self.current_tag_meta:
+            await decky.emit("tag_metadata", self.current_tag_meta)
+
+        # No URI — play error sound and emit null so frontend clears any stale URI
+        if not uri:
+            # Distinguish "blank, ready to pair" from "we could not read this at
+            # all". Both produce no URI, but only one of them is the user's
+            # problem to fix, and a disk that says nothing is indistinguishable
+            # from a broken plugin.
+            unreadable = bool(event.payload.get("unreadable"))
+            decky.logger.info(
+                f"{'Unreadable media' if unreadable else 'No URI found on media'} {uid_hex}"
+            )
+            self._play_sound("error.flac")
+            if is_nfc:
+                self.current_tag_uri = None
+            await decky.emit("uri_detected", {
+                "uri":   None,
+                "uid":   uid_hex,
+                "blank": not unreadable,
+                "unreadable": unreadable,
+                "error": event.payload.get("error"),
+            })
+            self._set_state(PluginState.READY)
+            return
+
+        # Allowlist check (Spec §4) — emit null URI so frontend knows it's blocked
+        if not self._validate_uri(uri):
+            decky.logger.warning(f"URI blocked by allowlist: {uri}")
+            self._play_sound("error.flac")
+            self.current_tag_uri = None
+            await decky.emit("uri_detected", {"uri": None, "uid": uid_hex, "blocked": True})
+            self._set_state(PluginState.READY)
+            return
+
+        decky.logger.info(f"URI found on media {uid_hex}: {uri}")
+
+        # Decide whether this medium is about to cause a launch, and claim
+        # credit for it, BEFORE emitting uri_detected.
+        #
+        # The frontend launches Steam URIs in response to that event and calls
+        # set_running_game() as soon as RunGame returns. If the origin were
+        # recorded after the emit, that call could arrive first, find no pending
+        # origin, and attribute the game to nothing — after which removing the
+        # tag would silently fail to quit it. Ordering is the whole fix here.
+        will_launch = bool(self.settings.get("auto_launch")) and not self.running_game_id
+        if will_launch:
+            self._pending_launch_origin = {
+                "source_id": event.source_id,
+                "media_id":  uid_hex,
+            }
+
+        # Emit valid URI once — matches old code where uri_detected fired only with final URI
+        await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
+
+        # (Pairing is handled at the top of this method, before URI inspection —
+        # see the comment there for why it cannot live down here.)
+
+        if not self.settings.get("auto_launch"):
+            return
+
+        # Spec §8.1: Do not launch if any game is already running
+        if self.running_game_id:
+            decky.logger.info(f"Launch blocked: game {self.running_game_id} already running.")
+            self._set_state(PluginState.GAME_RUNNING)
+            return
+
+        if uri.startswith("steam://"):
+            decky.logger.info(f"Steam URI: frontend will handle launch for: {uri}")
+        else:
+            decky.logger.info(f"Backend launching URI: {uri}")
+            await self._launch_uri(uri)
+
+    async def _handle_media_unload(self, event: MediaEvent):
+        """Handle media removal (tag removed, disk ejected, etc.).
+
+        Replaces the old _nfc_loop_notify_removal logic.
+        """
+        removed_uid = event.media_id
+        removed_uri = event.uri
+        is_nfc = event.source_type == SourceType.NFC
+
+        self._active_media.pop(event.source_id, None)
+
+        # Only the medium that launched the running game may quit it. Without
+        # this, ejecting a floppy or moving a QR code out of frame would quit a
+        # game that was started by tapping an NFC tag.
+        origin = self._launch_origin
+        launched_this_game = (
+            origin is not None
+            and origin.get("source_id") == event.source_id
+            and origin.get("media_id") == removed_uid
+        )
+
+        # Spec §6.3: removal during active game → notify frontend
+        if (
+            self.state == PluginState.GAME_RUNNING
+            and not self.is_pairing
+            and launched_this_game
+        ):
+            # The decision belongs here, next to the launch decision — the
+            # backend is the only side that knows which medium started this
+            # game. The frontend owns the mechanism (only it has SteamClient),
+            # so it is told what to do rather than asked to work it out.
+            action = "close" if self.settings.get("auto_close") else "pause"
+            decky.logger.info(
+                f"Media removed while game {self.running_game_id} active; "
+                f"action={action}."
+            )
+            await decky.emit("card_removed_during_game", {
+                "appid": self.running_game_id,
+                "uid":   removed_uid,
+                "uri":   removed_uri,
+                "source_type": event.source_type.value,
+                "action": action,
+            })
+        elif self.state == PluginState.GAME_RUNNING and not self.is_pairing:
+            decky.logger.info(
+                f"Media {removed_uid} removed from {event.source_id} while game "
+                f"{self.running_game_id} is running, but that game was launched by "
+                f"{origin} — leaving it alone."
+            )
+        else:
+            decky.logger.info(
+                f"Media removed. State={self.state.value}, Pairing={self.is_pairing}"
+            )
+
+        # Clear only the view belonging to this source — a storage eject must
+        # not blank the NFC tag the panel is showing.
+        if is_nfc:
+            self.current_tag_uid = None
+            self.current_tag_uri = None
+            self.current_tag_meta = None
+        await decky.emit("tag_removed", {
+            "source_type": event.source_type.value,
+            "source_id": event.source_id,
+        })
+
+        # Spec §6.6: card removed while READY → state stays READY.
+        # Stay in CARD_PRESENT if another source still holds media.
+        if self.state not in (PluginState.GAME_RUNNING, PluginState.IDLE):
+            self._set_state(
+                PluginState.CARD_PRESENT if self._active_media else PluginState.READY
+            )
+
+    # ── URI Validation ─────────────────────────────────────────────────
 
     def _validate_uri(self, uri: str) -> bool:
         """
@@ -307,755 +927,120 @@ class Plugin:
             return isinstance(value, bool)
         return False
 
-    # --- NFC Loop ---
+    # ── Pairing Handler ────────────────────────────────────────────────
 
-    async def _nfc_loop(self):
-        last_uid_hex = None
-        missing_count = 0
+    def _pairable_source(self, source_id: Optional[str]):
+        """Return the registered source with this id, if it can be written to.
 
-        while True:
-            try:
-                # ---- Reader init / IDLE state ----
-                # ensure we still have a usable reader; some transports
-                # (USB dongle) may disappear while the program is running.
-                if self.reader and not getattr(self.reader, "is_connected", lambda: True)():
-                    decky.logger.warning("Reader connection lost, resetting")
-                    self.reader = None
-                    await decky.emit("reader_status", {"connected": False})
-
-                if not self.reader:
-                    await self._init_reader()
-                    if not self.reader:
-                        self._set_state(PluginState.IDLE)
-                        await asyncio.sleep(self._reconnect_delay)
-                        self._reconnect_delay = min(
-                            self.RECONNECT_DELAY_MAX,
-                            self._reconnect_delay * 2,
-                        )
-                        continue
-                    # successful reconnect/initialization
-                    self._reconnect_delay = self.RECONNECT_DELAY_MIN
-
-                # ---- Poll ----
-                # use the abstract helper
-                uid = self.reader.read_uid(timeout=0.2)
-
-                if uid:
-                    missing_count = 0
-                    uid_hex = uid.hex().upper()
-                    self.current_tag_uid = uid_hex
-                    # update metadata cache so the frontend can query it quickly
-                    try:
-                        self.current_tag_meta = self._classify_tag(uid)
-                    except Exception:
-                        self.current_tag_meta = None
-                    is_new_tag = (uid_hex != last_uid_hex)
-
-                    if is_new_tag:
-                        # collision: a different tag was seen without the prior
-                        # one being removed.  Notify the frontend so it can warn
-                        # the user.
-                        if last_uid_hex is not None:
-                            decky.logger.info(
-                                f"Multiple tags present: {last_uid_hex}, {uid_hex}"
-                            )
-                            await decky.emit("multiple_tags", {
-                                "previous": last_uid_hex,
-                                "current": uid_hex,
-                            })
-                        last_uid_hex = uid_hex
-                        decky.logger.info(f"New tag arrival: {uid_hex}")
-                        await decky.emit("tag_detected", {"uid": uid_hex})
-
-                    if self.is_pairing:
-                        # Pairing mode — write URI to tag (Spec §7)
-                        decky.logger.info(f"Pairing mode active. Writing to tag {uid_hex}")
-                        await self._handle_pairing(uid)
-                    elif is_new_tag:
-                        # New card, not pairing — run scan flow (Spec §6.2)
-                        await self._handle_scan(uid)
-
-                else:
-                    # ---- Tag absent — debounce removal ----
-                    if last_uid_hex:
-                        missing_count += 1
-                        if missing_count >= self.DEBOUNCE_THRESHOLD:
-                            decky.logger.info(
-                                f"Tag removed: {last_uid_hex} (after {missing_count} misses)"
-                            )
-                            await self._nfc_loop_notify_removal()
-                            last_uid_hex  = None
-                            missing_count = 0
-
-            except Exception as e:
-                decky.logger.error(f"NFC loop error: {e}")
-                decky.logger.error(traceback.format_exc())
-                self.reader = None
-                self._set_state(PluginState.IDLE)
-                if self.uart:
-                    try:
-                        self.uart.close()
-                    except Exception:
-                        pass
-                    self.uart = None
-
-            interval = self.settings.get("polling_interval")
-            if not isinstance(interval, (int, float)):
-                decky.logger.warning(
-                    f"Invalid polling_interval type: {type(interval).__name__}, using default 0.5"
-                )
-                interval = 0.5
-            elif not (0.1 <= float(interval) <= 10.0):
-                decky.logger.warning(
-                    f"polling_interval {interval} out of range [0.1, 10.0], using default 0.5"
-                )
-                interval = 0.5
-            await asyncio.sleep(float(interval))
-
-    # --- Removal Notification (extracted for testability) ---
-
-    async def _nfc_loop_notify_removal(self):
+        Pairing is no longer NFC-only: a blank floppy is written by asking its
+        own source to persist the URI, exactly as a blank tag is.
         """
-        Called by _nfc_loop when debounce confirms tag removal.
-        Emits events and updates state. Extracted for unit-test access.
-        """
-        removed_uid = self.current_tag_uid
-        removed_uri = self.current_tag_uri
-
-        # Spec §6.3: removal during active game → notify frontend to trigger quit
-        if self.state == PluginState.GAME_RUNNING and not self.is_pairing:
-            decky.logger.info(
-                f"Tag removed while game {self.running_game_id} active. Notifying frontend."
-            )
-            await decky.emit("card_removed_during_game", {
-                "appid": self.running_game_id,
-                "uid":   removed_uid,
-                "uri":   removed_uri,
-            })
-        else:
-            decky.logger.info(
-                f"Tag removed. State={self.state.value}, Pairing={self.is_pairing}"
-            )
-
-        self.current_tag_uid = None
-        self.current_tag_uri = None
-        await decky.emit("tag_removed", {})
-
-        # Spec §6.6: card removed while READY → state stays READY
-        # GAME_RUNNING → READY only happens via set_running_game() when game exits
-        if self.state not in (PluginState.GAME_RUNNING, PluginState.IDLE):
-            self._set_state(PluginState.READY)
-
-    # --- Reader helpers ---
-
-    async def _create_reader(self):
-        """Return a reader instance based on configured settings.
-
-        Supported types: pn532_uart, acr122u, proxmark.
-        A ``None`` result indicates the type is unknown or the backend unavailable.
-        """
-        rtype = self.settings.get("reader_type")
-        path = self.settings.get("device_path")
-        baud = self.settings.get("baudrate")
-
-        if rtype == "pn532_uart":
-            return PN532UARTReader(path, baud, logger=decky.logger)
-        elif rtype == "acr122u":
-            try:
-                from nfc.acr122u_backend import ACR122UReader
-                return ACR122UReader(logger=decky.logger)
-            except ImportError:
-                decky.logger.error("ACR122U backend requires pyscard library")
-                return None
-        elif rtype == "proxmark":
-            try:
-                from nfc.proxmark_backend import ProxmarkReader
-                return ProxmarkReader(path, logger=decky.logger)
-            except ImportError:
-                decky.logger.error("Proxmark backend not available")
-                return None
-        elif rtype == "nfcpy":
-            try:
-                from nfc.nfcpy_backend import NfcPyReader
-                return NfcPyReader(path, logger=decky.logger)
-            except ImportError:
-                decky.logger.error("nfcpy backend requires nfcpy library")
-                return None
-        else:
-            decky.logger.warning(f"Unknown reader type: {rtype}")
+        if not source_id:
             return None
-
-    # --- Reader Init ---
-
-    async def _init_reader(self):
-        """Instantiate and connect to whatever reader the settings request.
-
-        A failure leaves ``self.reader`` as ``None`` so the loop will retry
-        after a delay.
-        """
-        path = self.settings.get("device_path")
-        if not os.path.exists(path):
-            return
-
-        reader = await self._create_reader()
-        if not reader:
-            self.reader = None
-            return
-
-        connected = await reader.connect()
-        if not connected:
-            decky.logger.error("Reader init failed: unable to connect")
-            self.reader = None
-            return
-
-        decky.logger.info(f"Connected to reader type {self.settings.get('reader_type')}")
-        self.reader = reader
-        self._set_state(PluginState.READY)
-        await decky.emit("reader_status", {"connected": True, "path": path})
-    # --- Scan Handler ---
-
-    async def _handle_scan(self, uid):
-        """
-        Handle a newly detected NFC tag (Spec §6.2).
-        Plays scan audio, reads URI, validates it, then either:
-          - delegates Steam launches to the frontend (avoid dual-launch race), or
-          - launches non-Steam URIs directly via xdg-open.
-        Additionally emits a low-level ``ndef_detected`` event containing the
-        full list of records read, allowing the frontend to display additional
-        data in the future.
-        """
-        # classify tag immediately so metadata is available and tests
-        # relying on current_tag_meta pass even when _handle_scan is called.
-        # However, some tests preload a fake cache and expect it to survive
-        # the scan.  Only re‑classify when we don't already have metadata.
-        if not getattr(self, "current_tag_meta", None):
-            try:
-                self.current_tag_meta = self._classify_tag(uid)
-            except Exception:
-                self.current_tag_meta = None
-        # otherwise leave whatever metadata the caller provided in place
-
-        # if a different tag UID was already recorded we have a collision
-        uid_hex = uid.hex().upper()
-        if hasattr(self, "current_tag_uid") and self.current_tag_uid and self.current_tag_uid != uid_hex:
-            decky.logger.info(f"Multiple tags present: {self.current_tag_uid}, {uid_hex}")
-            # synchronous notification replicates _nfc_loop behavior and keeps
-            # tests deterministic
-            await decky.emit("multiple_tags", {
-                "previous": self.current_tag_uid,
-                "current":  uid_hex,
-            })
-        self.current_tag_uid = uid_hex
-        self._set_state(PluginState.CARD_PRESENT)
-
-        # Audio feedback (Spec §11)
-        self._play_sound("scan.flac")
-
-        records = self._read_ndef_records()
-
-        # The `records` object is a list of `ndef` record objects, which are
-        # not directly JSON serializable. We need to convert them to a list
-        # of dictionaries before emitting them.
-        serializable_records = []
-        for record in records:
-            rec_dict = {}
-            for attr in ['type', 'name', 'uri', 'text', 'language', 'encoding']:
-                if hasattr(record, attr):
-                    rec_dict[attr] = getattr(record, attr)
-            serializable_records.append(rec_dict)
-        await decky.emit("ndef_detected", {"records": serializable_records})
-        
-        # also send metadata about the tag itself (type/capacity/protection)
-        if hasattr(self, "current_tag_meta") and self.current_tag_meta is not None:
-            await decky.emit("tag_metadata", self.current_tag_meta)
-
-        # use the convenience wrapper for URI detection; tests often stub it
-        uri = self._read_ndef_uri()
-
-        # No URI on tag — play error sound (Spec §12)
-        if not uri:
-            decky.logger.info(f"No URI found on tag {uid.hex()}")
-            self._play_sound("error.flac")
-            self.current_tag_uri = None
-            await decky.emit("uri_detected", {"uri": None, "uid": uid.hex()})
-            self._set_state(PluginState.READY)
-            return
-
-        # Allowlist check (Spec §4) — play error sound and block if rejected
-        if not self._validate_uri(uri):
-            decky.logger.warning(f"URI blocked by allowlist: {uri}")
-            self._play_sound("error.flac")
-            self.current_tag_uri = None
-            await decky.emit("uri_detected", {"uri": None, "uid": uid.hex(), "blocked": True})
-            self._set_state(PluginState.READY)
-            return
-
-        self.current_tag_uri = uri
-        decky.logger.info(f"URI found on tag {uid.hex()}: {uri}")
-        await decky.emit("uri_detected", {"uri": uri, "uid": uid.hex()})
-
-        if not self.settings.get("auto_launch"):
-            return
-
-        # Spec §8.1: Do not launch if any game is already running
-        if self.running_game_id:
-            decky.logger.info(f"Launch blocked: game {self.running_game_id} already running.")
-            self._set_state(PluginState.GAME_RUNNING)
-            return
-
-        if uri.startswith("steam://"):
-            # Steam URIs: frontend handles launch via SteamClient.Apps.RunGame.
-            # Frontend calls set_running_game() immediately after launch, so
-            # the backend's running_game_id is updated within milliseconds —
-            # avoiding the dual-launch race condition (Fix #1 / #2).
-            decky.logger.info(f"Steam URI: frontend will handle launch for: {uri}")
-            # State advances to GAME_RUNNING when frontend calls set_running_game()
-        else:
-            # Non-Steam allowed URI (https://): backend launches via xdg-open.
-            decky.logger.info(f"Backend launching URI: {uri}")
-            await self._launch_uri(uri)
-
-    # --- NDEF Read ---
-
-    def _iter_ntag_pages(self):
-        """Return the sequence of user‑writable pages on an NTAG21x device.
-
-        NTAG213/215/etc. reserve pages 0–3 for manufacturer data; user NDEF
-        messages start at page 4.  We limit to page 39 which covers the largest
-        NTAG21x variants (44 total pages, last 4 reserved for configuration).
-        """
-        # Historically we limited to page 39 which covered NTAG213
-        # devices (36 usable pages, 144 bytes).  Real tags such as NTAG215/216
-        # provide many more user pages (up to 504‑888 bytes), so we extend the
-        # range to 133 which corresponds to ~520 bytes and satisfies the
-        # existing tests.  The reader will fail if pages beyond the card's
-        # capacity are accessed, so the precise upper bound is not critical.
-        for page in range(4, 134):
-            yield page
-
-    def _is_ntag(self, uid) -> bool:
-        """Quick heuristic: assume NTAG21x when authentication fails but a
-        raw read still returns data.
-
-        This handles the common case of an NTAG215 card (used by the black
-        game‑copy tags) which does not support Mifare‑Classic auth.
-        """
-        # Try Classic auth first.  If any key works, it's definitely not an NTAG.
-        keys = [
-            b'\xFF\xFF\xFF\xFF\xFF\xFF',
-            b'\xD3\xF7\xD3\xF7\xD3\xF7',
-            b'\xA0\xA1\xA2\xA3\xA4\xA5',
-        ]
-        for key in keys:
-            try:
-                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    return False
-            except Exception:
-                # some readers return errors when auth commands are unsupported
-                break
-            time.sleep(0.05)
-
-        # authentication failed; see if a raw read succeeds
-        try:
-            return self.reader.mifare_classic_read_block(4) is not None
-        except Exception:
-            return False
-
-    def _classify_tag(self, uid: bytes) -> Dict[str, Any]:
-        """Return basic metadata about the presented tag.
-
-        Currently this only distinguishes between Mifare Classic and
-        NTAG21x-style tags and reports an approximate capacity in bytes.  The
-        information is useful for UI feedback and for making decisions such
-        as size checks or choosing the correct read/write primitive.
-        
-        Results are cached to avoid repeated reader calls for the same UID.
-        """
-        uid_hex = uid.hex().upper()
-        
-        # Check cache first
-        if uid_hex in self._tag_classification_cache:
-            decky.logger.debug(f"Tag {uid_hex} classification cache hit")
-            return self._tag_classification_cache[uid_hex]
-        
-        meta = {"uid": uid_hex, "type": "unknown", "capacity_bytes": 0, "protected": False}
-
-        authenticated = False
-        # heuristics for additional families (best effort with current reader API)
-        # ISO-14443B: 4-byte UID, detected via read_uid_iso14443b
-        if len(uid) == 4 and hasattr(self.reader, 'read_uid_iso14443b'):
-            try:
-                test_uid = self.reader.read_uid_iso14443b(timeout=0.1)
-                if test_uid and test_uid == uid:
-                    meta["type"] = "iso14443b"
-                    self._cache_tag_classification(uid_hex, meta)
-                    return meta
-            except Exception:
-                pass
-        # ISO-15693 / NFC-V often uses 8-byte UID starting with E0.
-        if len(uid) == 8 and uid[0] == 0xE0:
-            meta["type"] = "iso15693"
-            self._cache_tag_classification(uid_hex, meta)
-            return meta
-        # simple heuristic for FeliCa/NFC-F: 8-byte UID, non-E0 prefix
-        if len(uid) == 8:
-            meta["type"] = "felica"
-            # capacity unknown for now
-            self._cache_tag_classification(uid_hex, meta)
-            return meta
-
-        keys = [
-            b"\xFF\xFF\xFF\xFF\xFF\xFF",
-            b"\xD3\xF7\xD3\xF7\xD3\xF7",
-            b"\xA0\xA1\xA2\xA3\xA4\xA5",
-        ]
-        for key in keys:
-            try:
-                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
-                    decky.logger.debug(f"Tag {uid_hex} authenticated with key {key.hex()}")
-                    break
-            except Exception as e:
-                decky.logger.debug(f"Auth attempt failed for key {key.hex()}: {e}")
-                break
-            finally:
-                time.sleep(0.05)
-
-        if authenticated:
-            meta["type"] = "mifare-classic"
-            blocks = list(self._iter_mifare_data_blocks())
-            meta["capacity_bytes"] = len(blocks) * MIFARE_CLASSIC_BLOCK_SIZE
-            decky.logger.debug(f"Classified tag {uid_hex} as Mifare Classic with {len(blocks)} data blocks")
-        else:
-            try:
-                if self.reader.mifare_classic_read_block(4) is not None:
-                    meta["type"] = "ntag21x"
-                    # extra refinement: Ultralight/NTAG often use 7-byte UIDs.
-                    if len(uid) == 7:
-                        meta["type"] = "ultralight"
-                    pages = list(self._iter_ntag_pages())
-                    meta["capacity_bytes"] = len(pages) * 4
-                    decky.logger.debug(f"Classified tag {uid_hex} as {meta['type']} with {len(pages)} pages")
-            except Exception as e:
-                # error reading page may indicate the tag is locked/protected
-                decky.logger.debug(f"Failed to read page 4 for tag {uid_hex}: {e}")
-                meta["protected"] = True
-
-        # rough DESFire hint: 7-byte UID where neither classic auth nor page read worked
-        # (cannot be fully confirmed without native DESFire APDU flow).
-        if meta["type"] == "unknown" and len(uid) == 7:
-            meta["type"] = "desfire"
-
-        self._cache_tag_classification(uid_hex, meta)
-        return meta
-
-    def _cache_tag_classification(self, uid_hex: str, meta: Dict[str, Any]) -> None:
-        """Cache tag classification metadata with LRU eviction.
-        
-        Prevents unbounded memory growth by evicting oldest entries when
-        cache exceeds max size.
-        """
-        self._tag_classification_cache[uid_hex] = meta
-        
-        # Simple LRU: if cache exceeds max size, remove oldest entry
-        if len(self._tag_classification_cache) > self._tag_cache_max_size:
-            # Remove first (oldest) entry
-            oldest_key = next(iter(self._tag_classification_cache))
-            del self._tag_classification_cache[oldest_key]
-            decky.logger.debug(f"Tag classification cache evicted {oldest_key}")
-
-    def _read_ndef_records(self) -> List[Any]:
-        """Read and return all NDEF records present on the current tag.
-
-        The implementation largely mirrors the old ``_read_ndef_uri`` logic
-        but stops short of interpreting the payload; callers can iterate the
-        returned list to find whatever record type they're interested in.
-        Returning a list makes it easy to add additional event hooks later
-        (e.g. ``ndef_detected``) without touching the low‑level read code.
-        """
-        uid = self.reader.read_uid(timeout=0.1)
-        if not uid:
-            return []
-
-        # Use the new classification helper to determine tag family and
-        # capacity.  This factorises the same logic used elsewhere and makes
-        # metadata available for diagnostics/UI.
-        tag_meta = self._classify_tag(uid)
-        authenticated = tag_meta.get("type") == "mifare-classic"
-        is_ntag = tag_meta.get("type") in ("ntag21x", "ultralight")
-
-        data = bytearray()
-        if is_ntag:
-            blocks_iter = self._iter_ntag_pages()
-            read_fn = self.reader.ntag2xx_read_block
-        else:
-            blocks_iter = self._iter_mifare_data_blocks()
-            read_fn = self.reader.mifare_classic_read_block
-
-        for i in blocks_iter:
-            block = read_fn(i)
-            if block:
-                data.extend(block)
-                if 0xFE in block:
-                    break
-            else:
-                break
-
-        if not data:
-            return []
-
-        records = []
-        # parse TLV-wrapped NDEF message if present
-        if len(data) > 2 and data[0] == 0x03:
-            length = data[1]
-            ndef_data = data[2:2 + length]
-            try:
-                for rec in ndef.message_decoder(ndef_data):
-                    records.append(rec)
-            except Exception as e:
-                # If NDEF decoding fails, log it and try fallback
-                decky.logger.warning(f"NDEF decode error: {e}")
-                # Try to extract URI directly from the raw data
-                try:
-                    # NDEF URI record format: record_header, type_length, payload_length, type, uri_prefix, uri_data
-                    # Look for the URI type (0x55) and extract what follows
-                    if len(ndef_data) > 3:
-                        # Skip record header and type length, look for payload length and type
-                        for i in range(len(ndef_data) - 2):
-                            if ndef_data[i] == 0x55:  # URI type
-                                # Found URI type, next byte is URI prefix, rest is URI
-                                uri_prefix_byte = ndef_data[i + 1] if i + 1 < len(ndef_data) else 0
-                                uri_data = ndef_data[i + 2:]
-                                if uri_data:
-                                    try:
-                                        uri_str = uri_data.decode("utf-8", errors="ignore").strip("\x00\xfe")
-                                        if uri_str:
-                                            records.append(ndef.UriRecord(uri_str))
-                                            break
-                                    except Exception:
-                                        pass
-                except Exception:
-                    pass
-
-        # no records found? attempt the crude regex fallback so we at least
-        # return a best-effort UriRecord if the bytes look like one.
-        if not records:
-            try:
-                import re
-                # Try to extract URI from raw bytes
-                # Look for common URI schemes
-                decoded = data.decode("utf-8", errors="ignore").strip("\x00")
-                # Match URI schemes: scheme://path, being more permissive with characters
-                match = re.search(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\x00\xfe]{1,2048})", decoded)
-                if match:
-                    uri = match.group(1).strip()
-                    # Validate extracted URI before creating record
-                    if self._validate_uri(uri):
-                        try:
-                            records.append(ndef.UriRecord(uri))
-                        except Exception as e:
-                            decky.logger.debug(f"Failed to create UriRecord from extracted URI: {e}")
-                    else:
-                        decky.logger.debug(f"Extracted URI failed validation: {uri}")
-            except Exception as e:
-                decky.logger.debug(f"Regex fallback failed: {e}")
-
-        return records
-
-    def _read_ndef_uri(self) -> Optional[str]:
-        """Convenience wrapper that returns the first URI record's value.
-
-        Previously we merely checked for a ``uri`` attribute, but that
-        inadvertently matched MagicMocks used by tests (which expose any
-        attribute).  The caller often patches ``_read_ndef_records`` so we
-        only need a lightweight check: if the record's class name is
-        ``UriRecord`` we consider it legitimate.  This keeps us free of a
-        hard import dependency while still distinguishing fakes.
-        """
-        for record in self._read_ndef_records():
-            # Ordinarily URI records implement a ``uri`` attribute and are
-            # clearly named ``UriRecord`` (or some variant such as the
-            # test-provided ``_StubUriRecord``).  Instead of relying on the
-            # current ``ndef`` import object, which may be patched during
-            # testing, we simply require both a ``uri`` attribute and a class
-            # name ending in ``UriRecord``.  This handles the full test suite
-            # order without pulling in the library.
-            if hasattr(record, "uri") and record.__class__.__name__.endswith("UriRecord"):
-                return record.uri
+        for source in self._all_sources():
+            if source.source_id == source_id and source.can_write():
+                return source
         return None
 
-    # --- Pairing Handler ---
-
-    async def _handle_pairing(self, uid):
-        """Write the pairing URI to the NFC tag (Spec §7)."""
+    async def _handle_pairing(self, media_id: str, source_id: Optional[str] = None):
+        """Write the pairing URI onto the presented medium (Spec §7)."""
         if not self.pairing_uri:
             decky.logger.warning("Pairing triggered but no URI set!")
             self.is_pairing = False
             self.pairing_uri = None
+            self.pairing_source_id = None
+            return
+
+        source = self._pairable_source(source_id)
+        if source is None:
+            decky.logger.warning(
+                f"Pairing triggered for {source_id} which cannot be written to"
+            )
+            self.is_pairing = False
+            self.pairing_uri = None
+            self.pairing_source_id = None
+            await decky.emit("pairing_result", {
+                "success": False,
+                "uid":     media_id,
+                "error":   "This trigger source cannot be paired",
+            })
             return
 
         # Atomic state update: exit pairing mode immediately to prevent
-        # new tags from interfering with the write operation
+        # new media from interfering with the write operation
         pairing_uri = self.pairing_uri
         self.is_pairing = False
         self.pairing_uri = None
+        self.pairing_source_id = None
 
-        decky.logger.info(f"Pairing: writing {pairing_uri} to tag {uid.hex()}")
+        decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
-            success, error_msg = self._write_ndef_uri(uid, pairing_uri)
+            success, error_msg = await source.write_uri(media_id, pairing_uri)
             self._play_sound("success.flac" if success else "error.flac")
+
+            if success:
+                # The medium now holds this URI, but nothing will re-read it
+                # while it stays put — poll() only reports media on arrival.
+                # Without this the panel shows "Url: Empty" until the user
+                # lifts and replaces the card, even though pairing succeeded.
+                await self._sync_uri_after_pairing(media_id, pairing_uri, source_id)
+
             await decky.emit("pairing_result", {
                 "success": success,
-                "uid":     uid.hex(),
+                "uid":     media_id,
                 "error":   error_msg,
+                "source_type": source.source_type.value,
             })
         except Exception as e:
             decky.logger.error(f"Critical error in pairing handler: {e}")
             await decky.emit("pairing_result", {
                 "success": False,
-                "uid":     uid.hex(),
+                "uid":     media_id,
                 "error":   str(e),
             })
 
-    # --- NDEF Write ---
+    async def _sync_uri_after_pairing(self, media_id: str, uri: str, source_id: Optional[str]):
+        """Reflect a freshly-written URI in plugin state and tell the frontend.
 
-    def _write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
+        Emits ``uri_detected`` with ``paired: True``. The flag matters: the
+        frontend launches on that event, and pairing a card must not also start
+        the game — it would yank the user out of whatever they were doing right
+        after they pressed a button that only promised to write a tag.
         """
-        Write a URI as an NDEF URI record to the currently-presented tag.
+        source = self._pairable_source(source_id)
+        is_nfc = source is not None and source.source_type == SourceType.NFC
 
-        Supports both Mifare‑Classic and NTAG21x devices.  A successful write
-        returns ``(True, None)``; failures yield ``(False, error_message)``.
-        """
-        # --- prepare TLV payload ------------------------------------------------
-        uri_bytes      = uri.encode("utf-8")
-
-        # Build NDEF record and wrap in TLV; length may be adjusted later.
-        try:
-            record  = ndef.UriRecord(uri)
-            message = b"".join(ndef.message_encoder([record]))
-            tlv     = bytearray([0x03, len(message)]) + message + b"\xFE"
-        except Exception as e:
-            return (False, f"Failed to create NDEF record: {e}")
-
-        # Attempt Classic authentication first to distinguish tag types.
-        authenticated = False
-        keys = [
-            b'\xFF\xFF\xFF\xFF\xFF\xFF',
-            b'\xD3\xF7\xD3\xF7\xD3\xF7',
-            b'\xA0\xA1\xA2\xA3\xA4\xA5',
-        ]
-        for key in keys:
-            try:
-                if self.reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
-                    break
-            except Exception as e:
-                # some tags (e.g. NTAG21x) don't support the Classic auth
-                # command; treat that the same as a failed auth so we fall
-                # back to the NTAG path.  Log for debugging.
-                decky.logger.info(f"Classic auth raised, assuming non-Classic tag: {e}")
-                authenticated = False
-                break
-            finally:
-                time.sleep(0.05)
-
-        # choose limits based on tag family; compute actual available space
-        if authenticated:
-            # Mifare Classic: count writable blocks and multiply by block size
-            blocks = list(self._iter_mifare_data_blocks())
-            max_payload = len(blocks) * MIFARE_CLASSIC_BLOCK_SIZE
-        else:
-            # NTAG family: count user-writable pages
-            pages = list(self._iter_ntag_pages())
-            max_payload = len(pages) * 4
-
-        # subtract a small amount for TLV/record overhead later (handled in
-        # estimated_size check) – we just need a conservative upper bound.
-
-        # capacity check (Spec §3.3).  We estimate TLV/record overhead and
-        # compare against the computed payload ceiling above.
-        estimated_size = 2 + 4 + 1 + len(uri_bytes) + 1
-        if estimated_size > max_payload:
-            msg = (
-                f"URI too long: estimated {estimated_size} bytes "
-                f"exceeds limit of {max_payload} bytes."
+        # Keep the registry and the source's own view consistent, so the RPC
+        # poll fallback and any later reads agree with what the panel shows.
+        entry = self._active_media.get(source_id) if source_id else None
+        if entry is None and is_nfc:
+            entry = next(
+                (m for m in self._active_media.values() if m.get("source_type") == "nfc"),
+                None,
             )
-            decky.logger.error(msg)
-            return False, msg
+        if entry is not None:
+            entry["uri"] = uri
 
-        try:
-            if authenticated:
-                # --- classic write path ------------------------------------------------
-                # pad to 16‑byte blocks
-                while len(tlv) % MIFARE_CLASSIC_BLOCK_SIZE != 0:
-                    tlv.append(0x00)
+        # current_tag_* is the NFC-specific view behind get_tag_status; pairing
+        # a floppy must not overwrite what the reader is holding.
+        if is_nfc:
+            self.current_tag_uri = uri
+            if self.nfc_source is not None:
+                self.nfc_source.current_tag_uri = uri
 
-                writable_blocks = self._iter_mifare_data_blocks()
-                required_blocks = len(tlv) // MIFARE_CLASSIC_BLOCK_SIZE
-                if required_blocks > len(writable_blocks):
-                    msg = (
-                        f"URI too long for writable Mifare blocks: needs {required_blocks}, "
-                        f"available {len(writable_blocks)}."
-                    )
-                    decky.logger.error(msg)
-                    return False, msg
+        decky.logger.info(f"Pairing wrote {uri} to {media_id}; syncing UI state")
+        # source_id/source_type let the panel address the medium directly
+        # instead of guessing from media_id, which matters once more than one
+        # trigger is holding media at the same time.
+        await decky.emit("uri_detected", {
+            "uri":    uri,
+            "uid":    media_id,
+            "paired": True,
+            "source_id": source_id or (entry or {}).get("source_id"),
+            "source_type": (entry or {}).get("source_type"),
+        })
 
-                for i in range(0, len(tlv), MIFARE_CLASSIC_BLOCK_SIZE):
-                    block_num = writable_blocks[i // MIFARE_CLASSIC_BLOCK_SIZE]
-                    block_data = tlv[i : i + 16]
-                    decky.logger.info(f"Writing NDEF block {block_num}: {block_data.hex()}")
-                    if not self.reader.mifare_classic_write_block(block_num, block_data):
-                        msg = f"Write failed at block {block_num}"
-                        decky.logger.error(msg)
-                        return False, msg
-
-                decky.logger.info("NDEF Write Successful")
-                return True, None
-            else:
-                # --- NTAG21x write path ------------------------------------------------
-                decky.logger.info(
-                    "Authentication failed: assuming NTAG21x, using NTAG write path"
-                )
-                # pad to 4‑byte pages
-                while len(tlv) % 4 != 0:
-                    tlv.append(0x00)
-
-                pages = list(self._iter_ntag_pages())
-                required_pages = len(tlv) // 4
-                if required_pages > len(pages):
-                    msg = (
-                        f"URI too long for NTAG pages: needs {required_pages}, "
-                        f"available {len(pages)}."
-                    )
-                    decky.logger.error(msg)
-                    return False, msg
-
-                for i in range(0, len(tlv), 4):
-                    page_num = pages[i // 4]
-                    page_data = tlv[i : i + 4]
-                    decky.logger.info(f"Writing NTAG page {page_num}: {page_data.hex()}")
-                    if not self.reader.ntag2xx_write_block(page_num, page_data):
-                        msg = f"Write failed at page {page_num}"
-                        decky.logger.error(msg)
-                        return False, msg
-
-                decky.logger.info("NTAG NDEF Write Successful")
-                return True, None
-        except Exception as e:
-            decky.logger.error(f"Error writing NDEF: {e}")
-            decky.logger.error(traceback.format_exc())
-            return False, str(e)
-
-    def _iter_mifare_data_blocks(self):
-        blocks = []
-        for block in range(MIFARE_CLASSIC_FIRST_DATA_BLOCK, MIFARE_CLASSIC_MAX_BLOCK + 1):
-            # Skip trailer blocks (every 4th block in Classic 1K sectors).
-            if block % 4 == 3:
-                continue
-            blocks.append(block)
-        return blocks
-
-    # --- Launch ---
+    # ── Launch ─────────────────────────────────────────────────────────
 
     async def _launch_uri(self, uri):
         """Launch a URI via the system handler (xdg-open)."""
@@ -1085,11 +1070,21 @@ class Plugin:
             return
         
         try:
-            sound_path = os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename)
-            
-            # Verify file exists before attempting to play
-            if not os.path.exists(sound_path):
-                decky.logger.error(f"Sound file not found: {sound_path}")
+            # The decky CLI zips a fixed allowlist (main.py, plugin.json,
+            # package.json, dist/, py_modules/, LICENSE, README.md) — a
+            # top-level assets/ is dropped, so the build vendors the sounds
+            # into py_modules/. Check the source-tree location first so a
+            # development checkout still works.
+            candidates = [
+                os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename),
+                os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules", "assets", "sounds", filename),
+            ]
+            sound_path = next((p for p in candidates if os.path.exists(p)), None)
+
+            if sound_path is None:
+                decky.logger.error(
+                    f"Sound file not found: {filename} (looked in {', '.join(candidates)})"
+                )
                 return
             
             # Verify it's a regular file (not a directory or symlink to sensitive location)
@@ -1097,9 +1092,30 @@ class Plugin:
                 decky.logger.error(f"Sound path is not a regular file: {sound_path}")
                 return
             
-            subprocess.Popen(["paplay", sound_path])
+            subprocess.Popen(["paplay", sound_path], env=self._audio_env())
         except Exception as e:
             decky.logger.error(f"Failed to play sound {filename}: {e}")
+
+    def _audio_env(self):
+        """Environment that lets paplay reach the desktop user's audio server.
+
+        The plugin runs as root (needed to mount disks), which puts it outside
+        the user's PipeWire session — paplay would find no server and every
+        sound would silently vanish. Point it at the session socket explicitly;
+        root can open it regardless of its ownership.
+        """
+        env = dict(os.environ)
+        if os.geteuid() != 0:
+            return env
+        try:
+            import pwd
+            user = getattr(decky, "DECKY_USER", None) or "deck"
+            uid = pwd.getpwnam(user).pw_uid
+        except (KeyError, ImportError):
+            return env
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
+        env.setdefault("PULSE_SERVER", f"unix:/run/user/{uid}/pulse/native")
+        return env
 
     # -----------------------------------------------------------
     # Callable methods (called from JS frontend)
@@ -1115,28 +1131,56 @@ class Plugin:
             )
             return False
         self.settings.set(key, value)
-        if key in ("device_path", "baudrate"):
-            self.reader = None  # Trigger re-init on next loop
+        if key in ("device_path", "baudrate", "reader_type") and self.nfc_source:
+            self.nfc_source._reader = None  # force reconnect on next poll
         return True
 
-    async def start_pairing(self, uri):
+    async def start_pairing(self, uri, source_id: Optional[str] = None):
+        """Arm pairing. With `source_id`, only that trigger may be written.
+
+        The panel offers a Pair button per trigger, so it says which one it
+        means. Without a target, any writable source wins — the game-page
+        link button arms everything and lets the user choose by presenting a
+        medium.
+        """
         if not self._validate_uri(uri):
             decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
             return False
-        decky.logger.info(f"UI requested pairing for URI: {uri}")
+        if source_id and self._pairable_source(source_id) is None:
+            decky.logger.warning(f"Pairing target {source_id!r} cannot be written to")
+            return False
+        decky.logger.info(
+            f"UI requested pairing for URI: {uri}"
+            + (f" on {source_id}" if source_id else " on any trigger")
+        )
         self.is_pairing  = True
         self.pairing_uri = uri
+        self.pairing_source_id = source_id
+        # Re-arm every source so media already in place — a card resting on the
+        # reader, a disk already in the drive — is picked up on the next poll,
+        # instead of requiring the user to remove and re-present it.
+        for source in self._all_sources():
+            try:
+                source.rearm()
+            except Exception as e:
+                decky.logger.warning(f"rearm failed for {source.source_id}: {e}")
         return True
 
     async def cancel_pairing(self):
         self.is_pairing  = False
         self.pairing_uri = None
+        self.pairing_source_id = None
         return True
 
     async def get_reader_status(self):
+        # Polled twice a second by the frontend, and reached before _main()
+        # finishes (or at all, if _main raised), so it must never throw —
+        # an exception here becomes a steady stream of RPC errors.
+        reader = self.nfc_source.reader if self.nfc_source else None
         return {
-            "connected": self.reader is not None,
-            "path":      self.settings.get("device_path"),
+            "connected": reader is not None,
+            "path":      self.settings.get("device_path") if self.settings else None,
+            "source_type": SourceType.NFC.value,
         }
 
     async def get_tag_status(self):
@@ -1167,7 +1211,16 @@ class Plugin:
         uid_hex = uid.hex().upper()
         self.current_tag_uid = uid_hex
         self.current_tag_uri = uri
-        self.current_tag_meta = self._classify_tag(uid) if uid else None
+        # Classification needs a live reader; without one this is still a useful
+        # debug helper, just without metadata.
+        if uid and self.nfc_source and self.nfc_source.reader:
+            try:
+                self.current_tag_meta = self.nfc_source._classify_tag(uid)
+            except Exception as e:
+                decky.logger.warning(f"simulate_tag: classification failed: {e}")
+                self.current_tag_meta = None
+        else:
+            self.current_tag_meta = None
         await decky.emit("tag_detected", {"uid": uid_hex})
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 
@@ -1194,20 +1247,17 @@ class Plugin:
             uid_bytes = bytes.fromhex(self.current_tag_uid)
 
         try:
-            return self._classify_tag(uid_bytes)
+            return self.nfc_source._classify_tag(uid_bytes)
         except Exception as e:
             return {"error": str(e)}
 
     async def get_reader_diagnostics(self):
-        """Return low-level diagnostics about the connected reader.
-
-        The frontend can call this to show firmware version, connection
-        status, or any errors seen while interacting with the device.
-        """
-        info = {"connected": self.reader is not None}
-        if self.reader:
+        """Return low-level diagnostics about the connected reader."""
+        reader = self.nfc_source.reader if self.nfc_source else None
+        info = {"connected": reader is not None}
+        if reader:
             try:
-                info["firmware"] = self.reader.firmware_version()
+                info["firmware"] = reader.firmware_version()
             except Exception as e:
                 info["error"] = str(e)
         return info
@@ -1299,20 +1349,21 @@ class Plugin:
                 return []
             
             # Get tag metadata to determine type
-            meta = self._classify_tag(uid_bytes)
+            meta = self.nfc_source._classify_tag(uid_bytes)
             if meta.get("type") != "mifare-classic":
                 decky.logger.warning(f"Sector info only supported for Mifare Classic, got {meta.get('type')}")
                 return []
-            
+
             # Create handler and get sector info
             from nfc.tag_handlers import MifareClassicHandler
             handler = MifareClassicHandler(uid_bytes, self.key_manager)
-            
-            if not self.reader:
+
+            reader = self.nfc_source.reader if self.nfc_source else None
+            if not reader:
                 decky.logger.error("No reader available for sector info")
                 return []
-            
-            return handler.get_sector_info(self.reader)
+
+            return handler.get_sector_info(reader)
         except Exception as e:
             decky.logger.error(f"Failed to get sector info: {e}")
             return []
@@ -1349,30 +1400,28 @@ class Plugin:
                 return False
             
             # Verify tag type and get capacity
-            meta = self._classify_tag(uid_bytes)
+            meta = self.nfc_source._classify_tag(uid_bytes)
             if meta.get("type") != "mifare-classic":
                 decky.logger.warning(f"Sector locking only supported for Mifare Classic")
                 return False
-            
-            # Determine max sectors based on capacity
-            # Mifare Classic 1K: 16 sectors (64 bytes per sector)
-            # Mifare Classic 4K: 40 sectors (32 bytes for sectors 0-31, 64 bytes for sectors 32-39)
+
             capacity = meta.get("capacity_bytes", 0)
             max_sectors = 40 if capacity > 2048 else 16
-            
+
             if sector < 0 or sector >= max_sectors:
                 decky.logger.warning(f"Invalid sector {sector} for {capacity}-byte tag (max {max_sectors - 1})")
                 return False
-            
-            if not self.reader:
+
+            reader = self.nfc_source.reader if self.nfc_source else None
+            if not reader:
                 decky.logger.error("No reader available for sector lock")
                 return False
-            
+
             # Create handler and lock sector
             from nfc.tag_handlers import MifareClassicHandler
             handler = MifareClassicHandler(uid_bytes, self.key_manager)
-            
-            success, error = handler.lock_sector(self.reader, sector, key_a_bytes, key_b_bytes)
+
+            success, error = handler.lock_sector(reader, sector, key_a_bytes, key_b_bytes)
             
             if not success:
                 decky.logger.error(f"Failed to lock sector {sector}: {error}")
@@ -1400,10 +1449,34 @@ class Plugin:
         decky.logger.info(f"Running game updated: {prev} → {appid}")
 
         if appid:
+            # Attribute the game to whichever medium triggered the launch, so
+            # _handle_media_unload only quits it for that medium. A launch the
+            # user started by hand has no pending origin and is attributed to
+            # nothing, which correctly means no medium can quit it.
+            #
+            # Only a *new* origin, or a genuinely different game, may change the
+            # attribution. The frontend reports the running game repeatedly —
+            # "Running game updated: 400 → 400" a second after the launch — and
+            # unconditionally taking the (now empty) pending origin wiped the
+            # attribution immediately after setting it. Auto-close then refused
+            # to quit anything, because every game had been "launched by None".
+            if self._pending_launch_origin is not None:
+                self._launch_origin = self._pending_launch_origin
+                self._pending_launch_origin = None
+            elif appid != prev:
+                self._launch_origin = None
+            if self._launch_origin:
+                decky.logger.info(f"Game {appid} attributed to {self._launch_origin}")
             self._set_state(PluginState.GAME_RUNNING)
-        elif self.state == PluginState.GAME_RUNNING:
-            # Spec §6.4: game exited — transition back to READY
-            self._set_state(PluginState.READY)
+        else:
+            self._launch_origin = None
+            self._pending_launch_origin = None
+            if self.state == PluginState.GAME_RUNNING:
+                # Spec §6.4: game exited — return to CARD_PRESENT when media is
+                # still presented somewhere, otherwise READY.
+                self._set_state(
+                    PluginState.CARD_PRESENT if self._active_media else PluginState.READY
+                )
 
         return True
 
@@ -1551,12 +1624,126 @@ class Plugin:
                 sig_record.signature
             )
             
+            # Without cryptography, verification is impossible and the manager
+            # fails closed (always False). Distinguish that from a genuine
+            # mismatch so the UI can say "can't check" rather than "forged".
+            unavailable = not getattr(self.signature_manager, "crypto_available", False)
+            if unavailable:
+                decky.logger.error(
+                    "Signature could not be verified: cryptography is unavailable. "
+                    "Reporting invalid rather than assuming authenticity."
+                )
+
             decky.logger.info(f"Signature verification: {valid}")
             return {
                 "valid": valid,
                 "key_id": sig_record.key_id,
-                "algorithm": sig_record.algorithm
+                "algorithm": sig_record.algorithm,
+                "unverifiable": unavailable,
             }
         except Exception as e:
             decky.logger.error(f"Failed to verify signature: {e}")
             return {"valid": False, "error": str(e)}
+
+    async def get_active_media(self):
+        """Return every medium currently presented, across all sources.
+
+        The per-source view that `get_tag_status` cannot express: that RPC
+        reports the NFC slot only, for backwards compatibility.
+        """
+        return list(self._active_media.values())
+
+    async def get_launch_origin(self):
+        """Return the medium credited with launching the running game, if any."""
+        return self._launch_origin
+
+    async def get_source_statuses(self):
+        """Return status for all registered sources."""
+        if not self.source_manager:
+            return []
+        result = []
+        for source in self.source_manager.sources:
+            entry = {
+                "source_id": source.source_id,
+                "source_type": source.source_type.value,
+                # The row tracks the hardware, not the media: ejecting a floppy
+                # does not unplug the drive, and greying the whole source out
+                # the moment a disk comes out reads as a fault.
+                "active": source.has_drive(),
+                "has_media": source.has_media(),
+                # Whether media on this source can be written to. The game-page
+                # link button uses this to decide if pairing is possible at all,
+                # instead of asking specifically about the NFC reader.
+                "can_pair": source.can_write(),
+                "enabled": source.is_enabled(),
+            }
+            # Storage is one source covering several kinds of drive, and the
+            # panel shows a row per kind — so it needs presence per kind, not
+            # just "some drive is attached".
+            if hasattr(source, "drive_kinds_present"):
+                settings = self.settings.get_source_settings("storage") or {}
+                configured = settings.get("drive_kinds") or {}
+                entry["drive_kinds"] = {
+                    kind: {
+                        "present": present,
+                        "enabled": bool(configured.get(kind, DEFAULT_DRIVE_KINDS.get(kind, False))),
+                    }
+                    for kind, present in source.drive_kinds_present().items()
+                }
+            result.append(entry)
+        return result
+
+    async def set_source_setting(self, source_type: str, key: str, value):
+        """Update a per-source setting."""
+        # storage and camera joined the list when sources gained an explicit
+        # on/off switch — a disabled source idles instead of retrying forever,
+        # so the switch has to be reachable from the panel.
+        ALLOWED_SOURCE_TYPES = {"nfc", "mqtt", "serial", "file_watch", "storage", "camera"}
+        if source_type not in ALLOWED_SOURCE_TYPES:
+            decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
+            return False
+
+        ALLOWED_KEYS: Dict[str, type] = {
+            "enabled": bool,
+            "drive_kinds": dict,
+            "broker_host": str,
+            "broker_port": int,
+            "topic": str,
+            "secret": str,
+            "port": str,
+            "baudrate": int,
+            "watch_dir": str,
+            "poll_interval": float,
+        }
+
+        if key not in ALLOWED_KEYS:
+            decky.logger.warning(f"set_source_setting: unknown key {key!r}")
+            return False
+
+        expected_type = ALLOWED_KEYS[key]
+        if not isinstance(value, expected_type):
+            # Allow int where float is expected
+            if expected_type is float and isinstance(value, int):
+                value = float(value)
+            else:
+                decky.logger.warning(
+                    f"set_source_setting: {key!r} expects {expected_type.__name__}, got {type(value).__name__}"
+                )
+                return False
+
+        sources = self.settings.settings.setdefault("sources", {})
+        sources.setdefault(source_type, {})[key] = value
+        self.settings.save()
+        decky.logger.info(f"Source setting updated: {source_type}.{key} = {value!r}")
+
+        # Switching a category on has to pick up media that is already sitting
+        # in the drive. udev fired when it went in, we declined it because the
+        # category was off, and udev will not fire again.
+        if source_type == "storage" and self.storage_source is not None:
+            try:
+                await self.storage_source.rescan()
+            except Exception as e:
+                decky.logger.warning(f"set_source_setting: rescan failed: {e}")
+
+        await self._publish_statuses(force=True)
+        return True

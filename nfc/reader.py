@@ -109,62 +109,61 @@ class PN532UARTReader(Reader):
         # ensure the path is present before attempting to open serial
         if not os.path.exists(self.device_path):
             return False
-        try:
-            import serial
-            from adafruit_pn532.uart import PN532_UART
-            import asyncio
+        import asyncio
+        return await asyncio.to_thread(self._connect_blocking)
 
+    def _connect_blocking(self) -> bool:
+        """Synchronous connect with a hard 5-second deadline via threading.Timer.
+
+        asyncio.wait_for cannot cancel a running thread on Python 3.9, so we
+        use threading.Timer to force-close the serial port when the deadline
+        expires.  Closing the port causes the adafruit_pn532 I/O loops to
+        raise within one poll cycle (~10 ms) rather than blocking for 30 s.
+
+        The timer must start BEFORE PN532_UART() is constructed because the
+        constructor itself calls _wakeup() → SAM_configuration() and reads
+        firmware_version — all of which can block on the wrong device.
+        """
+        import serial
+        import time
+        import threading
+        from adafruit_pn532.uart import PN532_UART
+
+        timed_out = [False]
+
+        def _on_timeout():
+            timed_out[0] = True
+            self.close()  # closing the port causes in_waiting/write to raise
+
+        timer = threading.Timer(5.0, _on_timeout)
+        try:
             self.uart = serial.Serial(
                 self.device_path,
                 baudrate=self.baudrate,
                 timeout=0.1,
-                write_timeout=1.0
+                write_timeout=0.5,
             )
+            # Start timer BEFORE PN532_UART.__init__ — the constructor calls
+            # _wakeup() which runs SAM_configuration + firmware_version and
+            # can block for 30 s on a wrong/unresponsive device without this.
+            timer.start()
             self._reader = PN532_UART(self.uart, debug=False)
+            if timed_out[0]:
+                return False
 
-            # Add timeout for firmware version check to prevent indefinite hangs
-            try:
-                version = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: self._reader.firmware_version),
-                    timeout=2.0
-                )
-            except asyncio.TimeoutError:
-                if self.logger:
-                    self.logger.error("Firmware version check timed out")
-                self.close()
-                return False
-            
-            if not version:
-                if self.logger:
-                    self.logger.error("Failed to retrieve firmware version")
-                self.close()
-                return False
-            
-            # Configure SAM with error handling
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(self._reader.SAM_configuration),
-                    timeout=2.0
-                )
-            except asyncio.TimeoutError:
-                if self.logger:
-                    self.logger.error("SAM configuration timed out")
-                self.close()
-                return False
-            except Exception as e:
-                if self.logger:
-                    self.logger.error(f"SAM configuration failed: {e}")
-                self.close()
-                return False
-            
+            timer.cancel()
+            # Brief settle — some PN532 modules glitch the serial line
+            # immediately after SAM configuration before accepting polls.
+            time.sleep(0.5)
             return True
-            # firmware fetch failed
+
         except Exception as e:
             if self.logger:
                 self.logger.error(f"PN532UARTReader.connect failed: {e}")
-        # on any failure clean up
-        self.close()
-        return False
+            self.close()
+            return False
+        finally:
+            timer.cancel()
 
     def close(self) -> None:
         if self.uart:

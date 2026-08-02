@@ -5,13 +5,19 @@
   "type": "module",
   "scripts": {
     "build": "rollup -c",
-    "debug": "ssh deck@steamdeck.local && journalctl | grep PluginLoader",
-    "debug2": "ssh deck@steamdeck.local && cat \"$(ls -t ~/homebrew/logs/decky-links/*.log | head -n 1)\"",
+    "logs": "./scripts/deck.sh logs",
+    "logs:follow": "./scripts/deck.sh follow",
+    "logs:loader": "./scripts/deck.sh loader",
+    "deck:status": "./scripts/deck.sh status",
+    "deck:restart": "./scripts/deck.sh restart",
     "deploy": "rsync -rtv --no-perms --no-owner --no-group --chmod=Du=rwx,Dg=rx,Do=rx,Fu=rw,Fg=r,Fo=r --rsh='ssh' ./ deck@steamdeck.local:~/homebrew/plugins/decky-links --exclude .git --exclude node_modules --exclude .venv --exclude .pytest_cache --exclude __pycache__ --exclude .vscode --exclude dist --exclude out --exclude tests --exclude '*.pyc'",
     "stop": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl stop plugin_loader\" && ssh deck@steamdeck.local \"echo 'ssap' | sudo -S chown -R deck:deck /home/deck/homebrew/plugins/\"",
     "start": "ssh deck@steamdeck.local \"echo 'ssap' | sudo -S systemctl start plugin_loader\"",
     "watch": "rollup -c -w",
-    "test": "PYTHONPATH=. .venv/bin/pytest -q"
+    "test": ".venv/bin/pytest -q",
+    "deck:udev": "./scripts/deck.sh udev",
+    "deck:mount-test": "./scripts/deck.sh mount-test",
+    "deck:format": "./scripts/deck.sh format"
   },
   "repository": {
     "type": "git",
@@ -33,7 +39,7 @@
   "homepage": "https://github.com/kmturley/decky-links#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
-    "@decky/ui": "^4.11.3",
+    "@decky/ui": "^4.11.4",
     "@rollup/rollup-linux-x64-musl": "^4.53.3",
     "@types/react": "19.1.1",
     "@types/react-dom": "19.1.1",

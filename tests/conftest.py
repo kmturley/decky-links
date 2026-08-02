@@ -94,29 +94,52 @@ def plugin(tmp_path):
 
     # Settings mock — returns sensible defaults
     _settings = {
-        "device_path":      "/dev/ttyUSB0",
-        "baudrate":         115200,
-        "polling_interval": 0.5,
-        "auto_launch":      True,
-        "auto_close":       False,
-        "reader_type":      "pn532_uart",
+        "auto_launch": True,
+        "auto_close": False,
+        "sources": {
+            "nfc": {
+                "device_path": "/dev/ttyUSB0",
+                "baudrate": 115200,
+                "polling_interval": 0.5,
+                "reader_type": "pn532_uart",
+            }
+        },
     }
     mock_settings        = MagicMock(spec=SettingsManager)
-    mock_settings.get    = lambda k: _settings.get(k)
-    mock_settings.set    = lambda k, v: _settings.update({k: v})
+    def _get_setting(key, default=None):
+        if key in ("auto_launch", "auto_close"):
+            return _settings.get(key, default)
+        return _settings["sources"]["nfc"].get(key, default)
+    def _set_setting(key, value):
+        if key in ("auto_launch", "auto_close"):
+            _settings[key] = value
+        else:
+            _settings["sources"]["nfc"][key] = value
+    mock_settings.get = _get_setting
+    mock_settings.set = _set_setting
+    mock_settings.get_source_settings = lambda source_type: _settings["sources"][source_type]
     mock_settings.settings = _settings
     p.settings = mock_settings
 
     # Key manager for custom Mifare Classic keys
     p.key_manager = KeyManager()
 
-    # Hardware mocks — we now use a generic Reader interface
-    p.reader = MagicMock()
-    # ensure the convenience helper exists; tests patch read_uid explicitly when
-    # they need to simulate a UID
-    p.reader.read_uid = MagicMock()
-    # existing code occasionally references p.uart; keep a dummy for now
-    p.uart   = MagicMock()
+    # Architecture components
+    p._event_queue = asyncio.Queue()
+    from sources.manager import SourceManager
+    from sources.nfc_source import NfcSource
+
+    p.source_manager = SourceManager(p._event_queue, logger=_mock_decky.logger)
+    p.nfc_source = NfcSource(p.settings.get_source_settings("nfc"), logger=_mock_decky.logger)
+
+    # Hardware mock reader — tests configure this to control NFC behaviour.
+    # Reads return a valid NTAG215 capability container by default (magic 0xE1,
+    # version, 0x3E×8 = 496 bytes of user memory), so the default tag under test
+    # is a real, writable NTAG. A bare MagicMock here would read as a tag whose
+    # CC cannot be parsed, which the write path now correctly refuses.
+    p.nfc_source._reader = MagicMock()
+    p.nfc_source._reader.read_uid = MagicMock()
+    p.nfc_source._reader.ntag2xx_read_block.return_value = bytes([0xE1, 0x10, 0x3E, 0x00])
 
     # Plugin state
     p.state           = PluginState.READY
@@ -126,10 +149,11 @@ def plugin(tmp_path):
     p.current_tag_uid = None
     p.current_tag_uri = None
     p.current_tag_meta = {}
-    
-    # Tag classification cache (added in code review fixes)
-    p._tag_classification_cache = {}
-    p._tag_cache_max_size = 128
+
+    # Sync NfcSource with initial plugin state
+    p.nfc_source.current_tag_uid = p.current_tag_uid
+    p.nfc_source.current_tag_uri = p.current_tag_uri
+    p.nfc_source.current_tag_meta = p.current_tag_meta
 
     return p
 

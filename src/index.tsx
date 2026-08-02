@@ -1,15 +1,13 @@
 import {
-  ButtonItem,
   PanelSection,
   PanelSectionRow,
   Router,
   staticClasses,
-  TextField,
   ToggleField,
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
-import { FC, ReactNode } from "react";
-import { FaLink, FaCircle, FaGamepad, FaMicrochip, FaHashtag } from "react-icons/fa";
+import { FC } from "react";
+import { FaLink } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
 import {
@@ -17,59 +15,56 @@ import {
   toaster,
   setSetting,
   sharedState,
-  cancelPairing,
-  startPairing,
   notifySubscribers,
   settingsRef,
-  type Settings,
+  SourceType,
+  type SettingKey,
 } from "./shared";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // (the rest of the file remains unchanged)
 
 
-import { KeyManagementPanel } from "./KeyManagementPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { resolveRungameidTarget } from "./lib/steamIds";
+import { TriggersPanel } from "./TriggersPanel";
 
 function getMainRunningApp() {
   const appRaw = Router.MainRunningApp;
   return typeof appRaw === "function" ? (appRaw as any)() : appRaw;
 }
 
-async function triggerPairing() {
-  if (sharedState.pairing) {
-    await cancelPairing();
-    sharedState.pairing = false;
-    notifySubscribers();
-    return;
-  }
-
+/** The game "Pair Current Game" should target.
+ *
+ * A running game wins; otherwise fall back to the detail page the user is
+ * looking at. Pairing a card for a game you are browsing is the common case —
+ * requiring it to be running first made the button useless most of the time.
+ * Returns null when neither is available, which also drives the disabled state.
+ */
+function resolvePairTarget(): { uri: string; label: string } | null {
   const app = getMainRunningApp();
-  if (!app || !app.appid || app.appid === "0") {
-    toaster.toast({ title: "Pairing Error", body: "No active game detected to pair.", critical: true });
-    return;
+  if (app && app.appid && app.appid !== "0") {
+    const uri = resolveRungameidTarget(String(app.appid));
+    if (uri) {
+      return { uri, label: app.display_name || `App ${app.appid}` };
+    }
   }
 
-  const uri = resolveRungameidTarget(String(app.appid));
-  if (!uri) {
-    toaster.toast({ title: "Pairing Error", body: "Invalid app ID.", critical: true });
-    return;
-  }
-  console.info(`[ Decky Links ] Starting pairing for: ${uri}`);
-  const ok = await startPairing(uri);
-  if (!ok) {
-    toaster.toast({ title: "Pairing Error", body: "Failed to start pairing mode.", critical: true });
-    return;
+  const viewed = sharedState.viewedApp;
+  if (viewed?.launchTarget) {
+    return { uri: viewed.launchTarget, label: viewed.name || `App ${viewed.appId}` };
   }
 
-  sharedState.pairing = true;
-  notifySubscribers();
+  return null;
 }
 
-async function triggerUpdateSetting(key: keyof Settings, value: any) {
+/** Update one of the two top-level behaviour switches.
+ *
+ * Per-source settings do not come through here — the Triggers panel writes
+ * those with setSourceSetting, which the backend validates per source. */
+async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
     toaster.toast({ title: "Settings Error", body: `Invalid value for ${key}.`, critical: true });
@@ -82,25 +77,6 @@ async function triggerUpdateSetting(key: keyof Settings, value: any) {
   notifySubscribers();
 }
 
-const StatusRow: FC<{ icon: ReactNode; label: string; value: string; active: boolean }> = ({ icon, label, value, active }) => (
-  <div style={{
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    padding: "4px 8px",
-    fontSize: "0.9em"
-  }}>
-    <div style={{ color: active ? "#4CAF50" : "#757575", display: "flex", alignItems: "center" }}>
-      {icon}
-    </div>
-    <div style={{ flex: 1, opacity: active ? 1 : 0.6 }}>
-      <span style={{ fontWeight: "bold" }}>{label}: </span>
-      <span style={{ fontFamily: "monospace" }}>{value}</span>
-    </div>
-    <FaCircle size={8} color={active ? "#4CAF50" : "#333"} />
-  </div>
-);
-
 const Content: FC = () => {
   // Subscribe to sharedState — re-renders automatically when BackgroundManager
   // calls notifySubscribers(), even while QA panel was closed in between.
@@ -108,41 +84,25 @@ const Content: FC = () => {
 
   if (!state.settings) return null;
 
+  // Recomputed each render: sharedState.viewedApp changes trigger a re-render
+  // via notifySubscribers(), so this stays in step with what's on screen.
+  const pairTarget = resolvePairTarget();
+
+  // Mifare tooling below is NFC-only, and now reads the per-source registry
+  // rather than the single global slot — a disk in a drive must not put the
+  // sector editor on screen.
+  const nfcMedium = Object.values(state.activeMedia).find(
+    (m) => m.source_type === SourceType.NFC,
+  );
+
   return (
     <PanelSection>
-      <PanelSection title="Status">
-        <StatusRow
-          icon={<FaMicrochip />}
-          label="Reader"
-          value={state.readerStatus.connected ? state.readerStatus.path.split('/').pop() || state.readerStatus.path : "Not Found"}
-          active={state.readerStatus.connected}
-        />
-        <StatusRow
-          icon={<FaHashtag />}
-          label="Tag"
-          value={state.tagUid ? state.tagUid : "Not Connected"}
-          active={!!state.tagUid}
-        />
-        <StatusRow
-          icon={<FaLink />}
-          label="Url"
-          value={state.tagUri ?? "Empty"}
-          active={!!state.tagUri}
-        />
-        <StatusRow
-          icon={<FaGamepad />}
-          label="Game"
-          value={state.activeAppId ? `Playing ${state.activeAppId}` : "Not Playing"}
-          active={!!state.activeAppId}
-        />
-        <ButtonItem
-          layout="below"
-          onClick={triggerPairing}
-          disabled={!state.readerStatus.connected}
-        >
-          {state.pairing ? "Cancel Pairing" : "Pair Current Game"}
-        </ButtonItem>
-      </PanelSection>
+      <TriggersPanel
+        statuses={state.sourceStatuses}
+        media={state.activeMedia}
+        target={pairTarget}
+        pairing={state.pairing}
+      />
 
       <PanelSection title="Settings">
         <PanelSectionRow>
@@ -161,18 +121,14 @@ const Content: FC = () => {
             onChange={(v: boolean) => triggerUpdateSetting("auto_close", v)}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <TextField
-            label="Device Path"
-            value={state.settings.device_path}
-            onChange={(e) => triggerUpdateSetting("device_path", e.target.value)}
-          />
-        </PanelSectionRow>
       </PanelSection>
 
-      <KeyManagementPanel />
-
-      <SectorManagementPanel tagUid={state.tagUid || undefined} />
+      {/* Keys and sectors are Mifare concepts; a floppy has neither, so this
+          follows the NFC medium specifically rather than whatever was last
+          presented on any trigger. */}
+      {nfcMedium && (
+        <SectorManagementPanel tagUid={nfcMedium.media_id} />
+      )}
     </PanelSection>
   );
 };

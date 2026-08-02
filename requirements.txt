@@ -1,1 +1,13 @@
 cryptography
+pyserial                       # serial port access for PN532 UART reader
+adafruit-circuitpython-pn532   # PN532 NFC chip driver (requires pyserial)
+ndeflib                        # NDEF record encoding/decoding
+nfcpy                          # optional nfcpy reader backend
+pyudev                         # Linux-only; StorageSource degrades gracefully when not available
+zxing-cpp                      # QR decoding. Replaced pyzbar, which is a wrapper over the
+                               # *system* libzbar0 — no Python wheel could ever supply that,
+                               # so the camera source could not work on a stock Deck at all.
+                               # zxing-cpp ships self-contained manylinux wheels (~2 MB),
+                               # Apache-2.0, and is the reference C++ ZXing port.
+Pillow                         # frame loading; zxingcpp reads PIL images directly
+paho-mqtt                      # MqttSource; degrades gracefully when not available

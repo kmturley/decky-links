@@ -3,6 +3,8 @@ import {
   getSettings,
   getReaderStatus,
   getTagStatus,
+  getSourceStatuses,
+  getActiveMedia,
   setRunningGame,
   sharedState,
   settingsRef,
@@ -13,9 +15,10 @@ import {
   removeEventListener,
   toaster,
   pairingToastsSuppressed,
+  SourceType,
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
-import { extractComparableAppIdFromRungameid } from "./lib/steamIds";
+import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -35,20 +38,6 @@ function getMainRunningApp() {
   return typeof appRaw === "function" ? (appRaw as any)() : appRaw;
 }
 
-function parseSteamAppIdFromUri(uri: string | null): string | null {
-  if (!uri) {
-    return null;
-  }
-  if (uri.startsWith(STEAM_RUN_PREFIX)) {
-    return uri.replace(STEAM_RUN_PREFIX, "").split("/")[0] || null;
-  }
-  if (uri.startsWith(STEAM_RUNGAMEID_PREFIX)) {
-    const value = uri.replace(STEAM_RUNGAMEID_PREFIX, "").split("/")[0] || null;
-    return value ? extractComparableAppIdFromRungameid(value) : null;
-  }
-  return null;
-}
-
 function extractRungameidFromUri(uri: string | null): string | null {
   if (!uri || !uri.startsWith(STEAM_RUNGAMEID_PREFIX)) return null;
   return uri.replace(STEAM_RUNGAMEID_PREFIX, "").split("/")[0] || null;
@@ -56,6 +45,17 @@ function extractRungameidFromUri(uri: string | null): string | null {
 
 function canSkipLaunch(currentAppId: string | null, uriAppId: string | null): boolean {
   return !!(currentAppId && uriAppId && String(currentAppId) === String(uriAppId));
+}
+
+/** True when the user is already looking at this game's detail page.
+ *
+ * Executing a steam:// URL is not free: Steam tears down and rebuilds UI around
+ * it, which closes the Quick Access menu. Navigating to a page that is already
+ * open is pure cost, so check before issuing the command rather than after.
+ */
+function isAlreadyViewing(uriAppId: string | null): boolean {
+  const viewed = sharedState.viewedApp;
+  return !!(viewed && uriAppId && String(viewed.appId) === String(uriAppId));
 }
 
 function launchViaSteamClientUri(uri: string): boolean {
@@ -200,48 +200,174 @@ export function startBackgroundManager(): () => void {
     if (active && tag.uid) {
       sharedState.tagUid = tag.uid;
       sharedState.tagUri = tag.uri;
+      // get_tag_status only ever reports the NFC reader's view.
+      sharedState.tagSourceType = SourceType.NFC;
       tagUidRef.current = tag.uid;
     } else if (active) {
       sharedState.tagUid = null;
       sharedState.tagUri = null;
+      sharedState.tagSourceType = null;
       tagUidRef.current = null;
+    }
+
+    const statuses = await getSourceStatuses();
+    if (active) {
+      sharedState.sourceStatuses = statuses;
+    }
+
+    // Seed the per-source view: media already presented before the panel was
+    // ever opened would otherwise be invisible until it is removed and
+    // re-presented.
+    const media = await getActiveMedia();
+    if (active) {
+      sharedState.activeMedia = Object.fromEntries(
+        (media ?? []).map((m) => [m.source_id, {
+          ...m,
+          problem: m.uri ? null : ("blank" as const),
+        }]),
+      );
     }
 
     notifySubscribers();
   };
   init();
 
+  // A medium is present but not yet readable. Recorded as a normal entry with
+  // problem: "loading" so it occupies its row the same way a real medium does
+  // — the row is what the user is watching, and it has to stop saying "No
+  // disk" the moment the disk goes in, not a minute later when it mounts.
+  // Always superseded by tag_detected/uri_detected for the same source.
+  const loadingListener = addEventListener<[data: {
+    source_id?: string, source_type?: string, media_id?: string, drive_kind?: string,
+  }]>("media_loading", (data) => {
+    if (!data?.source_id) return;
+    sharedState.activeMedia = {
+      ...sharedState.activeMedia,
+      [data.source_id]: {
+        source_id: data.source_id,
+        source_type: (data.source_type as SourceType) ?? SourceType.STORAGE,
+        media_id: data.media_id ?? "",
+        uri: null,
+        drive_kind: data.drive_kind ?? null,
+        problem: "loading",
+      },
+    };
+    notifySubscribers();
+  });
+
   // event listeners
-  const tagListener = addEventListener<[data: { uid: string }]>("tag_detected", (data) => {
+  const tagListener = addEventListener<[data: {
+    uid: string, source_type?: string, source_id?: string, drive_kind?: string,
+  }]>("tag_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     sharedState.tagUid = data.uid;
     sharedState.tagUri = null;
+    // Absent source_type means NFC: that is the only source that predates the
+    // field, and every other one sets it explicitly.
+    sharedState.tagSourceType = (data.source_type as SourceType) ?? SourceType.NFC;
+    sharedState.mediaProblem = null;
+    // Per-source record, so a tag and a disk can be present at once and each
+    // gets its own row and Pair button in the Triggers list.
+    if (data.source_id) {
+      sharedState.activeMedia = {
+        ...sharedState.activeMedia,
+        [data.source_id]: {
+          source_id: data.source_id,
+          source_type: (data.source_type as SourceType) ?? SourceType.NFC,
+          media_id: data.uid,
+          uri: null,
+          drive_kind: data.drive_kind ?? null,
+          problem: null,
+        },
+      };
+    }
     tagUidRef.current = data.uid;
     notifySubscribers();
   });
 
-  const removeListener = addEventListener("tag_removed", () => {
+  const removeListener = addEventListener<[data?: { source_id?: string }]>("tag_removed", (data) => {
     sharedState.tagUid = null;
     sharedState.tagUri = null;
+    sharedState.tagSourceType = null;
+    sharedState.mediaProblem = null;
+    if (data?.source_id) {
+      const { [data.source_id]: _gone, ...rest } = sharedState.activeMedia;
+      sharedState.activeMedia = rest;
+    } else {
+      sharedState.activeMedia = {};
+    }
     tagUidRef.current = null;
     notifySubscribers();
   });
 
-  const statusListener = addEventListener<[data: { connected: boolean, path: string }]>("reader_status", (data) => {
-    if (!data || typeof data.connected !== "boolean" || typeof data.path !== "string") return;
-    sharedState.readerStatus = data;
+  const statusListener = addEventListener<[data: { connected: boolean, path?: string, source_type?: string }]>("reader_status", (data) => {
+    if (!data || typeof data.connected !== "boolean") return;
+    sharedState.readerStatus = {
+      connected: data.connected,
+      path: data.path,
+      source_type: data.source_type as SourceType | undefined,
+    };
     notifySubscribers();
   });
 
-  const uriListener = addEventListener<[data: { uri: string | null, uid: string }]>("uri_detected", (data) => {
+  const sourceStatusesListener = addEventListener<[data: any[]]>("source_statuses", (data) => {
+    if (!Array.isArray(data)) return;
+    sharedState.sourceStatuses = data;
+    notifySubscribers();
+  });
+
+  const uriListener = addEventListener<[data: {
+    uri: string | null, uid: string, paired?: boolean, source_id?: string,
+    source_type?: SourceType,
+    blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
+  }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
-    const normalizedUid = data.uid.toUpperCase();
+    // A storage media_id is a device node, whose case is meaningful. Trust the
+    // event's own source_type when it carries one — the global tagSourceType
+    // describes whatever was presented last, which need not be this medium.
+    const sourceType = data.source_type ?? sharedState.tagSourceType;
+    const normalizedUid = sourceType === SourceType.STORAGE
+      ? data.uid
+      : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
 
     sharedState.tagUri = uri;
     sharedState.tagUid = normalizedUid;
+    const problem = uri
+      ? null
+      : data.unreadable
+        ? ({ kind: "unreadable", error: data.error } as const)
+        : data.blocked
+          ? ({ kind: "blocked" } as const)
+          : ({ kind: "blank" } as const);
+    sharedState.mediaProblem = problem;
+
+    // uri_detected does not always carry source_id (the pairing sync path
+    // emits it by media id), so fall back to matching the medium we already
+    // recorded for this uid.
+    const key = data.source_id
+      ?? Object.values(sharedState.activeMedia).find((m) => m.media_id === data.uid)?.source_id;
+    if (key && sharedState.activeMedia[key]) {
+      sharedState.activeMedia = {
+        ...sharedState.activeMedia,
+        [key]: {
+          ...sharedState.activeMedia[key],
+          uri,
+          problem: problem?.kind ?? null,
+          error: problem?.kind === "unreadable" ? data.error : undefined,
+        },
+      };
+    }
     tagUidRef.current = normalizedUid;
     notifySubscribers();
+
+    // Emitted by the backend right after writing a tag, purely so the panel
+    // stops showing "Url: Empty". Pairing must not also launch the game --
+    // the user pressed a button that only promised to write the card.
+    if (data.paired) {
+      console.info(`[ Decky Links ] Tag paired with ${uri}; updating display only.`);
+      return;
+    }
 
     if (uri) {
       const currentSettings = settingsRef.current;
@@ -280,6 +406,14 @@ export function startBackgroundManager(): () => void {
 
       // Auto-launch disabled: surface the linked game by opening details page.
       if (uriAppId) {
+        if (isAlreadyViewing(uriAppId)) {
+          console.info(`[ Decky Links ] Already viewing game ${uriAppId}. Skipping redundant navigation.`);
+          return;
+        }
+        if (canSkipLaunch(activeAppIdRef.current, uriAppId)) {
+          console.info(`[ Decky Links ] Game ${uriAppId} is already running. Skipping redundant navigation.`);
+          return;
+        }
         const detailsUri = `steam://open/games/details/${uriAppId}`;
         console.info(`[ Decky Links ] Auto-launch disabled. Opening game details: ${detailsUri}`);
         executeSteamUri(detailsUri);
@@ -301,14 +435,21 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  const gameRemovalListener = addEventListener<[data: { appid: number, uid: string, uri: string }]>("card_removed_during_game", (data) => {
+  const gameRemovalListener = addEventListener<[data: {
+    appid: number, uid: string, uri: string, action?: "close" | "pause",
+  }]>("card_removed_during_game", (data) => {
     if (!data || typeof data.uri !== "string") return;
     const currentAppId = activeAppIdRef.current;
     const currentSettings = settingsRef.current;
     const uriAppId = parseSteamAppIdFromUri(data.uri);
 
+    // The backend decides close-vs-pause: it is the only side that knows which
+    // medium launched this game. Fall back to the local setting only if we are
+    // talking to an older backend that does not send the field.
+    const action = data.action ?? (currentSettings?.auto_close ? "close" : "pause");
+
     if (canSkipLaunch(currentAppId, uriAppId)) {
-      if (currentSettings?.auto_close) {
+      if (action === "close") {
         console.info(`[ Decky Links ] Paired tag removed. Auto-closing game: ${currentAppId}`);
         void (async () => {
           if (!currentAppId || !(await terminateSteamApp(String(currentAppId), data.uri))) {
@@ -328,6 +469,7 @@ export function startBackgroundManager(): () => void {
   // polling loop omitted for brevity
 
   const pollLoop = async () => {
+    let sourcePollTick = 0;
     while (active) {
       try {
         // 1. Poll Game Status
@@ -349,6 +491,7 @@ export function startBackgroundManager(): () => void {
             if (sharedState.tagUid !== t.uid || sharedState.tagUri !== t.uri) {
               sharedState.tagUid = t.uid;
               sharedState.tagUri = t.uri;
+              sharedState.tagSourceType = SourceType.NFC;
               notifySubscribers();
             }
             tagUidRef.current = t.uid;
@@ -360,10 +503,22 @@ export function startBackgroundManager(): () => void {
         if (
           active &&
           (sharedState.readerStatus.connected !== reader.connected ||
-            sharedState.readerStatus.path !== reader.path)
+            sharedState.readerStatus.path !== reader.path ||
+            sharedState.readerStatus.source_type !== reader.source_type)
         ) {
           sharedState.readerStatus = reader;
           notifySubscribers();
+        }
+
+        // 4. Poll Source Statuses every 10 iterations (~5s)
+        sourcePollTick++;
+        if (sourcePollTick >= 10) {
+          sourcePollTick = 0;
+          const statuses = await getSourceStatuses();
+          if (active) {
+            sharedState.sourceStatuses = statuses;
+            notifySubscribers();
+          }
         }
 
       } catch (e) {
@@ -379,12 +534,14 @@ export function startBackgroundManager(): () => void {
 
   stopBackgroundManagerFn = () => {
     active = false;
+    removeEventListener("media_loading", loadingListener);
     removeEventListener("tag_detected", tagListener);
     removeEventListener("tag_removed", removeListener);
     removeEventListener("reader_status", statusListener);
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
+    removeEventListener("source_statuses", sourceStatusesListener);
     stopBackgroundManagerFn = null;
   };
 

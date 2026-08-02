@@ -30,9 +30,17 @@ class SignatureManager:
         self.crypto_available = CRYPTO_AVAILABLE
         self.logger = logger
         
-        # Warn if cryptography is not available
+        # Signing requires cryptography. There is deliberately no fallback: the
+        # previous symmetric-HMAC substitute used a "public" key byte-identical
+        # to the private one, so publishing it let anyone forge signatures, and
+        # it was indistinguishable from real ECDSA to callers. Signing now fails
+        # closed instead of quietly degrading.
         if not self.crypto_available and self.logger:
-            self.logger.warning("cryptography library not installed; signing features disabled")
+            self.logger.error(
+                "cryptography library not installed — signing and verification "
+                "are DISABLED. Verification returns False rather than risk "
+                "reporting an unverified record as authentic."
+            )
         
         if keys_path:
             self.load()
@@ -55,13 +63,13 @@ class SignatureManager:
         self._require_crypto()
         private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
         public_key = private_key.public_key()
-        
+
         private_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ).decode('utf-8')
-        
+
         public_pem = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -89,21 +97,17 @@ class SignatureManager:
             ValueError: If keys are invalid or use weak algorithms
         """
         self._require_crypto()
-        
-        # Load and validate public key
         public_key = serialization.load_pem_public_key(
-            public_key_pem.encode('utf-8'), 
+            public_key_pem.encode('utf-8'),
             default_backend()
         )
-        
-        # Verify it's an EC key with sufficient strength
+
         if not isinstance(public_key, ec.EllipticCurvePublicKey):
             raise ValueError("Only ECDSA keys are supported")
-        
+
         if public_key.curve.name not in ("secp256r1", "secp384r1", "secp521r1"):
             raise ValueError(f"Weak curve: {public_key.curve.name}. Use secp256r1 or stronger.")
-        
-        # Validate private key if provided
+
         if private_key_pem:
             private_key = serialization.load_pem_private_key(
                 private_key_pem.encode('utf-8'),
@@ -158,7 +162,6 @@ class SignatureManager:
             KeyError: If key_id not found
             ValueError: If private key not available
         """
-        self._require_crypto()
         if key_id not in self.signing_keys:
             raise KeyError(f"Key ID {key_id} not found")
         
@@ -166,14 +169,13 @@ class SignatureManager:
         if not private_key_pem:
             raise ValueError(f"Private key not available for {key_id}")
         
+        self._require_crypto()
         private_key = serialization.load_pem_private_key(
             private_key_pem.encode('utf-8'),
             password=None,
             backend=default_backend()
         )
-        
-        signature = private_key.sign(data, ec.ECDSA(hashes.SHA256()))
-        return signature
+        return private_key.sign(data, ec.ECDSA(hashes.SHA256()))
 
     def verify_signature(self, key_id: str, data: bytes, signature: bytes) -> bool:
         """Verify signature using public key.
@@ -186,16 +188,25 @@ class SignatureManager:
         Returns:
             True if signature is valid, False otherwise
         """
-        self._require_crypto()
         if key_id not in self.signing_keys:
             return False
         
         public_key_pem = self.signing_keys[key_id]['public_key']
+
+        if not self.crypto_available:
+            # Fail closed. Returning True without real verification would be far
+            # worse than refusing — callers treat True as proof of authenticity.
+            if self.logger:
+                self.logger.error(
+                    "Cannot verify signature: cryptography is not installed."
+                )
+            return False
+
         public_key = serialization.load_pem_public_key(
             public_key_pem.encode('utf-8'),
             default_backend()
         )
-        
+
         try:
             public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
             return True

@@ -93,7 +93,8 @@
             "detail": "",
             "type": "shell",
             "group": "none",
-            "command": "echo '${config:deckdir}/homebrew/plugins/${config:pluginname}.zip' && ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo ${config:deckpass} | sudo -S mkdir -m 755 -p \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S chown ${config:deckuser}:${config:deckuser} \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S bsdtar -xzpf \"${config:deckdir}/homebrew/plugins/${config:pluginname}.zip\" -C \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" --strip-components=1 --fflags '",
+            "detail": "Wipes the installed plugin dir, then extracts the freshly copied zip. The wipe matters: bsdtar merges into whatever is already there, so without it every deploy leaves the previous build's files behind (stale .so files for old Python versions, modules deleted or renamed since). Plugin settings live in ~/homebrew/settings and are untouched.",
+            "command": "echo '${config:deckdir}/homebrew/plugins/${config:pluginname}.zip' && ssh ${config:deckuser}@${config:deckip} -p ${config:deckport} ${config:deckkey} 'echo ${config:deckpass} | sudo -S rm -rf \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S mkdir -m 755 -p \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S chown ${config:deckuser}:${config:deckuser} \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" && echo ${config:deckpass} | sudo -S bsdtar -xzpf \"${config:deckdir}/homebrew/plugins/${config:pluginname}.zip\" -C \"$(echo \"${config:deckdir}/homebrew/plugins/${config:pluginname}\" | sed \"s| |-|g\")\" --strip-components=1 --fflags '",
             "problemMatcher": []
         },
         //"All-in-one" deploy task
@@ -103,7 +104,12 @@
             "group": "none",
             "dependsOn": [
                 "copyzip",
-                "extractzip"
+                "extractzip",
+                // Decky's file watcher does not reliably pick up a deploy that
+                // rm -rf's the directory out from under it, and the uid a plugin
+                // runs as is fixed when its process spawns — so a "root" flag
+                // only takes effect after a real restart, never a hot reload.
+                "restartdecky"
             ],
             "problemMatcher": []
         },
