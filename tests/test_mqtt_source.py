@@ -18,7 +18,10 @@ def _make_source(settings=None):
         "broker_host": "localhost",
         "broker_port": 1883,
         "topic": "decky-links",
-        "secret": "",
+        # A secret is mandatory now: without one this source is an
+        # unauthenticated remote trigger, so start() refuses and _on_message
+        # drops everything. Tests that care about its absence set it to "".
+        "secret": "s3cret",
     }
     if settings:
         defaults.update(settings)
@@ -55,6 +58,11 @@ def _make_mqtt_msg(payload: bytes, topic: str = "decky-links"):
     msg.topic = topic
     msg.payload = payload
     return msg
+
+
+def _signed(body: dict, secret: str = "s3cret"):
+    """An mqtt message carrying the shared secret _make_source expects."""
+    return _make_mqtt_msg(json.dumps({**body, "secret": secret}).encode())
 
 
 # ── source_id ─────────────────────────────────────────────────────────────────
@@ -119,6 +127,56 @@ class TestStart:
             ok = await src.start()
         assert ok is False
         assert not src.is_active()
+
+    @pytest.mark.asyncio
+    async def test_start_refuses_without_a_shared_secret(self):
+        """With no secret this source is an unauthenticated remote trigger:
+        anything able to publish to the topic can launch games on the device.
+        It was empty by default and one toggle away."""
+        src = _make_source({"secret": ""})
+        mock_paho, mock_mqtt, mock_client_mod, mock_client = _make_paho_mock()
+        with patch.dict(sys.modules, _paho_sys_modules(mock_paho, mock_mqtt, mock_client_mod)):
+            ok = await src.start()
+        assert ok is False
+        assert not src.is_active()
+        mock_client.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_broker_credentials_are_applied_when_set(self):
+        src = _make_source({"username": "deck", "password": "hunter2"})
+        mock_paho, mock_mqtt, mock_client_mod, mock_client = _make_paho_mock()
+        with patch.dict(sys.modules, _paho_sys_modules(mock_paho, mock_mqtt, mock_client_mod)):
+            await src.start()
+        mock_client.username_pw_set.assert_called_once_with("deck", "hunter2")
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_sent_when_unset(self):
+        src = _make_source()
+        mock_paho, mock_mqtt, mock_client_mod, mock_client = _make_paho_mock()
+        with patch.dict(sys.modules, _paho_sys_modules(mock_paho, mock_mqtt, mock_client_mod)):
+            await src.start()
+        mock_client.username_pw_set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tls_is_enabled_when_requested(self):
+        src = _make_source({"tls": True})
+        mock_paho, mock_mqtt, mock_client_mod, mock_client = _make_paho_mock()
+        with patch.dict(sys.modules, _paho_sys_modules(mock_paho, mock_mqtt, mock_client_mod)):
+            ok = await src.start()
+        assert ok is True
+        mock_client.tls_set.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_start_fails_rather_than_falling_back_to_plaintext(self):
+        """Asking for TLS and silently connecting without it is the one
+        outcome the user cannot detect."""
+        src = _make_source({"tls": True})
+        mock_paho, mock_mqtt, mock_client_mod, mock_client = _make_paho_mock()
+        mock_client.tls_set.side_effect = RuntimeError("no ca bundle")
+        with patch.dict(sys.modules, _paho_sys_modules(mock_paho, mock_mqtt, mock_client_mod)):
+            ok = await src.start()
+        assert ok is False
+        mock_client.connect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_start_registers_on_message_callback(self):
@@ -212,8 +270,7 @@ class TestOnMessage:
 
     def test_valid_message_enqueued(self):
         src = _make_source()
-        msg = _make_mqtt_msg(json.dumps({"uri": "steam://run/999"}).encode())
-        src._on_message(None, None, msg)
+        src._on_message(None, None, _signed({"uri": "steam://run/999"}))
         assert list(src._pending) == ["steam://run/999"]
 
     def test_missing_uri_rejected(self):
@@ -262,17 +319,40 @@ class TestOnMessage:
         src._on_message(None, None, msg)
         assert len(src._pending) == 0
 
-    def test_no_secret_configured_accepts_without_secret_field(self):
+    def test_no_secret_configured_rejects_everything(self):
+        """Fail closed. start() refuses without a secret, so an empty one here
+        means it was cleared underneath us — reverting to accepting anything
+        would turn a cleared field into an open remote trigger."""
         src = _make_source({"secret": "", "enabled": True})
         msg = _make_mqtt_msg(json.dumps({"uri": "steam://run/1"}).encode())
         src._on_message(None, None, msg)
-        assert len(src._pending) == 1
+        assert len(src._pending) == 0
+
+    def test_message_without_the_secret_is_rejected(self):
+        src = _make_source()
+        src._on_message(None, None, _make_mqtt_msg(
+            json.dumps({"uri": "steam://run/1"}).encode()
+        ))
+        assert len(src._pending) == 0
+
+    def test_message_with_the_wrong_secret_is_rejected(self):
+        src = _make_source()
+        src._on_message(None, None, _signed({"uri": "steam://run/1"}, "wrong"))
+        assert len(src._pending) == 0
+
+    def test_non_string_secret_is_rejected(self):
+        """compare_digest raises on a non-str, which would surface as an
+        exception on paho's thread rather than a rejection."""
+        src = _make_source()
+        src._on_message(None, None, _make_mqtt_msg(
+            json.dumps({"uri": "steam://run/1", "secret": 12345}).encode()
+        ))
+        assert len(src._pending) == 0
 
     def test_multiple_messages_queued(self):
         src = _make_source()
         for i in range(3):
-            msg = _make_mqtt_msg(json.dumps({"uri": f"steam://run/{i}"}).encode())
-            src._on_message(None, None, msg)
+            src._on_message(None, None, _signed({"uri": f"steam://run/{i}"}))
         assert len(src._pending) == 3
 
 
@@ -301,8 +381,7 @@ class TestIntegration:
         assert ok
 
         # Simulate message arriving on paho's thread
-        msg = _make_mqtt_msg(json.dumps({"uri": "steam://run/7"}).encode())
-        src._on_message(None, None, msg)
+        src._on_message(None, None, _signed({"uri": "steam://run/7"}))
 
         event = await src.poll()
         assert event is not None
@@ -323,9 +402,7 @@ class TestPendingBufferIsBounded:
     def test_buffer_does_not_grow_without_limit(self):
         src = _make_source()
         for i in range(src.MAX_PENDING * 3):
-            src._on_message(None, None, _make_mqtt_msg(
-                json.dumps({"uri": f"https://example.com/{i}"}).encode()
-            ))
+            src._on_message(None, None, _signed({"uri": f"https://example.com/{i}"}))
         assert len(src._pending) == src.MAX_PENDING
 
     def test_oldest_are_dropped_so_the_newest_intent_survives(self):
@@ -333,9 +410,7 @@ class TestPendingBufferIsBounded:
         on, and a backlog of stale ones is what should be shed."""
         src = _make_source()
         for i in range(src.MAX_PENDING + 10):
-            src._on_message(None, None, _make_mqtt_msg(
-                json.dumps({"uri": f"https://example.com/{i}"}).encode()
-            ))
+            src._on_message(None, None, _signed({"uri": f"https://example.com/{i}"}))
         assert src._pending[-1] == f"https://example.com/{src.MAX_PENDING + 9}"
         assert "https://example.com/0" not in src._pending
 
@@ -346,8 +421,6 @@ class TestPendingBufferIsBounded:
         src = _make_source()
         src._logger = logger
         for i in range(src.MAX_PENDING + 5):
-            src._on_message(None, None, _make_mqtt_msg(
-                json.dumps({"uri": f"https://example.com/{i}"}).encode()
-            ))
+            src._on_message(None, None, _signed({"uri": f"https://example.com/{i}"}))
         assert src._dropped == 5
         assert any("buffer full" in str(c) for c in logger.warning.call_args_list)

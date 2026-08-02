@@ -17,7 +17,19 @@ export interface Settings {
         };
         storage?: { enabled: boolean; drive_kinds?: Record<string, boolean> };
         camera?: { enabled: boolean; device: string; poll_interval: number };
-        mqtt?: { enabled: boolean; broker_host: string; broker_port: number; topic: string; secret: string };
+        /** `secret` is mandatory: MQTT will not start without one, because
+         *  anything able to publish to the topic can launch games on this
+         *  device. Enabling the source mints one if it is empty. */
+        mqtt?: {
+            enabled: boolean;
+            broker_host: string;
+            broker_port: number;
+            topic: string;
+            secret: string;
+            tls?: boolean;
+            username?: string;
+            password?: string;
+        };
         serial?: { enabled: boolean; port: string; baudrate: number };
         file_watch?: { enabled: boolean; watch_dir: string; poll_interval: number };
     };

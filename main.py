@@ -16,11 +16,13 @@ if _py_modules not in sys.path:
 
 import asyncio
 import time
+import ipaddress
 import json
 import traceback
 import subprocess
 import threading
 import re
+import secrets
 from enum import Enum
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, List
@@ -43,6 +45,7 @@ from sources.file_watch_source import FileWatchSource
 
 import decky
 
+import settings_schema
 from cards import PRINT_DPI
 from nfc.key_manager import KeyManager
 
@@ -68,24 +71,57 @@ STEAM_APPID_PATTERN = re.compile(r'^[0-9]{1,10}$')
 # Only differences are emitted, so an idle plugin sends nothing.
 STATUS_TICK_SECONDS = 2.0
 
-TOP_LEVEL_SETTING_KEYS = {
-    "auto_launch",
-    "auto_close",
-}
-
-NFC_SETTING_KEYS = {
-    "device_path",
-    "baudrate",
-    "polling_interval",
-    "reader_type",
-}
-
+# Derived from settings_schema rather than restated here. They were duplicated
+# in three places and the copies had already drifted — see that module.
+TOP_LEVEL_SETTING_KEYS = settings_schema.TOP_LEVEL_SETTING_KEYS
+NFC_SETTING_KEYS = settings_schema.NFC_SETTING_KEYS
 ALLOWED_SETTING_KEYS = TOP_LEVEL_SETTING_KEYS | NFC_SETTING_KEYS
 
 
 # -----------------------------------------------------------------------
 # State Machine (Spec §5)
 # -----------------------------------------------------------------------
+
+def _is_local_host(hostname: str) -> bool:
+    """True when a hostname literal points at this machine or its network.
+
+    Scope, stated because the old check invited a bigger reading than it
+    delivered: this stops a tapped card opening the Deck's own services or a
+    box on the same LAN in the Steam browser. It is a check on the *literal*
+    in the URI, so it cannot stop a public name that resolves to a private
+    address — doing that means resolving at launch time and racing DNS, which
+    is not worth it for the threat here (the user physically taps the card).
+
+    What it does now cover, and did not before, is everything other than the
+    three exact strings 'localhost', '127.0.0.1' and '::1': the rest of
+    127.0.0.0/8, the bracketed IPv6 form, IPv4-mapped IPv6, the RFC1918
+    ranges, link-local including the cloud metadata address, and .local names.
+    """
+    host = hostname.strip().strip('[]').lower()
+    if not host:
+        return True
+
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return True
+
+    try:
+        # ip_address handles IPv4, IPv6 and the ::ffff:127.0.0.1 mapped form,
+        # so the numeric variants do not need enumerating by hand.
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+
+    if getattr(addr, "ipv4_mapped", None) is not None:
+        addr = addr.ipv4_mapped
+
+    return (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local      # includes 169.254.169.254
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
 
 class PluginState(Enum):
     """Plugin state machine (Spec §5).
@@ -156,7 +192,14 @@ class SettingsManager:
                     "broker_host": "localhost",
                     "broker_port": 1883,
                     "topic": "decky-links",
+                    # Empty means the source will refuse to start. Anything
+                    # able to publish to the topic can launch games on this
+                    # device, so there is no sensible default here — see
+                    # MqttSource.start.
                     "secret": "",
+                    "tls": False,
+                    "username": "",
+                    "password": "",
                 },
                 "serial": {
                     "enabled": False,
@@ -191,20 +234,36 @@ class SettingsManager:
         except Exception as e:
             decky.logger.error(f"Failed to load settings: {e}")
 
-    def save(self):
+    def save(self) -> bool:
+        """Persist the settings. Returns whether they actually reached disk.
+
+        The return value matters: this used to fail silently on a permissions
+        error while set_setting went on to return True to the frontend, so the
+        panel showed a toggle as saved when nothing had been written and the
+        old value came back on the next restart.
+
+        Written to a temp file and renamed so an interrupted write cannot
+        leave a truncated settings.json, which loads as invalid JSON and
+        resets every preference the user had.
+        """
         try:
             dir_path = os.path.dirname(self.path)
             os.makedirs(dir_path, exist_ok=True)
-            # Check write permissions before attempting to write
             if not os.access(dir_path, os.W_OK):
                 decky.logger.error(f"No write permission for settings directory: {dir_path}")
-                return
-            with open(self.path, "w") as f:
+                return False
+            tmp_path = f"{self.path}.tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(self.settings, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.path)
+            return True
         except IOError as e:
             decky.logger.error(f"Failed to write settings file {self.path}: {e}")
         except Exception as e:
             decky.logger.error(f"Failed to save settings: {e}")
+        return False
 
     def get(self, key):
         if key in TOP_LEVEL_SETTING_KEYS:
@@ -213,7 +272,8 @@ class SettingsManager:
             return self.settings["sources"]["nfc"].get(key)
         return self.settings.get(key)
 
-    def set(self, key, value):
+    def set(self, key, value) -> bool:
+        """Store one setting and persist. Returns whether the write succeeded."""
         if key in TOP_LEVEL_SETTING_KEYS:
             self.settings[key] = value
         elif key in NFC_SETTING_KEYS:
@@ -222,24 +282,12 @@ class SettingsManager:
             self.settings["sources"]["nfc"].update(value)
         else:
             self.settings[key] = value
-        self.save()
+        return self.save()
 
     def _validate_setting(self, key, value) -> bool:
-        if key == "device_path":
-            return (
-                isinstance(value, str)
-                and len(value) <= 255
-                and value.startswith("/dev/")
-            )
-        if key == "baudrate":
-            return isinstance(value, int) and 1200 <= value <= 1_000_000
-        if key == "polling_interval":
-            return isinstance(value, (int, float)) and 0.1 <= float(value) <= 10.0
-        if key in ("auto_launch", "auto_close"):
-            return isinstance(value, bool)
-        if key == "reader_type":
-            return isinstance(value, str) and value in ("pn532_uart", "acr122u", "proxmark", "nfcpy")
-        return False
+        """Retained as a thin adapter — the rules live in settings_schema."""
+        ok, _reason = settings_schema.validate(key, value)
+        return ok
 
     def get_source_settings(self, source_type: str) -> Dict[str, Any]:
         sources = self.settings.setdefault("sources", {})
@@ -889,37 +937,22 @@ class Plugin:
         if uri.startswith("https://"):
             try:
                 parsed = urlparse(uri)
-                # Validate domain format (basic check)
-                if not parsed.netloc or '.' not in parsed.netloc:
+                if not parsed.hostname or '.' not in parsed.netloc:
                     return False
-                # Reject localhost/private IPs
-                if parsed.netloc in ('localhost', '127.0.0.1', '::1'):
-                    return False
-                return True
+                return not _is_local_host(parsed.hostname)
             except Exception:
                 return False
-        
+
         return False
 
     def _validate_setting(self, key, value) -> bool:
-        # same logic as SettingsManager but available on Plugin as well
-        if key not in ALLOWED_SETTING_KEYS:
-            return False
-        if key == "reader_type":
-            return isinstance(value, str) and value in ("pn532_uart", "acr122u", "proxmark", "nfcpy")
-        if key == "device_path":
-            return (
-                isinstance(value, str)
-                and len(value) <= 255
-                and value.startswith("/dev/")
-            )
-        if key == "baudrate":
-            return isinstance(value, int) and 1200 <= value <= 1_000_000
-        if key == "polling_interval":
-            return isinstance(value, (int, float)) and 0.1 <= float(value) <= 10.0
-        if key in ("auto_launch", "auto_close"):
-            return isinstance(value, bool)
-        return False
+        """Thin adapter over settings_schema.
+
+        This was a near-verbatim copy of SettingsManager's version, carrying a
+        comment that said so. Both now defer to the same table.
+        """
+        ok, _reason = settings_schema.validate(key, value)
+        return ok
 
     # ── Pairing Handler ────────────────────────────────────────────────
 
@@ -1141,12 +1174,21 @@ class Plugin:
         return self.settings.settings
 
     async def set_setting(self, key, value):
-        if not self._validate_setting(key, value):
-            decky.logger.warning(
-                f"Rejected invalid setting update: key={key!r}, value={value!r}"
-            )
+        """Update a top-level or NFC setting. False means it did not stick.
+
+        Returning True unconditionally meant a settings file that could not be
+        written — no permission, disk full — still reported success, so the
+        panel showed the new value and the old one came back on restart.
+        """
+        ok, reason = settings_schema.validate(key, value)
+        if not ok:
+            decky.logger.warning(f"Rejected setting update: {reason} (got {value!r})")
             return False
-        self.settings.set(key, value)
+        value = settings_schema.coerce(key, value)
+
+        if not self.settings.set(key, value):
+            decky.logger.error(f"Setting {key!r} could not be written to disk")
+            return False
         if key in ("device_path", "baudrate", "reader_type") and self.nfc_source:
             self.nfc_source._reader = None  # force reconnect on next poll
         return True
@@ -1639,46 +1681,47 @@ class Plugin:
         return result
 
     async def set_source_setting(self, source_type: str, key: str, value):
-        """Update a per-source setting."""
-        # storage and camera joined the list when sources gained an explicit
-        # on/off switch — a disabled source idles instead of retrying forever,
-        # so the switch has to be reachable from the panel.
-        ALLOWED_SOURCE_TYPES = {"nfc", "mqtt", "serial", "file_watch", "storage", "camera"}
-        if source_type not in ALLOWED_SOURCE_TYPES:
+        """Update a per-source setting.
+
+        Validated by settings_schema, the same table that governs set_setting
+        and the on-disk loader. This path used to check the *type* of a value
+        and nothing else, which is how broker_port accepted 70000, serial
+        `port` accepted any string at all — bypassing the /dev/ rule the
+        equivalent NFC setting was held to — and watch_dir accepted "/",
+        pointing a root process's directory scanner at the filesystem root.
+        """
+        if source_type not in settings_schema.SOURCE_TYPES:
             decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
             return False
 
-        ALLOWED_KEYS: Dict[str, type] = {
-            "enabled": bool,
-            "drive_kinds": dict,
-            "broker_host": str,
-            "broker_port": int,
-            "topic": str,
-            "secret": str,
-            "port": str,
-            "baudrate": int,
-            "watch_dir": str,
-            "poll_interval": float,
-        }
-
-        if key not in ALLOWED_KEYS:
-            decky.logger.warning(f"set_source_setting: unknown key {key!r}")
+        ok, reason = settings_schema.validate(key, value, source_type=source_type)
+        if not ok:
+            decky.logger.warning(f"set_source_setting: rejected {source_type}.{key} — {reason}")
             return False
-
-        expected_type = ALLOWED_KEYS[key]
-        if not isinstance(value, expected_type):
-            # Allow int where float is expected
-            if expected_type is float and isinstance(value, int):
-                value = float(value)
-            else:
-                decky.logger.warning(
-                    f"set_source_setting: {key!r} expects {expected_type.__name__}, got {type(value).__name__}"
-                )
-                return False
+        value = settings_schema.coerce(key, value, source_type=source_type)
 
         sources = self.settings.settings.setdefault("sources", {})
         sources.setdefault(source_type, {})[key] = value
-        self.settings.save()
+
+        # MQTT will not start without a shared secret, and the panel has no
+        # field to type one into — so switching it on would silently do
+        # nothing. Mint a strong one instead of asking the user to invent it,
+        # and log it so it can be copied to whatever publishes to the topic.
+        if source_type == "mqtt" and key == "enabled" and value:
+            if not sources["mqtt"].get("secret"):
+                secret = secrets.token_urlsafe(24)
+                sources["mqtt"]["secret"] = secret
+                decky.logger.info(
+                    f"MQTT enabled with no shared secret; generated one. "
+                    f"Publishers must include it as a 'secret' field in every "
+                    f"message: {secret}"
+                )
+
+        if not self.settings.save():
+            decky.logger.error(
+                f"set_source_setting: {source_type}.{key} could not be written to disk"
+            )
+            return False
         decky.logger.info(f"Source setting updated: {source_type}.{key} = {value!r}")
 
         # Switching a category on has to pick up media that is already sitting

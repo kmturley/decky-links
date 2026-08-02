@@ -408,3 +408,40 @@ class TestGetSourceStatusesCanPair:
         result = await p.get_source_statuses()
         pairable = [e for e in result if e["can_pair"] and e["active"]]
         assert [e["source_type"] for e in pairable] == ["storage"]
+
+
+# ── MQTT secret provisioning ──────────────────────────────────────────────────
+
+class TestMqttSecretIsProvisionedOnEnable:
+    """MqttSource refuses to start without a shared secret, and the panel has
+    no field to type one into — so enabling the toggle would silently do
+    nothing. One is minted instead of asking the user to invent it."""
+
+    @pytest.mark.asyncio
+    async def test_enabling_mqtt_mints_a_secret(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        assert await plugin.set_source_setting("mqtt", "enabled", True)
+        secret = plugin.settings.settings["sources"]["mqtt"]["secret"]
+        assert secret
+        assert len(secret) >= 24
+
+    @pytest.mark.asyncio
+    async def test_an_existing_secret_is_never_replaced(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = "mine"
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] == "mine"
+
+    @pytest.mark.asyncio
+    async def test_disabling_does_not_mint_one(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", False)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] == ""
+
+    @pytest.mark.asyncio
+    async def test_generated_secrets_differ_between_installs(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        first = plugin.settings.settings["sources"]["mqtt"]["secret"]
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] != first

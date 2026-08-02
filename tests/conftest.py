@@ -96,13 +96,36 @@ def plugin(tmp_path):
     _settings = {
         "auto_launch": True,
         "auto_close": False,
+        # Mirrors SettingsManager's real shape. Only nfc was here before, so
+        # get_source_settings raised for every other source and anything
+        # touching per-source settings had to work around it.
         "sources": {
             "nfc": {
+                "enabled": True,
                 "device_path": "/dev/ttyUSB0",
                 "baudrate": 115200,
                 "polling_interval": 0.5,
                 "reader_type": "pn532_uart",
-            }
+            },
+            "storage": {
+                "enabled": True,
+                "drive_kinds": {
+                    "floppy": True, "optical": False, "usb": False, "flash": False,
+                },
+            },
+            "camera": {"enabled": False, "device": "/dev/video0", "poll_interval": 1.0},
+            "mqtt": {
+                "enabled": False,
+                "broker_host": "localhost",
+                "broker_port": 1883,
+                "topic": "decky-links",
+                "secret": "",
+                "tls": False,
+                "username": "",
+                "password": "",
+            },
+            "serial": {"enabled": False, "port": "/dev/ttyUSB1", "baudrate": 9600},
+            "file_watch": {"enabled": False, "watch_dir": "", "poll_interval": 2.0},
         },
     }
     mock_settings        = MagicMock(spec=SettingsManager)
@@ -110,13 +133,18 @@ def plugin(tmp_path):
         if key in ("auto_launch", "auto_close"):
             return _settings.get(key, default)
         return _settings["sources"]["nfc"].get(key, default)
+    # Returns True like the real SettingsManager.set: the bool is "this
+    # reached disk", and callers now surface a False to the frontend rather
+    # than reporting a save that never happened.
     def _set_setting(key, value):
         if key in ("auto_launch", "auto_close"):
             _settings[key] = value
         else:
             _settings["sources"]["nfc"][key] = value
+        return True
     mock_settings.get = _get_setting
     mock_settings.set = _set_setting
+    mock_settings.save = lambda: True
     mock_settings.get_source_settings = lambda source_type: _settings["sources"][source_type]
     mock_settings.settings = _settings
     p.settings = mock_settings

@@ -2071,6 +2071,49 @@ class TestUnsupportedTagWrite:
 
 # ── Printable cards ──────────────────────────────────────────────────────────
 
+class TestHttpsHostValidation:
+    """The old check rejected exactly three strings: 'localhost', '127.0.0.1'
+    and '::1'. Everything else pointing at this machine or its LAN went
+    through — a tapped card could open the Deck's own services, or a box on
+    the same network, in the Steam browser."""
+
+    @pytest.mark.parametrize("host", [
+        "localhost",
+        "127.0.0.1",
+        "127.0.0.2",          # rest of 127/8
+        "127.1.2.3",
+        "[::1]",              # the bracketed form a URI actually carries
+        "[::ffff:127.0.0.1]", # IPv4-mapped IPv6
+        "0.0.0.0",
+        "10.0.0.5",           # RFC1918
+        "172.16.4.1",
+        "192.168.1.10",
+        "169.254.169.254",    # link-local / cloud metadata
+        "printer.local",      # mDNS
+        "router.internal",
+    ])
+    def test_local_targets_are_blocked(self, plugin, host):
+        assert plugin._validate_uri(f"https://{host}/x") is False
+
+    @pytest.mark.parametrize("host", [
+        "store.steampowered.com",
+        "example.com",
+        "8.8.8.8",
+        "sub.domain.example.org",
+    ])
+    def test_public_targets_are_allowed(self, plugin, host):
+        assert plugin._validate_uri(f"https://{host}/x") is True
+
+    def test_port_does_not_defeat_the_check(self, plugin):
+        """netloc carries the port; the old code compared the whole netloc to
+        a bare host, so 'localhost:8080' never matched and was allowed."""
+        assert plugin._validate_uri("https://localhost:8080/admin") is False
+        assert plugin._validate_uri("https://127.0.0.1:1337/") is False
+
+    def test_credentials_do_not_defeat_the_check(self, plugin):
+        assert plugin._validate_uri("https://user@127.0.0.1/") is False
+
+
 class TestCardRpcs:
     """A QR is the one trigger medium that costs nothing to produce, so these
     RPCs generate rather than pair — there is nothing to write to."""
