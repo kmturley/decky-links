@@ -17,6 +17,7 @@ It does NOT own:
 import asyncio
 import os
 import sys
+import threading
 import time
 import traceback
 from collections import OrderedDict
@@ -86,6 +87,13 @@ class NfcSource(MediaSource):
         self._settings = settings
         self._key_manager = key_manager
         self._logger = logger
+        # One reader, one serial port, two callers. Polling runs on the source
+        # manager's task and pairing on the plugin's, and now that both do
+        # their work in threads they can genuinely overlap — the event loop
+        # used to serialise them for free, because neither yielded. Two
+        # threads interleaving commands on a PN532 corrupts the exchange, so
+        # the reader is held for the whole of a poll or a write.
+        self._io_lock = threading.RLock()
         self._reader = None
         # Legacy field retained for compatibility with existing reader module
         self._uart = None
@@ -303,6 +311,10 @@ class NfcSource(MediaSource):
 
     def _poll_blocking(self) -> Optional[PluginEvent]:
         """The synchronous body of :meth:`poll`. Never call from the loop."""
+        with self._io_lock:
+            return self._poll_locked()
+
+    def _poll_locked(self) -> Optional[PluginEvent]:
         if not self._reader:
             return None
 
@@ -718,8 +730,15 @@ class NfcSource(MediaSource):
     def write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         """Write a URI as an NDEF URI record to the tag.
 
+        Holds the reader for the whole write, so a poll running concurrently
+        on the source manager's thread cannot interleave commands with it.
+
         Returns ``(True, None)`` on success, ``(False, error_message)`` on failure.
         """
+        with self._io_lock:
+            return self._write_ndef_uri_locked(uid, uri)
+
+    def _write_ndef_uri_locked(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         import ndef
 
         uri_bytes = uri.encode("utf-8")
