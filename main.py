@@ -43,6 +43,7 @@ from sources.file_watch_source import FileWatchSource
 
 import decky
 
+from cards import PRINT_DPI
 from nfc.key_manager import KeyManager
 from nfc.signature_manager import SignatureManager
 
@@ -1644,6 +1645,89 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"Failed to verify signature: {e}")
             return {"valid": False, "error": str(e)}
+
+    # --- Printable cards ---
+
+    def _card_output_dir(self) -> str:
+        """Where saved cards go, and who should own them.
+
+        Under the user's home rather than the plugin's settings directory:
+        these exist to be copied off the Deck and printed, so they have to be
+        somewhere a person can find in a file manager.
+        """
+        home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
+        return os.path.join(home, "Documents", "decky-links")
+
+    def _card_owner(self):
+        """(uid, gid) of the user's home, or None.
+
+        The plugin runs as root so it can mount disks, so anything it writes
+        into the user's home is root-owned and cannot be deleted from the
+        desktop. Only relevant when we actually are root.
+        """
+        if os.geteuid() != 0:
+            return None
+        home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
+        try:
+            info = os.stat(home)
+            return (info.st_uid, info.st_gid)
+        except OSError:
+            return None
+
+    async def get_qr_preview(self, uri: str, module_px: int = 6):
+        """A QR for `uri` as a PNG data URI, for display in the panel.
+
+        Rendered at a small integer module size rather than by scaling a print
+        image down — the same no-resampling rule that applies to print applies
+        on screen, and a soft QR photographs badly.
+
+        Available whether or not the camera trigger is switched on: printing
+        codes before owning a webcam is a reasonable thing to do.
+        """
+        import base64
+        import io
+
+        if not self._validate_uri(uri):
+            return {"ok": False, "error": "Invalid URI"}
+
+        try:
+            from cards import qr_image
+            image = qr_image(uri, module_px=max(1, min(int(module_px), 20)))
+            buffer = io.BytesIO()
+            image.save(buffer, "PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            return {
+                "ok": True,
+                "data_uri": f"data:image/png;base64,{encoded}",
+                "size": image.size[0],
+            }
+        except Exception as e:
+            decky.logger.error(f"QR preview failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def save_game_card(self, uri: str, title: str = "", appid: str = ""):
+        """Write a two-sided printable card and return where it went.
+
+        Front is Steam's vertical capsule, back carries the QR — a 45mm code
+        block is 44% of a 101.6mm cover, so it cannot share a side with the art.
+        """
+        if not self._validate_uri(uri):
+            return {"ok": False, "error": "Invalid URI"}
+
+        try:
+            from cards import save_card
+            out_dir = self._card_output_dir()
+            home = getattr(decky, "DECKY_USER_HOME", None) or os.path.expanduser("~")
+            paths = await asyncio.to_thread(
+                save_card, uri, title, str(appid), out_dir, home, PRINT_DPI,
+                self._card_owner(),
+            )
+            decky.logger.info(f"Saved card for {appid or uri} to {out_dir}")
+            return {"ok": True, "dir": out_dir, "paths": paths}
+        except Exception as e:
+            decky.logger.error(f"Saving card failed: {e}")
+            decky.logger.error(traceback.format_exc())
+            return {"ok": False, "error": str(e)}
 
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
