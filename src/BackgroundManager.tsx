@@ -2,13 +2,11 @@ import { useEffect, FC } from "react";
 import {
   getSettings,
   getReaderStatus,
-  getTagStatus,
   getSourceStatuses,
   getActiveMedia,
   setRunningGame,
   sharedState,
   settingsRef,
-  tagUidRef,
   activeAppIdRef,
   notifySubscribers,
   addEventListener,
@@ -196,20 +194,6 @@ export function startBackgroundManager(): () => void {
       sharedState.readerStatus = stat;
     }
 
-    const tag = await getTagStatus();
-    if (active && tag.uid) {
-      sharedState.tagUid = tag.uid;
-      sharedState.tagUri = tag.uri;
-      // get_tag_status only ever reports the NFC reader's view.
-      sharedState.tagSourceType = SourceType.NFC;
-      tagUidRef.current = tag.uid;
-    } else if (active) {
-      sharedState.tagUid = null;
-      sharedState.tagUri = null;
-      sharedState.tagSourceType = null;
-      tagUidRef.current = null;
-    }
-
     const statuses = await getSourceStatuses();
     if (active) {
       sharedState.sourceStatuses = statuses;
@@ -260,14 +244,10 @@ export function startBackgroundManager(): () => void {
     uid: string, source_type?: string, source_id?: string, drive_kind?: string,
   }]>("tag_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
-    sharedState.tagUid = data.uid;
-    sharedState.tagUri = null;
-    // Absent source_type means NFC: that is the only source that predates the
-    // field, and every other one sets it explicitly.
-    sharedState.tagSourceType = (data.source_type as SourceType) ?? SourceType.NFC;
-    sharedState.mediaProblem = null;
     // Per-source record, so a tag and a disk can be present at once and each
-    // gets its own row and Pair button in the Triggers list.
+    // gets its own row and Pair button in the Triggers list. Absent
+    // source_type means NFC: that is the only source that predates the field,
+    // and every other one sets it explicitly.
     if (data.source_id) {
       sharedState.activeMedia = {
         ...sharedState.activeMedia,
@@ -281,22 +261,19 @@ export function startBackgroundManager(): () => void {
         },
       };
     }
-    tagUidRef.current = data.uid;
     notifySubscribers();
   });
 
   const removeListener = addEventListener<[data?: { source_id?: string }]>("tag_removed", (data) => {
-    sharedState.tagUid = null;
-    sharedState.tagUri = null;
-    sharedState.tagSourceType = null;
-    sharedState.mediaProblem = null;
-    if (data?.source_id) {
-      const { [data.source_id]: _gone, ...rest } = sharedState.activeMedia;
-      sharedState.activeMedia = rest;
-    } else {
-      sharedState.activeMedia = {};
-    }
-    tagUidRef.current = null;
+    // Only the source that reported the removal loses its row. Clearing the
+    // whole map when source_id was absent meant one trigger losing its medium
+    // blanked every other trigger's row too — a floppy ejecting would erase
+    // the tag still sitting on the reader. The backend always sends
+    // source_id; without one there is nothing to act on.
+    if (!data?.source_id) return;
+    const { [data.source_id]: gone, ...rest } = sharedState.activeMedia;
+    if (!gone) return;
+    sharedState.activeMedia = rest;
     notifySubscribers();
   });
 
@@ -322,17 +299,24 @@ export function startBackgroundManager(): () => void {
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
-    // A storage media_id is a device node, whose case is meaningful. Trust the
-    // event's own source_type when it carries one — the global tagSourceType
-    // describes whatever was presented last, which need not be this medium.
-    const sourceType = data.source_type ?? sharedState.tagSourceType;
+
+    // uri_detected does not always carry source_id — the pairing sync path
+    // addresses the medium by id — so fall back to the entry we already hold
+    // for this media id.
+    const existing = data.source_id
+      ? sharedState.activeMedia[data.source_id]
+      : Object.values(sharedState.activeMedia).find((m) => m.media_id === data.uid);
+    const key = data.source_id ?? existing?.source_id;
+
+    // A storage media_id is a device node, whose case is meaningful; an NFC
+    // uid is hex and normalises upper. Take the source from the event, then
+    // from the medium this actually refers to.
+    const sourceType = data.source_type ?? existing?.source_type ?? SourceType.NFC;
     const normalizedUid = sourceType === SourceType.STORAGE
       ? data.uid
       : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
 
-    sharedState.tagUri = uri;
-    sharedState.tagUid = normalizedUid;
     const problem = uri
       ? null
       : data.unreadable
@@ -340,25 +324,19 @@ export function startBackgroundManager(): () => void {
         : data.blocked
           ? ({ kind: "blocked" } as const)
           : ({ kind: "blank" } as const);
-    sharedState.mediaProblem = problem;
 
-    // uri_detected does not always carry source_id (the pairing sync path
-    // emits it by media id), so fall back to matching the medium we already
-    // recorded for this uid.
-    const key = data.source_id
-      ?? Object.values(sharedState.activeMedia).find((m) => m.media_id === data.uid)?.source_id;
     if (key && sharedState.activeMedia[key]) {
       sharedState.activeMedia = {
         ...sharedState.activeMedia,
         [key]: {
           ...sharedState.activeMedia[key],
+          media_id: normalizedUid,
           uri,
           problem: problem?.kind ?? null,
           error: problem?.kind === "unreadable" ? data.error : undefined,
         },
       };
     }
-    tagUidRef.current = normalizedUid;
     notifySubscribers();
 
     // Emitted by the backend right after writing a tag, purely so the panel
@@ -466,14 +444,22 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  // Backstop for the event stream above: game state has no backend event to
-  // push (only the frontend can see Router.MainRunningApp), and the rest
-  // re-syncs anything a missed event would have left stale.
+  // Backstop for the event stream above.
+  //
+  // Only game state genuinely needs the fast tick: nothing on the backend can
+  // see Router.MainRunningApp, so a launch or exit is invisible until we look
+  // — and it is a local read, not an RPC.
+  //
+  // Everything else here duplicates something the backend already pushes
+  // (reader_status, source_statuses), so it is a recovery path for a dropped
+  // event rather than the way state normally arrives. Running those at 2 Hz
+  // cost two RPC round-trips a second for the life of the plugin, on a
+  // battery-powered handheld, to re-learn things that had not changed.
   const pollLoop = async () => {
     let sourcePollTick = 0;
     while (active) {
       try {
-        // 1. Poll Game Status
+        // 1. Game status — local read, every tick.
         const app = getMainRunningApp();
         const currentId = (app && app.appid !== "0") ? String(app.appid) : null;
 
@@ -485,39 +471,41 @@ export function startBackgroundManager(): () => void {
           await setRunningGame(currentId ? parseInt(currentId) : null);
         }
 
-        // 2. Poll Tag Status (if missing)
-        if (!tagUidRef.current) {
-          const t = await getTagStatus();
-          if (active && t.uid) {
-            if (sharedState.tagUid !== t.uid || sharedState.tagUri !== t.uri) {
-              sharedState.tagUid = t.uid;
-              sharedState.tagUri = t.uri;
-              sharedState.tagSourceType = SourceType.NFC;
-              notifySubscribers();
-            }
-            tagUidRef.current = t.uid;
-          }
-        }
-
-        // 3. Poll Reader Status
-        const reader = await getReaderStatus();
-        if (
-          active &&
-          (sharedState.readerStatus.connected !== reader.connected ||
-            sharedState.readerStatus.path !== reader.path ||
-            sharedState.readerStatus.source_type !== reader.source_type)
-        ) {
-          sharedState.readerStatus = reader;
-          notifySubscribers();
-        }
-
-        // 4. Poll Source Statuses every 10 iterations (~5s)
+        // 2. Everything reached over RPC, every 10th tick (~5s).
+        //
+        // All three are pushed by the backend when they change, so this is
+        // the dropped-event backstop. The media re-sync used to poll the NFC
+        // reader alone and could not recover a missed floppy insert or QR
+        // frame; the per-source registry covers every trigger.
         sourcePollTick++;
         if (sourcePollTick >= 10) {
           sourcePollTick = 0;
-          const statuses = await getSourceStatuses();
+          const [reader, statuses, media] = await Promise.all([
+            getReaderStatus(),
+            getSourceStatuses(),
+            getActiveMedia(),
+          ]);
+          if (
+            active &&
+            (sharedState.readerStatus.connected !== reader.connected ||
+              sharedState.readerStatus.path !== reader.path ||
+              sharedState.readerStatus.source_type !== reader.source_type)
+          ) {
+            sharedState.readerStatus = reader;
+          }
           if (active) {
             sharedState.sourceStatuses = statuses;
+            sharedState.activeMedia = Object.fromEntries(
+              (media ?? []).map((m) => [m.source_id, {
+                ...m,
+                // Preserve the richer local view: the backend registry has no
+                // notion of "loading" or "unreadable", so a blind overwrite
+                // would flick a mounting floppy back to "blank".
+                problem: sharedState.activeMedia[m.source_id]?.problem
+                  ?? (m.uri ? null : ("blank" as const)),
+                error: sharedState.activeMedia[m.source_id]?.error,
+              }]),
+            );
             notifySubscribers();
           }
         }

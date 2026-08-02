@@ -80,11 +80,6 @@ export interface ReaderStatus {
     source_type?: SourceType;
 }
 
-export interface TagStatus {
-    uid: string | null;
-    uri: string | null;
-}
-
 export interface SectorInfo {
     sector: number;
     first_block: number;
@@ -133,17 +128,14 @@ export interface ViewedApp {
 export interface SharedState {
   settings: Settings | null;
   readerStatus: ReaderStatus;
-  tagUid: string | null;
-  tagUri: string | null;
-  /** Which source is presenting the current medium — an NFC tag and a floppy
-   *  both land in tagUid, but only one of them has sectors to manage. */
-  tagSourceType: SourceType | null;
-  /** Why the current medium carries no URI. "blank" is ready to pair;
-   *  "unreadable" is the user's problem to fix and must say so. */
-  mediaProblem: { kind: "blank" | "unreadable" | "blocked" | "loading"; error?: string } | null;
-  /** Every medium presented anywhere, keyed by source_id. The single tagUid
-   *  slot above cannot express "a tag AND a disk are both here", which is
-   *  exactly what the Triggers list has to show. */
+  /** Every medium presented anywhere, keyed by source_id.
+   *
+   *  The single source of truth for what is present. There used to be a
+   *  parallel `tagUid`/`tagUri`/`tagSourceType`/`mediaProblem` slot holding
+   *  whichever medium was seen last on any source, which no component ever
+   *  read — every one of them already derives from this map, because one
+   *  global slot cannot express "a tag AND a disk are both here", which is
+   *  exactly what the Triggers list shows. */
   activeMedia: Record<string, ActiveMedium>;
   activeAppId: string | null;
   /** Game detail page currently open, or null when not on one. */
@@ -163,10 +155,6 @@ export type SettingKey =
 export const sharedState: SharedState = {
   settings: null,
   readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
-  tagUid: null,
-  tagUri: null,
-  tagSourceType: null,
-  mediaProblem: null,
   activeMedia: {},
   activeAppId: null,
   viewedApp: null,
@@ -178,7 +166,6 @@ export const sharedState: SharedState = {
 // asynchronous callbacks. They live outside of React so that closures keep a
 // stable handle to the current value.
 export const activeAppIdRef = { current: null as string | null };
-export const tagUidRef = { current: null as string | null };
 export const settingsRef = { current: null as any };
 export const viewedAppRef = { current: null as ViewedApp | null };
 
@@ -226,7 +213,6 @@ export const startPairing = callable<[uri: string, source_id?: string], boolean>
 export const getActiveMedia = callable<[], ActiveMedium[]>("get_active_media");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");
-export const getTagStatus = callable<[], TagStatus>("get_tag_status");
 export const setRunningGame = callable<[appid: number | null], void>("set_running_game");
 export const setTagKey = callable<[uid: string, key_a: string, key_b: string], boolean>("set_tag_key");
 export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: string }>("get_tag_key");
