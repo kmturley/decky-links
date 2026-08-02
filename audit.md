@@ -17,11 +17,35 @@ What undermines it is everything around it: the entire plugin runs on a **single
 
 ---
 
+## Status
+
+All three fatal flaws are **fixed** on `fix/audit-critical-findings`. The
+dimension breakdown below is unchanged and still describes the code as
+audited, so the remaining items stay actionable; each fixed finding is marked
+inline.
+
+| # | Finding | State |
+|---|---|---|
+| 1 | Blocking I/O on the shared event loop | ✅ `8e5685e` |
+| 2 | Unhardened root mounts of untrusted media | ✅ `ba72cf0` |
+| 3 | Unwired signing subsystem / key material at rest | ✅ `dbb9118` |
+
+Next by leverage: **Phase B** (containerized test target + CI) — the suite has
+grown to 620 tests and still nothing runs them automatically.
+
+---
+
 ## Top 3 Fatal Flaws / Risks
 
 Ranked by severity × proximity.
 
 ### 1. Blocking I/O on the shared event loop — freezes the whole plugin, today
+
+> **Fixed in `8e5685e`.** `NfcSource.poll`, `NfcSource.write_uri` and
+> `CameraSource.poll` now run their blocking bodies via `asyncio.to_thread`,
+> and `MediaSource.poll`'s contract states the rule so the next source does
+> not have to rediscover it. The proxmark backend is covered by the NFC
+> offload.
 
 Every source task, the event loop, and every frontend RPC share one asyncio loop. Several `poll()` implementations do synchronous blocking work directly on it:
 
@@ -41,6 +65,13 @@ The team clearly knows the correct pattern — [storage_source.py:693](sources/s
 
 ### 2. Root process mounts untrusted filesystems with no hardening
 
+> **Fixed in `ba72cf0`.** The filesystem is probed with `blkid` and checked
+> against `ALLOWED_FILESYSTEMS` before any mount, the type is stated
+> explicitly with `-t`, and `ro,nosuid,nodev,noexec` is applied to every mount
+> *and* repeated on every remount (a remount does not inherit them, and
+> pairing goes through that path). Probing first also turns a 20s failed mount
+> on an unformatted floppy into a millisecond rejection.
+
 [plugin.json](plugin.json) declares the `root` flag. [storage_source.py:695](sources/storage_source.py#L695):
 
 ```python
@@ -54,6 +85,14 @@ No `nosuid`, no `nodev`, no `noexec`, and **no `-t` filesystem allowlist** — s
 **Fix:** `mount -t <allowlist> -o ro,nosuid,nodev,noexec`. One line, removes the class.
 
 ### 3. The trust model rests on one function, and the crypto meant to back it is unwired
+
+> **Resolved in `dbb9118`.** The signing subsystem was deleted — it was
+> unreachable code implying a protection the plugin did not have, and the
+> spec never asked for it. `KeyManager` (which *is* used) keeps its keys at
+> 0600 in a 0700 directory, written atomically; encryption no longer degrades
+> silently to plaintext, and enabling it migrates an existing plaintext file
+> instead of destroying it. `_validate_uri` remains the sole trust boundary —
+> now honestly so, with nothing implying otherwise.
 
 `_validate_uri` ([main.py:867](main.py#L867)) is the *entire* control preventing arbitrary media from launching arbitrary things. It is reasonable work — allowlisted schemes, length cap, app-ID regex — but it is the only layer, and:
 
@@ -138,14 +177,15 @@ This is a single-process plugin on one handheld. "Horizontal scale" is not the a
 | # | Action | Files |
 |---|---|---|
 | A1 | Remove the hardcoded sudo password; rotate the Deck password; purge from git history | `package.json` |
-| A2 | Harden the mount: `mount -t vfat,exfat,ext4,iso9660 -o ro,nosuid,nodev,noexec` | `sources/storage_source.py:695` |
-| A3 | Move every blocking `poll()` body into `asyncio.to_thread` — camera first (5s), then NFC, then proxmark | `sources/camera_source.py`, `sources/nfc_source.py`, `nfc/proxmark_backend.py` |
+| ~~A2~~ | ~~Harden the mount~~ — **done, `ba72cf0`** | `sources/storage_source.py` |
+| ~~A3~~ | ~~Move every blocking `poll()` body into `asyncio.to_thread`~~ — **done, `8e5685e`** | `sources/camera_source.py`, `sources/nfc_source.py` |
 | A4 | `deque(maxlen=100)` for the MQTT buffer; log and drop on overflow | `sources/mqtt_source.py:43` |
 | A5 | Apply the backoff to the exception path in `_run_source`, not just to `start()` failure | `sources/manager.py:200-209` |
-| A6 | `chmod 0o600` on `keys.json` and `signing_keys.json` | `nfc/key_manager.py`, `nfc/signature_manager.py` |
-| A7 | Validate `appid` as `^[0-9]{1,10}$` before it reaches `find_art` | `main.py:1708`, `cards/qr.py:136` |
+| ~~A6~~ | ~~`chmod 0o600` on key files~~ — **done, `dbb9118`** (`signing_keys.json` no longer exists) | `nfc/key_manager.py` |
+| A7 | Validate `appid` as `^[0-9]{1,10}$` before it reaches `find_art` | `main.py`, `cards/qr.py:136` |
 | A8 | Reap `Popen` children (`start_new_session=True` + a reaper, or `asyncio.create_subprocess_exec`) | `main.py:1055`, `main.py:1096` |
 | A9 | Delete the two placeholder comments | `src/index.tsx:25`, `src/BackgroundManager.tsx:469` |
+| A10 | `write_uri` may remount a *system* mountpoint and forces it back to `ro`; only our own mounts should be remounted | `sources/storage_source.py` |
 
 ### Phase B — Connect the tests to the environment that can run them (days, not weeks)
 
@@ -161,7 +201,7 @@ The insight: `build.sh` already solved the hard problem. Reuse it rather than in
 
 - **C1.** Collapse the two `_validate_setting` implementations into a single `settings/schema.py` with `(type, validator, range)` per key. Route both `set_setting` and `set_source_setting` through it. Kills the divergence *and* the drift risk.
 - **C2.** Make save failures propagate: `SettingsManager.save()` returns `bool`; `set_setting` returns it.
-- **C3.** Decide on signing. Either verify on the read path in `NfcSource` (and encrypt keys at rest, with a real migration for the plaintext→encrypted transition), **or delete `signature_manager.py`, `signature_record.py`, and their RPCs**. Choose one; the current state is the worst of both.
+- ~~**C3.** Decide on signing.~~ **Done, `dbb9118`** — deleted. `KeyManager`'s at-rest storage was fixed in the same commit.
 - **C4.** MQTT: require a non-empty secret before `start()` succeeds, add TLS and broker-credential settings, use `hmac.compare_digest`.
 - **C5.** Document what `_validate_uri`'s HTTPS branch is actually for, then make it match — either full private-range/DNS-rebinding blocking, or an honest comment that it only stops the obvious cases.
 
