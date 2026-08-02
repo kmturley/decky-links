@@ -39,8 +39,14 @@ surfaced two latent order-dependent failures that predated this branch, both
 sync tests driving the loop by hand via `asyncio.get_event_loop()`, which
 passed alone and failed in the suite.
 
-Next by leverage: **Phase C** (unify the two settings-validation paths), then
-**Phase D** (break up the 1,600-line `main.py`).
+**Phase C is complete** (`7189396`): the three divergent validation paths are
+now one `settings_schema` table, save failures propagate, MQTT requires a
+shared secret, and the HTTPS loopback check covers more than three literal
+strings. Suite is **742 passed, 0 failed**.
+
+Next by leverage: **Phase D** (break up `main.py`, still ~1,600 lines) and
+**Phase E** (the NFC abstraction leak). Neither is a correctness problem —
+they are evolution cost.
 
 ---
 
@@ -210,11 +216,11 @@ Two latent failures surfaced the moment the suite could run in the right place, 
 
 ### Phase C — Unify the trust boundary (1–2 weeks)
 
-- **C1.** Collapse the two `_validate_setting` implementations into a single `settings/schema.py` with `(type, validator, range)` per key. Route both `set_setting` and `set_source_setting` through it. Kills the divergence *and* the drift risk.
-- **C2.** Make save failures propagate: `SettingsManager.save()` returns `bool`; `set_setting` returns it.
+- ~~**C1.**~~ **Done, `7189396`** — rules live in `settings_schema.py` as data; `set_setting`, `set_source_setting` and the on-disk loader all go through `validate()`. There were *three* copies, not two — `set_source_setting`'s type-only map was the third and the dangerous one.
+- ~~**C2.**~~ **Done, `7189396`** — plus an atomic temp-file-and-rename write, so an interrupted save cannot truncate `settings.json` and reset every preference.
 - ~~**C3.** Decide on signing.~~ **Done, `dbb9118`** — deleted. `KeyManager`'s at-rest storage was fixed in the same commit.
-- **C4.** MQTT: require a non-empty secret before `start()` succeeds, add TLS and broker-credential settings, use `hmac.compare_digest`.
-- **C5.** Document what `_validate_uri`'s HTTPS branch is actually for, then make it match — either full private-range/DNS-rebinding blocking, or an honest comment that it only stops the obvious cases.
+- ~~**C4.**~~ **Done, `7189396`** — all three, plus: enabling MQTT mints a secret, because the panel has no field to type one into and the toggle would otherwise silently do nothing. **Follow-up: a panel field to display and copy that secret.**
+- ~~**C5.**~~ **Done, `7189396`** — `_is_local_host` now covers 127/8, bracketed IPv6, IPv4-mapped IPv6, RFC1918, link-local (incl. 169.254.169.254) and `.local`; it also fixes the port bug, where `localhost:8080` never matched because the check compared against `netloc`. The docstring states the scope: it checks the literal, not what a public name resolves to.
 
 ### Phase D — Break up the god object (2–4 weeks)
 
