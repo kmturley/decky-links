@@ -1439,7 +1439,7 @@ class TestHandleSourceEvent:
     async def test_unplugging_a_drive_holding_media_clears_the_panel(self, plugin, mock_decky):
         """Otherwise the panel keeps showing a disk that is no longer attached."""
         from sources.base import SourceEvent, SourceEventKind, SourceType
-        plugin._active_media["storage:udev"] = {
+        plugin._registry._media["storage:udev"] = {
             "media_id": "/dev/sda", "uri": "steam://run/1", "source_type": "storage",
         }
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
@@ -1635,8 +1635,8 @@ class TestPerSourceMediaIsolation:
             await plugin._handle_media_load(
                 _make_load_event("DEADBEEF", uri="steam://rungameid/400")
             )
-        assert plugin._pending_launch_origin is not None
-        assert plugin._pending_launch_origin["media_id"] == "DEADBEEF"
+        assert plugin._registry._pending_launch_origin is not None
+        assert plugin._registry._pending_launch_origin["media_id"] == "DEADBEEF"
 
 
 # ── Pairing state sync ───────────────────────────────────────────────────────
@@ -1760,7 +1760,8 @@ class TestQuitDecision:
         from main import PluginState
         plugin.state = PluginState.GAME_RUNNING
         plugin.running_game_id = 400
-        plugin._launch_origin = {"source_id": "nfc:/dev/ttyUSB0", "media_id": "DEADBEEF"}
+        plugin._registry.claim_launch("nfc:/dev/ttyUSB0", "DEADBEEF")
+        plugin._registry.confirm_launch(1, None)
         # The fixture's settings.get is a plain function reading this dict,
         # so the setting has to be written where it actually looks.
         plugin.settings.settings["auto_close"] = auto_close
@@ -1932,7 +1933,7 @@ class TestDriveKindPersistence:
             )
             await plugin._handle_media_load(self._event({"rearmed": True}))
 
-        assert plugin._active_media["storage:udev"]["drive_kind"] == "floppy"
+        assert plugin._registry._media["storage:udev"]["drive_kind"] == "floppy"
 
     @pytest.mark.asyncio
     async def test_a_different_disk_does_not_inherit_the_category(self, plugin, mock_decky):
@@ -1952,7 +1953,7 @@ class TestDriveKindPersistence:
                 payload={"blank": True},
             ))
 
-        assert plugin._active_media["storage:udev"]["drive_kind"] is None
+        assert plugin._registry._media["storage:udev"]["drive_kind"] is None
 
 
 # ── Drive categories reach the panel ─────────────────────────────────────────
@@ -1987,34 +1988,34 @@ class TestLaunchOriginPersistence:
 
     @pytest.mark.asyncio
     async def test_a_repeated_report_of_the_same_game_keeps_the_origin(self, plugin):
-        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        plugin._registry.claim_launch("nfc:x", "AABB")
         await plugin.set_running_game(400)
-        assert plugin._launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
+        assert plugin._registry.launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
 
         # The frontend reports the running game repeatedly; taking the (now
         # empty) pending origin again wiped the attribution.
         await plugin.set_running_game(400)
-        assert plugin._launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
+        assert plugin._registry.launch_origin == {"source_id": "nfc:x", "media_id": "AABB"}
 
     @pytest.mark.asyncio
     async def test_a_hand_launched_game_is_attributed_to_nothing(self, plugin):
         await plugin.set_running_game(400)
-        assert plugin._launch_origin is None
+        assert plugin._registry.launch_origin is None
 
     @pytest.mark.asyncio
     async def test_switching_games_without_a_medium_clears_the_origin(self, plugin):
-        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        plugin._registry.claim_launch("nfc:x", "AABB")
         await plugin.set_running_game(400)
         await plugin.set_running_game(500)          # started by hand
-        assert plugin._launch_origin is None
+        assert plugin._registry.launch_origin is None
 
     @pytest.mark.asyncio
     async def test_a_new_medium_takes_over_attribution(self, plugin):
-        plugin._pending_launch_origin = {"source_id": "nfc:x", "media_id": "AABB"}
+        plugin._registry.claim_launch("nfc:x", "AABB")
         await plugin.set_running_game(400)
-        plugin._pending_launch_origin = {"source_id": "storage:udev", "media_id": "/dev/sda"}
+        plugin._registry.claim_launch("storage:udev", "/dev/sda")
         await plugin.set_running_game(400)
-        assert plugin._launch_origin["source_id"] == "storage:udev"
+        assert plugin._registry.launch_origin["source_id"] == "storage:udev"
 
     @pytest.mark.asyncio
     async def test_the_launching_medium_can_still_quit_the_game(self, plugin, mock_decky):
@@ -2022,11 +2023,11 @@ class TestLaunchOriginPersistence:
         from sources.base import MediaEvent, MediaEventKind, SourceType
         from main import PluginState
         plugin.settings.settings["auto_close"] = True
-        plugin._pending_launch_origin = {"source_id": "nfc:/dev/ttyUSB0", "media_id": "AABB"}
+        plugin._registry.claim_launch("nfc:/dev/ttyUSB0", "AABB")
         await plugin.set_running_game(400)
         await plugin.set_running_game(400)          # the duplicate report
         plugin.state = PluginState.GAME_RUNNING
-        plugin._active_media["nfc:/dev/ttyUSB0"] = {
+        plugin._registry._media["nfc:/dev/ttyUSB0"] = {
             "source_id": "nfc:/dev/ttyUSB0", "source_type": "nfc",
             "media_id": "AABB", "uri": "steam://run/400",
         }

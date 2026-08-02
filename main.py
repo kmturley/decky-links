@@ -50,6 +50,7 @@ from decky_links import settings_schema
 from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
+from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
 from nfc.key_manager import KeyManager
 
@@ -131,12 +132,9 @@ class Plugin:
         self.is_pairing = False
         self.pairing_uri = None
         self.pairing_source_id = None
-        # source_id -> active medium. One entry per source; the authoritative
-        # record of what is currently presented anywhere.
-        self._active_media = {}
-        # Which medium launched the running game, so only that medium can quit it.
-        self._launch_origin = None
-        self._pending_launch_origin = None
+        # What is presented where, and which medium started the running game.
+        # See decky_links.media_registry for the invariants.
+        self._registry = MediaRegistry()
         self._last_statuses = None
 
     # --- Lifecycle ---
@@ -201,9 +199,7 @@ class Plugin:
         self.running_game_id = None
         self.current_tag_uid = None
         self.current_tag_uri = None
-        self._active_media   = {}
-        self._launch_origin  = None
-        self._pending_launch_origin = None
+        self._registry.reset()
         # RPC call caching to reduce load with thread-safe lock
         self._tag_status_lock = threading.RLock()
         self._last_tag_status_query = 0
@@ -383,13 +379,13 @@ class Plugin:
             # Hardware that has gone away cannot still be holding media. Drop
             # its registry entry, or the medium lingers as active forever and
             # keeps a stale claim on the running game.
-            had_media = self._active_media.pop(event.source_id, None) is not None
-            if self._launch_origin and self._launch_origin.get("source_id") == event.source_id:
+            had_media = self._registry.remove(event.source_id)
+            if self._registry.launch_origin and self._registry.launch_origin.get("source_id") == event.source_id:
                 decky.logger.info(
                     f"Source {event.source_id} launched game {self.running_game_id} "
                     f"but has disconnected; dropping its claim."
                 )
-                self._launch_origin = None
+                self._registry.drop_origin_for_source(event.source_id)
 
             if is_nfc:
                 await decky.emit("reader_status", {
@@ -418,7 +414,7 @@ class Plugin:
             # NFC reader while a floppy drive is still connected is not idle.
             if not self._any_source_available(exclude=event.source_id):
                 self._set_state(PluginState.IDLE)
-            elif self.state == PluginState.CARD_PRESENT and not self._active_media:
+            elif self.state == PluginState.CARD_PRESENT and not self._registry.any_present():
                 self._set_state(PluginState.READY)
 
         await self._publish_statuses()
@@ -461,7 +457,7 @@ class Plugin:
         # Collision check (Spec §6.2) — scoped to *this* source. Comparing
         # against a single global slot meant a floppy insert looked like an NFC
         # tag collision, and vice versa. Only one medium can occupy one source.
-        previous = self._active_media.get(event.source_id)
+        previous = self._registry.get(event.source_id)
         if previous and previous["media_id"] != uid_hex:
             decky.logger.info(
                 f"Multiple media on {event.source_id}: "
@@ -482,14 +478,14 @@ class Plugin:
             if previous and previous["media_id"] == uid_hex
             else None
         )
-        self._active_media[event.source_id] = {
+        self._registry.put(event.source_id, {
             "source_id":   event.source_id,
             "source_type": event.source_type.value,
             "media_id":    uid_hex,
             "uri":         uri,
             "drive_kind":  event.payload.get("drive_kind") or prior_kind,
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
-        }
+        })
 
         # current_tag_* remain the NFC-specific view, kept for the existing RPC
         # and UI contract. Non-NFC sources must not clobber them — that is what
@@ -586,10 +582,7 @@ class Plugin:
         # tag would silently fail to quit it. Ordering is the whole fix here.
         will_launch = bool(self.settings.get("auto_launch")) and not self.running_game_id
         if will_launch:
-            self._pending_launch_origin = {
-                "source_id": event.source_id,
-                "media_id":  uid_hex,
-            }
+            self._registry.claim_launch(event.source_id, uid_hex)
 
         # Emit valid URI once — matches old code where uri_detected fired only with final URI
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
@@ -621,17 +614,13 @@ class Plugin:
         removed_uri = event.uri
         is_nfc = event.source_type == SourceType.NFC
 
-        self._active_media.pop(event.source_id, None)
+        self._registry.remove(event.source_id)
 
         # Only the medium that launched the running game may quit it. Without
         # this, ejecting a floppy or moving a QR code out of frame would quit a
         # game that was started by tapping an NFC tag.
-        origin = self._launch_origin
-        launched_this_game = (
-            origin is not None
-            and origin.get("source_id") == event.source_id
-            and origin.get("media_id") == removed_uid
-        )
+        origin = self._registry.launch_origin
+        launched_this_game = self._registry.launched_by(event.source_id, removed_uid)
 
         # Spec §6.3: removal during active game → notify frontend
         if (
@@ -681,7 +670,7 @@ class Plugin:
         # Stay in CARD_PRESENT if another source still holds media.
         if self.state not in (PluginState.GAME_RUNNING, PluginState.IDLE):
             self._set_state(
-                PluginState.CARD_PRESENT if self._active_media else PluginState.READY
+                PluginState.CARD_PRESENT if self._registry.any_present() else PluginState.READY
             )
 
     # ── URI Validation ─────────────────────────────────────────────────
@@ -793,12 +782,9 @@ class Plugin:
 
         # Keep the registry and the source's own view consistent, so the RPC
         # poll fallback and any later reads agree with what the panel shows.
-        entry = self._active_media.get(source_id) if source_id else None
+        entry = self._registry.get(source_id) if source_id else None
         if entry is None and is_nfc:
-            entry = next(
-                (m for m in self._active_media.values() if m.get("source_type") == "nfc"),
-                None,
-            )
+            entry = self._registry.first_of_type("nfc")
         if entry is not None:
             entry["uri"] = uri
 
@@ -1131,22 +1117,19 @@ class Plugin:
             # unconditionally taking the (now empty) pending origin wiped the
             # attribution immediately after setting it. Auto-close then refused
             # to quit anything, because every game had been "launched by None".
-            if self._pending_launch_origin is not None:
-                self._launch_origin = self._pending_launch_origin
-                self._pending_launch_origin = None
-            elif appid != prev:
-                self._launch_origin = None
-            if self._launch_origin:
-                decky.logger.info(f"Game {appid} attributed to {self._launch_origin}")
+            self._registry.confirm_launch(appid, prev)
+            if self._registry.launch_origin:
+                decky.logger.info(
+                    f"Game {appid} attributed to {self._registry.launch_origin}"
+                )
             self._set_state(PluginState.GAME_RUNNING)
         else:
-            self._launch_origin = None
-            self._pending_launch_origin = None
+            self._registry.clear_launch()
             if self.state == PluginState.GAME_RUNNING:
                 # Spec §6.4: game exited — return to CARD_PRESENT when media is
                 # still presented somewhere, otherwise READY.
                 self._set_state(
-                    PluginState.CARD_PRESENT if self._active_media else PluginState.READY
+                    PluginState.CARD_PRESENT if self._registry.any_present() else PluginState.READY
                 )
 
         return True
@@ -1176,11 +1159,11 @@ class Plugin:
         The per-source view that `get_tag_status` cannot express: that RPC
         reports the NFC slot only, for backwards compatibility.
         """
-        return list(self._active_media.values())
+        return self._registry.all()
 
     async def get_launch_origin(self):
         """Return the medium credited with launching the running game, if any."""
-        return self._launch_origin
+        return self._registry.launch_origin
 
     async def get_source_statuses(self):
         """Return status for all registered sources."""
