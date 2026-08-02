@@ -38,6 +38,36 @@ MOUNT_TIMEOUT_SECONDS = 20
 # mounts stranded by a previous plugin process.
 _MOUNT_PREFIX = "/tmp/decky-links-"
 
+# Filesystems we are willing to mount from removable media.
+#
+# `mount` with no `-t` probes every filesystem driver the kernel has, which
+# means a crafted disk image chooses which parser reads it — hfsplus, ntfs3,
+# squashfs, and friends are all reachable that way. In-kernel filesystem
+# parsers are a well-trodden local privilege-escalation surface and this
+# process runs as root (it has to, to mount at all), so the media decides what
+# code runs with the highest privilege on the device.
+#
+# The fix is to name the filesystem ourselves and refuse anything else. This
+# list is what trigger media plausibly is: FAT for floppies, sticks and cards,
+# the optical pair, and Linux-native for anything formatted on the Deck.
+# Deliberately excludes ntfs/hfsplus — a stick for this purpose can be FAT,
+# and refusing is logged, not silent.
+ALLOWED_FILESYSTEMS = frozenset({
+    "vfat", "exfat",         # floppies, USB sticks, SD cards
+    "iso9660", "udf",        # optical
+    "ext2", "ext3", "ext4",  # formatted on a Linux box
+})
+
+# Applied to every mount and preserved across every remount.
+#
+# `nosuid` and `nodev` are the ones that matter for untrusted media: without
+# them a hostile image can carry a setuid-root binary or a device node for a
+# disk it should not reach, and mounting it hands both to the user. `noexec`
+# stops the mountpoint being used to stage a binary at all. `ro` is separate
+# from those three — it protects the *disk* from us, so a medium left in a
+# drive is never at risk from a crash or a sudden eject.
+_MOUNT_FLAGS = ("ro", "nosuid", "nodev", "noexec")
+
 class DriveKind:
     """Categories of removable drive, as udev distinguishes them.
 
@@ -92,6 +122,10 @@ class StorageSource(MediaSource):
         self._unmountable: set = set()   # media that already failed to mount
         self._deferred_mounts: deque = deque()  # announced loading, not yet mounted
         self._loading: set = set()       # devnodes currently being mounted
+        # Why the last mount was refused, short enough for a panel row. Carried
+        # on the instance rather than returned so _mount_device keeps its
+        # mountpoint-or-None contract.
+        self._last_mount_error: Optional[str] = None
 
     @property
     def source_id(self) -> str:
@@ -506,7 +540,10 @@ class StorageSource(MediaSource):
                 unreadable=True,
                 # Shown verbatim in a panel row, so it has to fit one. The full
                 # diagnosis is in the log line above, where there is room.
-                error="Unformatted disk",
+                # A disk we declined to mount because of its filesystem is not
+                # unformatted, and saying so would send the user off to reformat
+                # media that is fine.
+                error=self._last_mount_error or "Unformatted disk",
             )
 
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
@@ -649,11 +686,19 @@ class StorageSource(MediaSource):
             await self._unmount_device(mountpoint)
 
     async def _remount(self, mountpoint: str, mode: str) -> bool:
-        """Remount an existing mountpoint ``rw`` or ``ro`` in place."""
+        """Remount an existing mountpoint ``rw`` or ``ro`` in place.
+
+        The hardening flags are repeated on every remount because a remount
+        does not inherit them — `mount -o remount,rw` alone would quietly clear
+        nosuid/nodev/noexec and leave the medium mounted more permissively than
+        when it arrived. Pairing goes through here, so that would have been the
+        one moment a hostile disk was writable *and* unguarded.
+        """
+        flags = [mode] + [f for f in _MOUNT_FLAGS if f not in ("ro", "rw")]
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
-                ["mount", "-o", f"remount,{mode}", mountpoint],
+                ["mount", "-o", "remount," + ",".join(flags), mountpoint],
                 capture_output=True,
                 timeout=MOUNT_TIMEOUT_SECONDS,
             )
@@ -685,22 +730,86 @@ class StorageSource(MediaSource):
             pass
         return None
 
+    async def _probe_filesystem(self, devnode: str) -> Optional[str]:
+        """The filesystem on ``devnode`` per blkid, or None if it has none.
+
+        Reading the superblock with blkid is a far smaller thing to expose to a
+        hostile image than letting the kernel mount it, and it lets us name the
+        type on the `mount` command line instead of leaving the medium to pick.
+
+        It is also faster to fail: an unformatted floppy has no superblock, so
+        this returns None in milliseconds where the mount it replaces seeks for
+        the full 20s timeout before giving up.
+        """
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["blkid", "-o", "value", "-s", "TYPE", devnode],
+                capture_output=True,
+                timeout=MOUNT_TIMEOUT_SECONDS,
+            )
+        except Exception as e:
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: could not probe filesystem on {devnode}: {e}"
+                )
+            return None
+
+        if result.returncode != 0:
+            return None
+        fstype = result.stdout.decode(errors="replace").strip().lower()
+        return fstype or None
+
     async def _mount_device(self, devnode: str) -> Optional[str]:
-        """Mount devnode read-only to a temp directory. Returns mountpoint or None."""
+        """Mount devnode read-only to a temp directory. Returns mountpoint or None.
+
+        The filesystem is probed and checked against :data:`ALLOWED_FILESYSTEMS`
+        first, so the type is always stated explicitly — see that constant for
+        why letting `mount` guess is the thing being avoided.
+        """
+        self._last_mount_error = None
+
+        fstype = await self._probe_filesystem(devnode)
+        if fstype is None:
+            self._last_mount_error = "Unformatted disk"
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: {devnode} carries no recognisable filesystem "
+                    f"— not mounting. An unformatted disk looks like this; format "
+                    f"it with FAT (mkfs.vfat) to use it as trigger media."
+                )
+            return None
+
+        if fstype not in ALLOWED_FILESYSTEMS:
+            self._last_mount_error = f"{fstype} not supported"
+            if self._logger:
+                self._logger.warning(
+                    f"StorageSource: refusing to mount {devnode} — filesystem "
+                    f"{fstype!r} is not in the allowlist "
+                    f"({', '.join(sorted(ALLOWED_FILESYSTEMS))}). Mounting "
+                    f"untrusted media means running that filesystem's kernel "
+                    f"driver as root, so the set is kept deliberately small."
+                )
+            return None
+
         tmpdir = tempfile.mkdtemp(prefix=os.path.basename(_MOUNT_PREFIX),
                                   dir=os.path.dirname(_MOUNT_PREFIX))
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
-                ["mount", "-o", "ro", devnode, tmpdir],
+                ["mount", "-t", fstype, "-o", ",".join(_MOUNT_FLAGS), devnode, tmpdir],
                 capture_output=True,
                 timeout=MOUNT_TIMEOUT_SECONDS,
             )
             if result.returncode == 0:
+                if self._logger:
+                    self._logger.info(
+                        f"StorageSource: mounted {devnode} ({fstype}) at {tmpdir}"
+                    )
                 return tmpdir
             if self._logger:
                 self._logger.warning(
-                    f"StorageSource: mount failed for {devnode}: "
+                    f"StorageSource: mount failed for {devnode} ({fstype}): "
                     f"{result.stderr.decode(errors='replace').strip()}"
                 )
         except Exception as e:
