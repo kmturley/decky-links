@@ -739,6 +739,63 @@ class TestMediaRemoval:
         assert "tag_removed" in emitted
 
     @pytest.mark.asyncio
+    async def test_blank_medium_elsewhere_does_not_break_auto_close(self, plugin, mock_decky):
+        """A blank disk in the drive used to silently disable auto-close.
+
+        _handle_media_load set READY unconditionally when a medium had no URI,
+        which dropped the plugin out of GAME_RUNNING — and _handle_media_unload
+        only closes a game while in GAME_RUNNING. So: tap a tag to launch a
+        game, put a blank floppy in the drive, take the tag off, and the game
+        stayed running with nothing in the log explaining why. The state rules
+        now keep GAME_RUNNING when a game is running.
+        """
+        from main import PluginState
+        plugin.is_pairing = False
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+        assert plugin.state == PluginState.GAME_RUNNING
+
+        # A blank disk goes into a different source.
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sda1", uri=None)
+            )
+        assert plugin.state == PluginState.GAME_RUNNING, (
+            "an unreadable medium on another source must not end the game"
+        )
+
+        # Removing the tag that launched it must still close the game.
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(
+            _make_unload_event("DEADBEEF", uri="steam://rungameid/400")
+        )
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" in emitted
+
+    @pytest.mark.asyncio
+    async def test_blocked_uri_elsewhere_does_not_break_auto_close(self, plugin, mock_decky):
+        """Same bug, reached through the allowlist branch rather than the blank
+        one — both set READY unconditionally."""
+        from main import PluginState
+        plugin.is_pairing = False
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sda1", uri="ftp://evil.example/x")
+            )
+        assert plugin.state == PluginState.GAME_RUNNING
+
+    @pytest.mark.asyncio
     async def test_removal_not_emitted_when_pairing(self, plugin, mock_decky):
         """Spec §6.3: card_removed_during_game suppressed when pairing is active."""
         from main import PluginState

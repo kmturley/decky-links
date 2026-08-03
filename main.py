@@ -21,7 +21,6 @@ import traceback
 import subprocess
 import re
 import secrets
-from enum import Enum
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any, List
 
@@ -43,6 +42,7 @@ from decky_links import settings_schema
 from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
+from decky_links import state
 from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
 from nfc.key_manager import KeyManager
@@ -107,31 +107,12 @@ async def emit(event: str, payload: Any) -> None:
 # State Machine (Spec §5)
 # -----------------------------------------------------------------------
 
-class PluginState(Enum):
-    """Plugin state machine (Spec §5).
-    
-    State transitions:
-    - IDLE → READY: any source became available
-    - READY → CARD_PRESENT: media presented on any source
-    - CARD_PRESENT → READY: last medium removed (no game running)
-    - CARD_PRESENT → GAME_RUNNING: Game launched (auto_launch enabled)
-    - GAME_RUNNING → READY: Game exited (via set_running_game)
-    - GAME_RUNNING → READY: launching medium removed (after card_removed_during_game)
-    - Any state → IDLE: every source became unavailable
-
-    Key invariants:
-    - Media is tracked per source (Plugin._active_media), not in one global slot
-    - Only the medium that launched a game may quit it (Plugin._launch_origin)
-    - No auto-relaunch: requires the medium to be physically re-presented
-    - Game state is authoritative from frontend (Router.MainRunningApp)
-
-    The names are NFC-flavoured for historical reasons; CARD_PRESENT means
-    "some medium is loaded on some source", which includes a disk in a drive.
-    """
-    IDLE         = "IDLE"          # No source available to trigger anything
-    READY        = "READY"         # At least one source up, no media, no game
-    CARD_PRESENT = "CARD_PRESENT"  # Media loaded, URI parsed, awaiting launch decision
-    GAME_RUNNING = "GAME_RUNNING"  # A game is running; its launching medium is locked
+# The states and the rules for moving between them live in decky_links.state.
+# The rules were ten inline conditionals across four handlers here; nothing
+# showed you the machine, and one of them was wrong. Re-exported because
+# `from main import PluginState` is what the rest of the codebase and the tests
+# use, and that is a reasonable thing for them to keep doing.
+PluginState = state.PluginState
 
 
 # -----------------------------------------------------------------------
@@ -374,11 +355,7 @@ class Plugin:
             decky.logger.info(
                 f"Source connected: {event.source_type.value} ({event.source_id})"
             )
-            # Any working source means the plugin can be triggered — IDLE is
-            # "nothing to trigger with", not "no NFC reader". With only a floppy
-            # drive attached the machine used to sit in IDLE indefinitely.
-            if self.state == PluginState.IDLE:
-                self._set_state(PluginState.READY)
+            self._set_state(state.after_source_connected(self.state))
             if is_nfc:
                 await emit("source_connection", {
                     "connected": True,
@@ -424,12 +401,11 @@ class Plugin:
                     "source_id": event.source_id,
                 })
 
-            # IDLE only when nothing at all is left to trigger with. Losing the
-            # NFC reader while a floppy drive is still connected is not idle.
-            if not self._any_source_available(exclude=event.source_id):
-                self._set_state(PluginState.IDLE)
-            elif self.state == PluginState.CARD_PRESENT and not self._registry.any_present():
-                self._set_state(PluginState.READY)
+            self._set_state(state.after_source_disconnected(
+                self.state,
+                any_source_available=self._any_source_available(exclude=event.source_id),
+                any_media_present=self._registry.any_present(),
+            ))
 
         await self._publish_statuses()
 
@@ -509,7 +485,9 @@ class Plugin:
             self.current_tag_uri = uri
             self.current_tag_meta = event.payload.get("tag_meta")
 
-        self._set_state(PluginState.CARD_PRESENT)
+        self._set_state(state.after_media_presented(
+            self.state, game_running=bool(self.running_game_id)
+        ))
 
         # Audio feedback (Spec §11)
         self._play_sound("scan.flac")
@@ -572,7 +550,9 @@ class Plugin:
                 "unreadable": unreadable,
                 "error": event.payload.get("error"),
             })
-            self._set_state(PluginState.READY)
+            self._set_state(state.after_unusable_media(
+                self.state, game_running=bool(self.running_game_id)
+            ))
             return
 
         # Allowlist check (Spec §4) — emit null URI so frontend knows it's blocked
@@ -581,7 +561,9 @@ class Plugin:
             self._play_sound("error.flac")
             self.current_tag_uri = None
             await decky.emit("uri_detected", {"uri": None, "uid": uid_hex, "blocked": True})
-            self._set_state(PluginState.READY)
+            self._set_state(state.after_unusable_media(
+                self.state, game_running=bool(self.running_game_id)
+            ))
             return
 
         decky.logger.info(f"URI found on media {uid_hex}: {uri}")
@@ -610,7 +592,7 @@ class Plugin:
         # Spec §8.1: Do not launch if any game is already running
         if self.running_game_id:
             decky.logger.info(f"Launch blocked: game {self.running_game_id} already running.")
-            self._set_state(PluginState.GAME_RUNNING)
+            self._set_state(state.after_launch_blocked(self.state))
             return
 
         if uri.startswith("steam://"):
@@ -680,12 +662,9 @@ class Plugin:
             "source_id": event.source_id,
         })
 
-        # Spec §6.6: card removed while READY → state stays READY.
-        # Stay in CARD_PRESENT if another source still holds media.
-        if self.state not in (PluginState.GAME_RUNNING, PluginState.IDLE):
-            self._set_state(
-                PluginState.CARD_PRESENT if self._registry.any_present() else PluginState.READY
-            )
+        self._set_state(state.after_media_removed(
+            self.state, any_media_present=self._registry.any_present()
+        ))
 
     # ── URI Validation ─────────────────────────────────────────────────
 
@@ -1126,12 +1105,9 @@ class Plugin:
             self._set_state(PluginState.GAME_RUNNING)
         else:
             self._registry.clear_launch()
-            if self.state == PluginState.GAME_RUNNING:
-                # Spec §6.4: game exited — return to CARD_PRESENT when media is
-                # still presented somewhere, otherwise READY.
-                self._set_state(
-                    PluginState.CARD_PRESENT if self._registry.any_present() else PluginState.READY
-                )
+            self._set_state(state.after_game_exited(
+                self.state, any_media_present=self._registry.any_present()
+            ))
 
         return True
 

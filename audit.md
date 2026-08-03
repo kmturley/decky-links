@@ -24,12 +24,13 @@ What undermines it is everything around it: the entire plugin runs on a **single
 
 ## Status
 
-Work is on `fix/audit-critical-findings`. **All three fatal flaws are fixed
-and Phases A–E are complete.** Suite: **914 passed, 6 skipped**, in
-linux/amd64. Frontend builds. Plugin zip builds.
+Work is on `fix/audit-critical-findings`. **All three fatal flaws are fixed and
+Phases A–E are complete.** Suite: **946 passed, 6 skipped**, in linux/amd64.
+Frontend builds. Plugin zip builds.
 
-**None of it has been run on a Steam Deck yet.** The container proves the
-logic holds; it cannot prove a tag still launches a game.
+**Hardware-tested on 2026-08-02** (Kim): all main flows, including non-Steam
+shortcut pairing and launching — the one change on this branch that could not be
+verified in a container. Further testing ongoing.
 
 | Phase | What it was | State |
 |---|---|---|
@@ -39,29 +40,26 @@ logic holds; it cannot prove a tag still launches a game.
 | **A** | Stop the bleeding — 10 discrete fixes | ✅ complete |
 | **B** | Connect the tests to an environment that can run them | ✅ complete |
 | **C** | Unify the trust boundary | ✅ `7189396` |
-| **D** | Break up the god object | ⚠️ substantially — see below |
+| **D** | Break up the god object | ✅ complete |
 | **E** | Pay down the abstraction leak | ✅ complete |
 
-Suite size tracks the work: 634 at audit → 656 (A+B) → 742 (C) → 872 (D) →
-914 (E).
+Suite size tracks the work: 634 at audit → 656 (A+B) → 742 (C) → 872 (D1–D3) →
+914 (E) → 946 (D4).
 
 ### What is left
 
-Three things, none of them blocking a hardware test:
+Two things:
 
-1. **The router still lives on `Plugin`** (rest of Phase D). The event loop and
-   media handlers, ~350 lines, are genuinely coupled to `self.state` and
-   `decky.emit` rather than incidentally so. Splitting them needs a decision
-   about who owns state transitions, not a file move. **Needs your input.**
-2. **The `E4` compatibility shim.** `media_detected` / `media_removed` /
+1. **The `E4` compatibility shim.** `media_detected` / `media_removed` /
    `source_connection` are emitted alongside their old NFC-shaped names. Retire
    the aliases once a release has shipped with both.
-3. **Smaller findings deliberately left open** — listed under "Open findings"
+2. **Smaller findings deliberately left open** — listed under "Open findings"
    at the end of the dimension breakdown. Each is real; none is load-bearing.
 
 Also carried forward, from C4: **the panel has no field to display or copy the
 auto-minted MQTT secret.** Enabling MQTT mints one, and there is currently no
-way to read it out of the UI to give to a publisher.
+way to read it out of the UI to give to a publisher. This is the one open item
+a user could actually walk into.
 
 ### What extraction found
 
@@ -81,6 +79,12 @@ and obvious within minutes of the extracted module having its own tests:
 3. **`get_sector_info`/`lock_sector` raised with no reader attached**, calling
    `nfc_source._classify_tag` unguarded — an RPC error in the panel instead of
    the empty result the rest of the function expects.
+4. **A blank disk silently disabled auto-close.** `_handle_media_load` set
+   `READY` unconditionally for a medium with no usable URI, dropping out of
+   `GAME_RUNNING` — and removal only closes a game while in `GAME_RUNNING`. Tap
+   a tag to launch a game, insert a blank floppy, remove the tag, and the game
+   kept running with nothing logged. Found by writing the ten scattered
+   transitions out as one table in D4.
 
 ---
 
@@ -172,7 +176,7 @@ This is a single-process plugin on one handheld. "Horizontal scale" is not the a
 ### 2. Coupling & Cohesion
 
 - ⚠️ **`main.py` is a 1,834-line god object.** One `Plugin` class holds the settings manager, state machine, event loop, URI validation, pairing, launching, audio, and ~35 RPC methods spanning NFC key management, Mifare sector locking, ECDSA signing, and printable-card rendering. Cohesion is near zero — sector locking and QR card generation share nothing but a `self`.
-  > **1,834 → 1,256 lines (-31%).** Six modules now live in `decky_links/`. What remains is the lifecycle, the RPC surface, and the router — and the router is the part that needs a design decision, not a file move. See "What is left".
+  > **Fixed. 1,834 → 1,232 lines (-33%).** Seven modules now live in `decky_links/`. What remains is the lifecycle, the RPC surface, and the media handlers — and the handlers stay on purpose: what makes them hard is the ordering of their effects, which cannot be extracted. The *decisions* they were making came out into `state.py`. See D4.
 - ✅ **Six sources are tracked twice.** `Plugin` keeps named attributes (`self.nfc_source`, `self.storage_source`, …) *and* registers them all with `SourceManager`. `_all_sources()` ([main.py:504](main.py#L504)) exists solely to reconcile the two. Adding a seventh source requires editing **eight** places: `Plugin.__init__`, `_main`, `_all_sources`, `get_source_statuses`, `set_source_setting`'s allowlist, `SourceType` (Python), `SourceType` (TypeScript), and `sourceIcon()`. The abstraction does not yet pay for itself.
   > **Fixed (E1, E3).** The registry is the only record; `nfc_source`/`storage_source` are lookups by type. `sources.source_classes()` collapses the first three of those eight edits into one entry.
 - ✅ **NFC leaks straight through the generic layer.** `current_tag_uid/uri/meta`, `get_tag_status`, `get_reader_status`, the `reader_status` event, the `tag_detected`/`tag_removed` event names, and `NFC_SETTING_KEYS` being special-cased inside `SettingsManager.get/set` ([main.py:210-226](main.py#L210-L226)). The code acknowledges this ("NFC-flavoured for historical reasons", [main.py:107](main.py#L107)) — acknowledged debt is still debt.
@@ -232,7 +236,7 @@ This is a single-process plugin on one handheld. "Horizontal scale" is not the a
   > **Fixed (B4).** `npm test` runs the container. `setup_test_env.sh` is now a signpost to it rather than a second answer. The `.venv` directory itself is gitignored and host-local — delete it by hand if you want it gone.
 - ℹ️ **Test results on this host are not a signal.** I ran the suite on macOS arm64 and saw failures traceable to missing `cryptography` and to `py_modules/` holding a Linux-built Pillow. That is the expected and correct outcome of running an x86_64-Linux plugin's tests on Apple Silicon — **not a project defect**, and I am not reporting it as one. The `py_modules/` vendoring behind it is likewise deliberate: it is gitignored (only `.keep` is tracked), regenerated per build, and forced by the decky CLI zipping a fixed path allowlist that excludes `sources/`, `nfc/`, `cards/`, and `assets/`. [main.py:12-13](main.py#L12-L13) puts the checked-out tree ahead of it on `sys.path` specifically so the vendored copies can never shadow files under edit. All of this is documented at length in `build.sh`.
 - ⚠️ **`main.py` at 1,834 lines / one class** is the single largest evolution hurdle. Testing `_validate_uri` requires standing up a `Plugin`.
-  > **1,834 → 1,256.** `_validate_uri`'s rules are `decky_links/uri.py`, a pure module with 103 tests and no `Plugin` anywhere near them. The router is what remains — see "What is left".
+  > **Fixed. 1,834 → 1,232.** `_validate_uri`'s rules are `decky_links/uri.py`, a pure module with 103 tests and no `Plugin` anywhere near them; the state machine is `decky_links/state.py`, 32 more.
 - ✅ **Generated-text artifacts left in source:** [index.tsx:25](src/index.tsx#L25) reads `// (the rest of the file remains unchanged)` and [BackgroundManager.tsx:469](src/BackgroundManager.tsx#L469) reads `// polling loop omitted for brevity` — directly above the polling loop. Both are placeholder text that shipped. — **Fixed (A9).**
 - ✅ **Agent memory is stale** — `MEMORY.md` records "Phase 2 (StorageSource) is next"; the repo is post-Phase-5. — **Fixed.**
 
@@ -294,7 +298,7 @@ Two latent failures surfaced the moment the suite could run in the right place, 
 - ~~**C4.**~~ **Done, `7189396`** — all three, plus: enabling MQTT mints a secret, because the panel has no field to type one into and the toggle would otherwise silently do nothing. **Follow-up: a panel field to display and copy that secret.**
 - ~~**C5.**~~ **Done, `7189396`** — `_is_local_host` now covers 127/8, bracketed IPv6, IPv4-mapped IPv6, RFC1918, link-local (incl. 169.254.169.254) and `.local`; it also fixes the port bug, where `localhost:8080` never matched because the check compared against `netloc`. The docstring states the scope: it checks the literal, not what a public name resolves to.
 
-### Phase D — Break up the god object ⚠️ D1–D3 done, D4 open
+### Phase D — Break up the god object ✅ complete
 
 Everything landed in a `decky_links/` package rather than the `plugin/` + `rpc/`
 split sketched below. The reason is a packaging constraint, not taste: the decky
@@ -309,17 +313,48 @@ forget one.
 | D1 | Extract URI validation — pure function, zero dependencies, immediate test win | ✅ `decky_links/uri.py`, 103 tests, no `Plugin` involved |
 | D2 | Extract settings (builds on C1) | ✅ `decky_links/settings.py` + `settings_schema.py` |
 | D3 | Extract the RPC groups — mechanical, low risk | ✅ `card_rpcs.py`, `nfc_rpcs.py`, `media_registry.py` |
-| D4 | Extract the state machine and router last; this is where the real coupling lives | ⬜ **Open.** ~350 lines still on `Plugin`. |
+| D4 | Extract the state machine and router last; this is where the real coupling lives | ✅ state machine extracted; **router deliberately not** — see below |
 
-**D4 is the one item that needs your input.** The event loop and media handlers
-are coupled to `self.state` and `decky.emit` rather than incidentally sharing a
-`self` — moving them to a `Router` means deciding whether the router owns state
-transitions or asks the plugin to make them, and whether it emits directly or
-returns events for the plugin to emit. That is a design decision, and doing it
-badly would give you two objects that both half-own the state machine, which is
-worse than one that owns it outright.
+`main.py`: 1,834 → 1,232 lines (-33%).
 
-`main.py`: 1,834 → 1,256 lines (-31%).
+#### D4: extract the state machine, not a router
+
+The roadmap sketched a `plugin/router.py` holding the event loop and media
+handlers. **Don't build it.** The reasoning, in order:
+
+1. **There is no ecosystem precedent to defer to.** decky-loader's own backend
+   is one flat package (`backend/decky_loader/` — `settings.py`, `helpers.py`,
+   `loader.py`, `wsrouter.py`), which is the shape `decky_links/` already has.
+   PowerTools, one of the largest published plugins, is a single `main.py`. The
+   wiki says only that `main.py` "can be left extremely barebones". Nobody in
+   this ecosystem has solved this, so the decision is ours on the merits.
+2. **A `Router` holding `self` is not a split**, and a `Router` that owns state
+   creates the two-half-owners problem outright. decky-loader's own `WSRouter`
+   avoids exactly this: it owns its transport state (`ws`, `routes`,
+   `pending_responses`) and dispatches to *registered callbacks* — it never owns
+   domain state.
+3. **The 350 lines are not hard because they are long.** They are hard because
+   of three ordering constraints: pairing is checked before URI inspection, a
+   launch is claimed before `uri_detected` is emitted, and per-source clearing
+   must not touch other sources. Ordering only exists in an effectful sequence.
+   You cannot extract it, and moving the conditions away from the comments that
+   explain it makes both harder to follow.
+
+What *was* extractable is the state machine: ten inline conditionals across four
+handlers, implementing Spec §5–§9. Those are pure decisions, and scattering them
+is what let one of them be wrong for a long time. They now live in
+`decky_links/state.py` as pure functions — `PluginState` moved there too — with
+`Plugin._set_state` remaining the only thing that mutates state. One owner, and
+the machine is now readable as a table (`tests/test_state.py`, 32 tests).
+
+**This found a real bug.** `_handle_media_load` set `READY` unconditionally when
+a medium had no usable URI — blank, unreadable, or blocked by the allowlist —
+which dropped the plugin out of `GAME_RUNNING`. Since `_handle_media_unload`
+only closes a game while in `GAME_RUNNING`, the sequence *tap a tag to launch a
+game → put a blank disk in the drive → take the tag off* left the game running,
+with nothing in the log to say why. Auto-close stayed broken until the game
+exited by hand. Two end-to-end tests and two table tests cover it; all four fail
+when the guard is removed.
 
 ### Phase E — Pay down the abstraction leak ✅ complete
 
