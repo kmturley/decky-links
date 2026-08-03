@@ -220,7 +220,7 @@ export function startBackgroundManager(): () => void {
   // problem: "loading" so it occupies its row the same way a real medium does
   // — the row is what the user is watching, and it has to stop saying "No
   // disk" the moment the disk goes in, not a minute later when it mounts.
-  // Always superseded by tag_detected/uri_detected for the same source.
+  // Always superseded by media_detected/uri_detected for the same source.
   const loadingListener = addEventListener<[data: {
     source_id?: string, source_type?: string, media_id?: string, drive_kind?: string,
   }]>("media_loading", (data) => {
@@ -242,7 +242,7 @@ export function startBackgroundManager(): () => void {
   // event listeners
   const tagListener = addEventListener<[data: {
     uid: string, source_type?: string, source_id?: string, drive_kind?: string,
-  }]>("tag_detected", (data) => {
+  }]>("media_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
     // Per-source record, so a tag and a disk can be present at once and each
     // gets its own row and Pair button in the Triggers list. Absent
@@ -264,7 +264,7 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
-  const removeListener = addEventListener<[data?: { source_id?: string }]>("tag_removed", (data) => {
+  const removeListener = addEventListener<[data?: { source_id?: string }]>("media_removed", (data) => {
     // Only the source that reported the removal loses its row. Clearing the
     // whole map when source_id was absent meant one trigger losing its medium
     // blanked every other trigger's row too — a floppy ejecting would erase
@@ -277,7 +277,7 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   });
 
-  const statusListener = addEventListener<[data: { connected: boolean, path?: string, source_type?: string }]>("reader_status", (data) => {
+  const statusListener = addEventListener<[data: { connected: boolean, path?: string, source_type?: string }]>("source_connection", (data) => {
     if (!data || typeof data.connected !== "boolean") return;
     sharedState.readerStatus = {
       connected: data.connected,
@@ -451,7 +451,7 @@ export function startBackgroundManager(): () => void {
   // — and it is a local read, not an RPC.
   //
   // Everything else here duplicates something the backend already pushes
-  // (reader_status, source_statuses), so it is a recovery path for a dropped
+  // (source_connection, source_statuses), so it is a recovery path for a dropped
   // event rather than the way state normally arrives. Running those at 2 Hz
   // cost two RPC round-trips a second for the life of the plugin, on a
   // battery-powered handheld, to re-learn things that had not changed.
@@ -524,9 +524,9 @@ export function startBackgroundManager(): () => void {
   stopBackgroundManagerFn = () => {
     active = false;
     removeEventListener("media_loading", loadingListener);
-    removeEventListener("tag_detected", tagListener);
-    removeEventListener("tag_removed", removeListener);
-    removeEventListener("reader_status", statusListener);
+    removeEventListener("media_detected", tagListener);
+    removeEventListener("media_removed", removeListener);
+    removeEventListener("source_connection", statusListener);
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);

@@ -15,12 +15,10 @@ if _py_modules not in sys.path:
     sys.path.append(_py_modules)
 
 import asyncio
-import time
 import ipaddress
 import json
 import traceback
 import subprocess
-import threading
 import re
 import secrets
 from enum import Enum
@@ -71,6 +69,38 @@ STATUS_TICK_SECONDS = 2.0
 TOP_LEVEL_SETTING_KEYS = settings_schema.TOP_LEVEL_SETTING_KEYS
 NFC_SETTING_KEYS = settings_schema.NFC_SETTING_KEYS
 ALLOWED_SETTING_KEYS = TOP_LEVEL_SETTING_KEYS | NFC_SETTING_KEYS
+
+
+# -----------------------------------------------------------------------
+# Frontend events
+# -----------------------------------------------------------------------
+
+# The old names date from when NFC was the only source. They now carry storage,
+# camera, MQTT, serial and file-watch events too, where "tag" and "reader"
+# describe nothing that exists — a floppy insert arrived as `tag_detected` with
+# a device node in the `uid` field. `media_loading` was added later and already
+# uses the current naming, so this brings the rest into line with it.
+#
+# Both names are emitted for now. The two halves of the plugin ship in one zip,
+# so a *deploy* cannot skew them — but the frontend bundle lives in the Steam UI
+# process, which outlives a plugin_loader restart. Restarting the backend
+# against a bundle the UI has not reloaded is the normal development loop, and
+# without the alias that window is one where no medium is ever detected.
+#
+# Retire the aliases once a release has shipped with both.
+LEGACY_EVENT_NAMES = {
+    "media_detected": "tag_detected",
+    "media_removed": "tag_removed",
+    "source_connection": "reader_status",
+}
+
+
+async def emit(event: str, payload: Any) -> None:
+    """Emit a frontend event, plus its legacy alias if it has one."""
+    await decky.emit(event, payload)
+    legacy = LEGACY_EVENT_NAMES.get(event)
+    if legacy is not None:
+        await decky.emit(legacy, payload)
 
 
 # -----------------------------------------------------------------------
@@ -189,10 +219,6 @@ class Plugin:
         self.current_tag_uid = None
         self.current_tag_uri = None
         self._registry.reset()
-        # RPC call caching to reduce load with thread-safe lock
-        self._tag_status_lock = threading.RLock()
-        self._last_tag_status_query = 0
-        self._tag_status_cache = None
 
         # --- Source-based architecture ---
         self._event_queue: asyncio.Queue[PluginEvent] = asyncio.Queue()
@@ -354,7 +380,7 @@ class Plugin:
             if self.state == PluginState.IDLE:
                 self._set_state(PluginState.READY)
             if is_nfc:
-                await decky.emit("reader_status", {
+                await emit("source_connection", {
                     "connected": True,
                     "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
@@ -376,7 +402,7 @@ class Plugin:
                 self._registry.drop_origin_for_source(event.source_id)
 
             if is_nfc:
-                await decky.emit("reader_status", {
+                await emit("source_connection", {
                     "connected": False,
                     "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
@@ -393,7 +419,7 @@ class Plugin:
             # way ejecting the disk would; otherwise it keeps showing media that
             # is no longer attached to anything.
             if had_media:
-                await decky.emit("tag_removed", {
+                await emit("media_removed", {
                     "source_type": event.source_type.value,
                     "source_id": event.source_id,
                 })
@@ -500,7 +526,7 @@ class Plugin:
             and armed_for_this_source
             and self._pairable_source(event.source_id) is not None
         ):
-            await decky.emit("tag_detected", {
+            await emit("media_detected", {
                 "uid": uid_hex,
                 "source_type": event.source_type.value,
                 "source_id": event.source_id,
@@ -509,9 +535,9 @@ class Plugin:
             await self._handle_pairing(uid_hex, source_id=event.source_id)
             return
 
-        # Emit tag_detected immediately — matches old _handle_scan behavior where
-        # the UID appeared in the UI as soon as the card was read.
-        await decky.emit("tag_detected", {
+        # Emit media_detected immediately — matches old _handle_scan behavior
+        # where the UID appeared in the UI as soon as the card was read.
+        await emit("media_detected", {
             "uid": uid_hex,
             "source_type": event.source_type.value,
             "source_id": event.source_id,
@@ -649,7 +675,7 @@ class Plugin:
             self.current_tag_uid = None
             self.current_tag_uri = None
             self.current_tag_meta = None
-        await decky.emit("tag_removed", {
+        await emit("media_removed", {
             "source_type": event.source_type.value,
             "source_id": event.source_id,
         })
@@ -776,8 +802,9 @@ class Plugin:
         if entry is not None:
             entry["uri"] = uri
 
-        # current_tag_* is the NFC-specific view behind get_tag_status; pairing
-        # a floppy must not overwrite what the reader is holding.
+        # current_tag_* is the NFC-only view the write path reads back from
+        # (write_tag needs the UID of the tag on the reader); pairing a floppy
+        # must not overwrite what the reader is holding.
         if is_nfc:
             self.current_tag_uri = uri
             if self.nfc_source is not None:
@@ -969,25 +996,11 @@ class Plugin:
             "source_type": SourceType.NFC.value,
         }
 
-    async def get_tag_status(self):
-        """Get current tag status with thread-safe caching to reduce load.
-        
-        Results are cached for 100ms to avoid excessive polling.
-        """
-        now = time.time()
-        
-        with self._tag_status_lock:
-            # Return cached result if still fresh (100ms cache)
-            if (now - self._last_tag_status_query) < 0.1 and self._tag_status_cache is not None:
-                return self._tag_status_cache
-            
-            # Update cache atomically
-            self._last_tag_status_query = now
-            self._tag_status_cache = {
-                "uid": self.current_tag_uid,
-                "uri": self.current_tag_uri,
-            }
-            return self._tag_status_cache
+    # get_tag_status is gone. It reported one global slot — whichever source
+    # presented media last — which is the model E5 removed from the frontend;
+    # get_active_media reports every source separately and is what the panel
+    # asks for. The 100ms cache existed because the frontend polled this twice
+    # a second; nothing has called it since that poll moved to the 5s tick.
 
     async def simulate_tag(self, uid: bytes, uri: Optional[str] = None):
         """Helper for testing/debug – pretend a tag with given UID/URI is present.
@@ -1007,7 +1020,7 @@ class Plugin:
                 self.current_tag_meta = None
         else:
             self.current_tag_meta = None
-        await decky.emit("tag_detected", {"uid": uid_hex})
+        await emit("media_detected", {"uid": uid_hex})
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 
     async def get_tag_metadata(self, uid: Optional[str] = None):
@@ -1144,8 +1157,9 @@ class Plugin:
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
 
-        The per-source view that `get_tag_status` cannot express: that RPC
-        reports the NFC slot only, for backwards compatibility.
+        The only view of presented media. It replaced `get_tag_status`, which
+        reported a single global slot that whichever source fired last
+        overwrote — a tag and a disk could not both be present.
         """
         return self._registry.all()
 
