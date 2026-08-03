@@ -49,6 +49,13 @@ export interface ActiveMedium {
      *  for that whole time. Always replaced by a real state. */
     problem?: "blank" | "unreadable" | "blocked" | "loading" | null;
     error?: string;
+    /** Whether offering to format this medium would destroy anything.
+     *
+     *  Set by the backend only when blkid found no filesystem at all. A disk
+     *  holding a filesystem we do not mount (ntfs, hfsplus) is also
+     *  "unreadable" but has data on it, so the Format button must key off this
+     *  flag rather than off `problem === "unreadable"`. */
+    formattable?: boolean;
 }
 
 export interface DriveKindStatus {
@@ -214,6 +221,13 @@ export const setSetting = callable<[key: SettingKey, value: any], boolean>("set_
 export const startPairing =
   callable<[uri: string, source_id?: string, title?: string], boolean>("start_pairing");
 export const getActiveMedia = callable<[], ActiveMedium[]>("get_active_media");
+
+/** Write a fresh FAT filesystem to a disk. Destroys its contents.
+ *
+ * Only ever called for media the backend flagged `formattable` — no filesystem
+ * found, so nothing to lose. The backend re-checks every guard regardless. */
+export const formatMedia =
+  callable<[media_id: string], { success: boolean; error: string | null }>("format_media");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");
 export const setRunningGame = callable<[appid: number | null], void>("set_running_game");

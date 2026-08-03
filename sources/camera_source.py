@@ -39,6 +39,13 @@ class CameraSource(MediaSource):
 
     DEBOUNCE_THRESHOLD = 3  # consecutive empty frames before UNLOAD is emitted
 
+    # Consecutive *capture* failures before the source is torn down and
+    # restarted. A single dropped frame is normal for a webcam — USB bandwidth
+    # contention, the device busy with autoexposure — and tearing down on one
+    # of them cost a full stop/start plus an ffmpeg spawn to recover from
+    # something that would have fixed itself on the next poll.
+    CAPTURE_FAILURE_THRESHOLD = 3
+
     def __init__(self, settings: dict, logger=None):
         self._settings = settings
         self._logger = logger
@@ -46,6 +53,7 @@ class CameraSource(MediaSource):
         self._active: bool = False
         self._last_qr: Optional[str] = None   # URI of currently-visible QR code
         self._missing_count: int = 0
+        self._capture_failures: int = 0
 
     @property
     def source_id(self) -> str:
@@ -91,6 +99,7 @@ class CameraSource(MediaSource):
         self._active = False
         self._last_qr = None
         self._missing_count = 0
+        self._capture_failures = 0
 
     def is_active(self) -> bool:
         return self._active
@@ -114,12 +123,25 @@ class CameraSource(MediaSource):
 
         captured, uri = await asyncio.to_thread(self._capture_and_decode)
         if not captured:
+            self._capture_failures += 1
             if self._logger:
                 self._logger.warning(
-                    f"CameraSource: frame capture failed on {self._device}"
+                    f"CameraSource: frame capture failed on {self._device} "
+                    f"({self._capture_failures}/{self.CAPTURE_FAILURE_THRESHOLD})"
                 )
-            self._active = False
+            # Only give up after several in a row. One failure is a dropped
+            # frame, which is ordinary; several is the device having actually
+            # gone away, and only that is worth a stop/start cycle.
+            if self._capture_failures >= self.CAPTURE_FAILURE_THRESHOLD:
+                if self._logger:
+                    self._logger.error(
+                        f"CameraSource: {self._device} failed "
+                        f"{self._capture_failures} captures in a row — reconnecting"
+                    )
+                self._active = False
             return None
+
+        self._capture_failures = 0
 
         if uri:
             self._missing_count = 0

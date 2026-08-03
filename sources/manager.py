@@ -6,6 +6,7 @@ polls its source independently and pushes events into a shared
 """
 
 import asyncio
+import time
 import traceback
 from typing import List, Optional
 
@@ -203,6 +204,7 @@ class SourceManager:
                     ))
 
                 # ── Poll ───────────────────────────────────────────────
+                started = time.monotonic()
                 event = await source.poll()
                 if event is not None:
                     await self._queue.put(event)
@@ -234,7 +236,15 @@ class SourceManager:
                 reconnect_delay = min(RECONNECT_MAX, reconnect_delay * 2)
                 continue
 
-            await asyncio.sleep(source.poll_interval)
+            # Sleep the remainder of the interval, measured from when the poll
+            # *started*. Sleeping the full interval afterwards made the real
+            # cadence `interval + work_time`, so the camera — a 5s ffmpeg
+            # capture on a 1s interval — actually sampled every 6s, and the
+            # configured number meant something different for every source.
+            # Clamped at zero: a poll that overruns its interval just runs
+            # again immediately rather than accumulating debt.
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(0.0, source.poll_interval - elapsed))
 
     # ── Introspection ──────────────────────────────────────────────────
 

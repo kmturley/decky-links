@@ -105,6 +105,10 @@ class Plugin:
         # See decky_links.media_registry for the invariants.
         self._registry = MediaRegistry()
         self._last_statuses = None
+        # A dropped event is invisible by nature: the tap simply does nothing,
+        # which is indistinguishable from the reader never seeing it.
+        self._dropped_events = 0
+        self._last_drop_reason = None
 
     # --- Lifecycle ---
 
@@ -192,7 +196,17 @@ class Plugin:
     async def _unload(self):
         decky.logger.info("Decky Links unloading...")
         if hasattr(self, "polling_task"):
+            # Awaited, not just cancelled. cancel() only *schedules* the
+            # CancelledError; without awaiting, unload returns while the loop
+            # is still mid-iteration and may emit or touch a source that
+            # stop_all() below is concurrently tearing down.
             self.polling_task.cancel()
+            try:
+                await self.polling_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                decky.logger.warning(f"Event loop raised during unload: {e}")
         if hasattr(self, "source_manager"):
             await self.source_manager.stop_all()
 
@@ -246,8 +260,35 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                decky.logger.error(f"Event loop error: {e}")
+                # The event is dropped — there is nothing sensible to retry,
+                # since a handler that raised halfway has already applied part
+                # of its effect. What was missing was any trace of it beyond a
+                # log line nobody reads: a tap that silently does nothing looks
+                # exactly like a tap the reader never saw, which sends users
+                # off debugging hardware.
+                self._dropped_events += 1
+                self._last_drop_reason = f"{type(e).__name__}: {e}"
+                decky.logger.error(
+                    f"Event loop error (dropped event #{self._dropped_events}): {e}"
+                )
                 decky.logger.error(traceback.format_exc())
+                await self._publish_health()
+
+    async def _publish_health(self):
+        """Tell the panel the loop dropped something.
+
+        Its own event rather than a field on ``source_statuses``, which is an
+        array of per-source rows — health is about the plugin, not a source, and
+        widening that payload would mean every consumer of it re-deriving which
+        part is which.
+        """
+        await decky.emit("plugin_health", self._health())
+
+    def _health(self):
+        return {
+            "dropped_events": self._dropped_events,
+            "last_drop_reason": self._last_drop_reason,
+        }
 
     async def _publish_statuses(self, force: bool = False):
         """Push source statuses to the panel, but only when they changed.
@@ -377,7 +418,10 @@ class Plugin:
                 any_media_present=self._registry.any_present(),
             ))
 
-        await self._publish_statuses()
+        # No publish here: the event loop publishes after dispatching every
+        # event, so doing it again meant walking every source twice for each
+        # connect and disconnect. The second call only ever produced a no-op
+        # diff, which is why it went unnoticed.
 
     async def _handle_media_event(self, event: MediaEvent):
         """Handle media interaction events (tag tap, floppy insert, etc.)."""
@@ -445,6 +489,11 @@ class Plugin:
             "uri":         uri,
             "drive_kind":  event.payload.get("drive_kind") or prior_kind,
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
+            # Carried on the registry entry too, not just the uri_detected
+            # event: get_active_media is the 5s backstop the panel re-syncs
+            # from, and without this a dropped event would leave the row
+            # showing "Unformatted disk" with no way to act on it.
+            "formattable": bool(event.payload.get("formattable")),
         })
 
         # current_tag_* remain the NFC-specific view, kept for the existing RPC
@@ -519,6 +568,10 @@ class Plugin:
                 "blank": not unreadable,
                 "unreadable": unreadable,
                 "error": event.payload.get("error"),
+                # Only true when the source found no filesystem at all, which
+                # is what the panel gates its Format button on. An unreadable
+                # medium that *does* hold a filesystem has data on it.
+                "formattable": bool(event.payload.get("formattable")),
             })
             self._set_state(state.after_unusable_media(
                 self.state, game_running=bool(self.running_game_id)
@@ -961,10 +1014,22 @@ class Plugin:
     # a second; nothing has called it since that poll moved to the 5s tick.
 
     async def simulate_tag(self, uid: bytes, uri: Optional[str] = None):
-        """Helper for testing/debug – pretend a tag with given UID/URI is present.
+        """Forge a media detection, for testing and debugging.
 
-        Emits the same events as a real scan but does not touch hardware.
+        Emits the same events as a real scan without touching hardware, which
+        makes it a working forgery path: anything that can reach the RPC surface
+        can make the panel believe a paired tag was presented. No frontend caller
+        remains, so it is now gated behind DECKY_LINKS_DEBUG rather than exposed
+        unconditionally in a build users install.
+
+        Set the variable in the plugin's environment to re-enable it.
         """
+        if not os.environ.get("DECKY_LINKS_DEBUG"):
+            decky.logger.warning(
+                "simulate_tag refused: set DECKY_LINKS_DEBUG to enable debug RPCs"
+            )
+            return False
+
         uid_hex = uid.hex().upper()
         self.current_tag_uid = uid_hex
         self.current_tag_uri = uri
@@ -980,6 +1045,36 @@ class Plugin:
             self.current_tag_meta = None
         await decky.emit("media_detected", {"uid": uid_hex})
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
+        return True
+
+    async def format_media(self, media_id: str):
+        """Format a disk that carries no filesystem. Destroys its contents.
+
+        Offered only for media the storage source reported with
+        ``formattable`` — meaning blkid found nothing on it, so there is
+        nothing on it to lose. `StorageSource.format_media` re-checks that and
+        every other guard rather than trusting this call, because the disk can
+        be swapped between the panel drawing the button and the user pressing
+        it.
+        """
+        source = self.storage_source
+        if source is None:
+            return {"success": False, "error": "storage source not available"}
+
+        success, error = await source.format_media(media_id)
+        if success:
+            decky.logger.info(f"Formatted {media_id}")
+        else:
+            decky.logger.warning(f"Refused to format {media_id}: {error}")
+        return {"success": success, "error": error}
+
+    async def get_health(self):
+        """Counters the panel shows when something went wrong internally.
+
+        The backstop for `plugin_health`: a drop that happened before the panel
+        opened has no event to have missed, so the count has to be askable.
+        """
+        return self._health()
 
     async def get_tag_metadata(self, uid: Optional[str] = None):
         """Return classification info for a tag.

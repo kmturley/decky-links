@@ -13,11 +13,12 @@ is not available — ``start()`` returns False and the source stays inactive.
 import asyncio
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import traceback
 from collections import deque
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from sources.base import (
     MediaEvent,
@@ -28,6 +29,18 @@ from sources.base import (
 )
 
 PAYLOAD_FILENAME = "decky-links.json"
+
+# The one mount failure that means "there is no filesystem here". Compared
+# against, not just displayed, so it is a constant rather than a literal: it is
+# what tells a blank disk apart from one holding data in a filesystem we do not
+# mount, and only the former may be offered for formatting.
+UNFORMATTED_ERROR = "Unformatted disk"
+
+# What we format to. FAT is the only filesystem every machine likely to read
+# one of these disks can also write, which is the entire point of putting a
+# link on removable media.
+_MKFS_COMMAND = "mkfs.vfat"
+_FORMAT_TIMEOUT_SECONDS = 120
 
 # A floppy drive seeks for several seconds before it admits defeat on an
 # unformatted disk, so this has to be generous. Every call using it runs in a
@@ -557,6 +570,13 @@ class StorageSource(MediaSource):
                 # unformatted, and saying so would send the user off to reformat
                 # media that is fine.
                 error=self._last_mount_error or "Unformatted disk",
+                # Whether offering to format this disk would destroy anything.
+                # True only when blkid found no filesystem at all — an
+                # unsupported one (ntfs, hfsplus) means there *is* data here,
+                # and the panel must not offer to erase it. The distinction has
+                # to be a flag: the frontend string-matching on the error text
+                # would put one careless message between a user and their data.
+                formattable=(self._last_mount_error == UNFORMATTED_ERROR),
             )
 
         payload_path = os.path.join(mountpoint, PAYLOAD_FILENAME)
@@ -680,6 +700,113 @@ class StorageSource(MediaSource):
             self._logger.info(f"StorageSource: wrote uri={uri} to {devnode}")
         return True, None
 
+    # ── Formatting ─────────────────────────────────────────────────────
+
+    # _is_removable already exists above, and guards every mount we perform.
+    # The same check guards formatting: a device the kernel does not call
+    # removable is the internal drive, and that is the one mistake here that
+    # cannot be undone.
+
+    def _has_any_mounted_partition(self, devnode: str) -> Optional[str]:
+        """The first mountpoint belonging to this device or a partition of it.
+
+        ``/proc/mounts`` is checked by prefix, so a request to format
+        ``/dev/sda`` is refused while ``/dev/sda1`` is mounted. Formatting the
+        whole device out from under a live filesystem is how you corrupt
+        something that was not the target.
+        """
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].startswith(devnode):
+                        return parts[1]
+        except OSError:
+            pass
+        return None
+
+    async def format_media(self, devnode: str) -> Tuple[bool, Optional[str]]:
+        """Write a fresh FAT filesystem to ``devnode``. Destroys its contents.
+
+        Every guard here exists because this runs as root and takes a device
+        path from an RPC. In order:
+
+        * the device must be one we track, so an arbitrary path cannot be passed
+        * it must be a block device, not a regular file or a symlink to one
+        * the kernel must call it removable — this is what stands between a bug
+          and the internal drive
+        * nothing on it, or on any of its partitions, may be mounted
+        * ``blkid`` must find no filesystem
+
+        That last one is the substantive policy, not a safety belt: it means
+        this can only ever run on a disk with nothing on it to lose. The panel
+        offers the button on exactly that state, and this re-checks rather than
+        trusting it, because the disk can be swapped between the two.
+        """
+        if devnode not in self._drives:
+            return False, "unknown device"
+
+        if not os.path.exists(devnode):
+            return False, f"{devnode} does not exist"
+
+        try:
+            if not stat.S_ISBLK(os.stat(devnode).st_mode):
+                return False, f"{devnode} is not a block device"
+        except OSError as e:
+            return False, str(e)
+
+        if not self._is_removable(devnode):
+            return False, f"{devnode} is not a removable drive"
+
+        mounted_at = self._has_any_mounted_partition(devnode)
+        if mounted_at:
+            return False, f"{devnode} is in use (mounted at {mounted_at})"
+
+        fstype = await self._probe_filesystem(devnode)
+        if fstype is not None:
+            # The one refusal a user might argue with, and the one worth
+            # keeping: a disk with a filesystem has something on it, even if we
+            # cannot read that filesystem. Reformatting it is a decision to
+            # destroy data, which belongs at a terminal, not behind a button in
+            # a side menu.
+            return False, f"{devnode} already holds a {fstype} filesystem"
+
+        if self._logger:
+            self._logger.warning(
+                f"StorageSource: formatting {devnode} as FAT — this erases it"
+            )
+
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [_MKFS_COMMAND, "-I", devnode],
+                capture_output=True,
+                timeout=_FORMAT_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            return False, f"{_MKFS_COMMAND} is not installed"
+        except subprocess.TimeoutExpired:
+            return False, "formatting timed out"
+        except Exception as e:
+            return False, str(e)
+
+        if result.returncode != 0:
+            err = result.stderr.decode(errors="replace").strip()
+            if self._logger:
+                self._logger.error(f"StorageSource: {_MKFS_COMMAND} failed: {err}")
+            return False, err or "format failed"
+
+        # The disk is a different disk now. Drop the "we tried and failed"
+        # marker so the next poll mounts it instead of skipping it as known-bad,
+        # and forget the empty media entry so the fresh filesystem is reported
+        # as a new arrival rather than an unchanged one.
+        self._unmountable.discard(devnode)
+        self._active_media.pop(devnode, None)
+
+        if self._logger:
+            self._logger.info(f"StorageSource: formatted {devnode} as FAT")
+        return True, None
+
     async def _reap_stale_mounts(self) -> None:
         """Unmount temp mounts left behind by a previous plugin process.
 
@@ -793,7 +920,7 @@ class StorageSource(MediaSource):
 
         fstype = await self._probe_filesystem(devnode)
         if fstype is None:
-            self._last_mount_error = "Unformatted disk"
+            self._last_mount_error = UNFORMATTED_ERROR
             if self._logger:
                 self._logger.warning(
                     f"StorageSource: {devnode} carries no recognisable filesystem "

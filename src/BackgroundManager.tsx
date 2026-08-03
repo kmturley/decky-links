@@ -297,6 +297,7 @@ export function startBackgroundManager(): () => void {
     uri: string | null, uid: string, paired?: boolean, source_id?: string,
     source_type?: SourceType,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
+    formattable?: boolean,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
 
@@ -334,6 +335,9 @@ export function startBackgroundManager(): () => void {
           uri,
           problem: problem?.kind ?? null,
           error: problem?.kind === "unreadable" ? data.error : undefined,
+          // Only meaningful while the medium is unreadable; cleared otherwise
+          // so a disk that later mounts cannot keep offering to erase itself.
+          formattable: problem?.kind === "unreadable" && !!data.formattable,
         },
       };
     }
@@ -432,6 +436,16 @@ export function startBackgroundManager(): () => void {
         void (async () => {
           if (!currentAppId || !(await terminateSteamApp(String(currentAppId), data.uri))) {
             console.warn(`[ Decky Links ] Failed to terminate app ${currentAppId ?? "unknown"}.`);
+            // Say so. The user took the tag off expecting the game to close;
+            // when it does not, silence reads as "the plugin didn't notice"
+            // and sends them to re-tap the tag, which cannot help. Naming the
+            // game makes clear the removal *was* seen and the close is what
+            // failed.
+            toaster.toast({
+              title: "Could not close game",
+              body: "Steam did not close it. Exit from the game's menu.",
+              critical: true,
+            });
           }
         })();
       } else {

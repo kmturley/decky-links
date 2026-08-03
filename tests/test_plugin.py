@@ -15,6 +15,7 @@ Tests cover:
 """
 import asyncio
 import json
+import os
 import sys
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
@@ -45,6 +46,23 @@ def _mock_nfc_source(write_result=(True, None), source_id="nfc:/dev/ttyUSB0"):
     src.write_uri = AsyncMock(return_value=write_result)
     src.write_ndef_uri.return_value = write_result
     return src
+
+
+async def _drain_one_event(plugin, event):
+    """Push one event through the real loop and let it settle.
+
+    These used to call _handle_source_event directly and assert it published
+    statuses. Publishing moved to the loop — it was happening in both places,
+    which walked every source twice per event — so the assertion now has to run
+    the loop. That is the behaviour worth pinning anyway: a connect reaching the
+    panel, not which function sent it.
+    """
+    plugin._event_queue = asyncio.Queue()
+    await plugin._event_queue.put(event)
+    task = asyncio.create_task(plugin._event_loop())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def _make_load_event(uid_hex: str, uri=None, records=None, tag_meta=None):
@@ -630,7 +648,10 @@ class TestReaderInit:
     async def test_simulate_tag_sets_state_and_emits(self, plugin, mock_decky):
         uid = b"\xAA\xBB\xCC\xDD"
         uri = "https://foo"
-        with patch.object(plugin.nfc_source, "_classify_tag", return_value={"uid": uid.hex().upper()}):
+        # Gated behind DECKY_LINKS_DEBUG: it forges media events from
+        # caller-supplied data, so it is not exposed in a build users install.
+        with patch.dict(os.environ, {"DECKY_LINKS_DEBUG": "1"}), \
+             patch.object(plugin.nfc_source, "_classify_tag", return_value={"uid": uid.hex().upper()}):
             await plugin.simulate_tag(uid, uri)
         assert plugin.current_tag_uid == uid.hex().upper()
         assert plugin.current_tag_uri == uri
@@ -1590,7 +1611,7 @@ class TestHandleSourceEvent:
             mock_decky.emit.reset_mock()
             plugin._last_statuses = None          # nothing published yet
             event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=source_type, source_id=f"{source_type.value}:test")
-            await plugin._handle_source_event(event)
+            await _drain_one_event(plugin, event)
             emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
             assert "source_statuses" in emitted, f"Missing source_statuses for {source_type}"
 
@@ -1635,7 +1656,7 @@ class TestHandleSourceEvent:
     async def test_disconnected_event_emits_source_statuses(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
-        await plugin._handle_source_event(event)
+        await _drain_one_event(plugin, event)
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "source_statuses" in emitted
 
@@ -1643,8 +1664,9 @@ class TestHandleSourceEvent:
     async def test_source_statuses_payload_is_list(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.NFC, source_id="nfc:test")
-        await plugin._handle_source_event(event)
+        await _drain_one_event(plugin, event)
         ss_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "source_statuses"]
+        # Exactly one. It used to be published by the handler *and* the loop.
         assert len(ss_calls) == 1
         assert isinstance(ss_calls[0].args[1], list)
 
