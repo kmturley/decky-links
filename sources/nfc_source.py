@@ -14,8 +14,10 @@ It does NOT own:
 - Audio playback (plugin's job)
 """
 
+import asyncio
 import os
 import sys
+import threading
 import time
 import traceback
 from collections import OrderedDict
@@ -80,13 +82,18 @@ class NfcSource(MediaSource):
         self,
         settings: dict,
         key_manager=None,
-        signature_manager=None,
         logger=None,
     ):
         self._settings = settings
         self._key_manager = key_manager
-        self._signature_manager = signature_manager
         self._logger = logger
+        # One reader, one serial port, two callers. Polling runs on the source
+        # manager's task and pairing on the plugin's, and now that both do
+        # their work in threads they can genuinely overlap — the event loop
+        # used to serialise them for free, because neither yielded. Two
+        # threads interleaving commands on a PN532 corrupts the exchange, so
+        # the reader is held for the whole of a poll or a write.
+        self._io_lock = threading.RLock()
         self._reader = None
         # Legacy field retained for compatibility with existing reader module
         self._uart = None
@@ -286,7 +293,28 @@ class NfcSource(MediaSource):
     # ── Poll ───────────────────────────────────────────────────────────
 
     async def poll(self) -> Optional[PluginEvent]:
-        """One poll cycle: read UID, detect arrival/removal, return event."""
+        """One poll cycle: read UID, detect arrival/removal, return event.
+
+        The work happens on a worker thread because all of it blocks: the UID
+        read waits on the serial line, classification sleeps between key
+        attempts, and an NDEF read is dozens of round trips to the tag. On the
+        event loop that is a ~200ms stall on a bare poll and far worse with a
+        tag present — and it is shared with every other source and every
+        frontend RPC. The proxmark backend shells out to its client binary
+        with a 5s timeout, so this is the difference between a responsive
+        plugin and a frozen one.
+        """
+        if not self._reader:
+            return None
+
+        return await asyncio.to_thread(self._poll_blocking)
+
+    def _poll_blocking(self) -> Optional[PluginEvent]:
+        """The synchronous body of :meth:`poll`. Never call from the loop."""
+        with self._io_lock:
+            return self._poll_locked()
+
+    def _poll_locked(self) -> Optional[PluginEvent]:
         if not self._reader:
             return None
 
@@ -683,22 +711,42 @@ class NfcSource(MediaSource):
     def can_write(self) -> bool:
         return True
 
-    async def write_uri(self, media_id: str, uri: str) -> Tuple[bool, Optional[str]]:
+    async def write_uri(
+        self, media_id: str, uri: str, title: str = ""
+    ) -> Tuple[bool, Optional[str]]:
         """Source-generic pairing entry point.
 
         ``media_id`` is the tag UID as hex, the form carried by MediaEvents.
+
+        ``title`` is accepted and ignored: an NDEF URI record holds a URI and
+        nothing else, and adding a text record to carry the game name would
+        spend scarce tag memory storing what the app id already resolves to.
+        Storage media, whose payload is a JSON file with room to spare, do
+        record it.
+
+        Offloaded for the same reason as :meth:`poll`: writing a tag is a
+        page-at-a-time conversation with sleeps between key attempts, and it
+        is awaited from the event loop during pairing. Blocking there froze
+        the panel at exactly the moment it is showing the user a spinner.
         """
         try:
             uid = bytes.fromhex(media_id)
         except (ValueError, TypeError):
             return False, f"invalid tag UID {media_id!r}"
-        return self.write_ndef_uri(uid, uri)
+        return await asyncio.to_thread(self.write_ndef_uri, uid, uri)
 
     def write_ndef_uri(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         """Write a URI as an NDEF URI record to the tag.
 
+        Holds the reader for the whole write, so a poll running concurrently
+        on the source manager's thread cannot interleave commands with it.
+
         Returns ``(True, None)`` on success, ``(False, error_message)`` on failure.
         """
+        with self._io_lock:
+            return self._write_ndef_uri_locked(uid, uri)
+
+    def _write_ndef_uri_locked(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         import ndef
 
         uri_bytes = uri.encode("utf-8")

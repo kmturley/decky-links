@@ -96,13 +96,36 @@ def plugin(tmp_path):
     _settings = {
         "auto_launch": True,
         "auto_close": False,
+        # Mirrors SettingsManager's real shape. Only nfc was here before, so
+        # get_source_settings raised for every other source and anything
+        # touching per-source settings had to work around it.
         "sources": {
             "nfc": {
+                "enabled": True,
                 "device_path": "/dev/ttyUSB0",
                 "baudrate": 115200,
                 "polling_interval": 0.5,
                 "reader_type": "pn532_uart",
-            }
+            },
+            "storage": {
+                "enabled": True,
+                "drive_kinds": {
+                    "floppy": True, "optical": False, "usb": False, "flash": False,
+                },
+            },
+            "camera": {"enabled": False, "device": "/dev/video0", "poll_interval": 1.0},
+            "mqtt": {
+                "enabled": False,
+                "broker_host": "localhost",
+                "broker_port": 1883,
+                "topic": "decky-links",
+                "secret": "",
+                "tls": False,
+                "username": "",
+                "password": "",
+            },
+            "serial": {"enabled": False, "port": "/dev/ttyUSB1", "baudrate": 9600},
+            "file_watch": {"enabled": False, "watch_dir": "", "poll_interval": 2.0},
         },
     }
     mock_settings        = MagicMock(spec=SettingsManager)
@@ -110,13 +133,18 @@ def plugin(tmp_path):
         if key in ("auto_launch", "auto_close"):
             return _settings.get(key, default)
         return _settings["sources"]["nfc"].get(key, default)
+    # Returns True like the real SettingsManager.set: the bool is "this
+    # reached disk", and callers now surface a False to the frontend rather
+    # than reporting a save that never happened.
     def _set_setting(key, value):
         if key in ("auto_launch", "auto_close"):
             _settings[key] = value
         else:
             _settings["sources"]["nfc"][key] = value
+        return True
     mock_settings.get = _get_setting
     mock_settings.set = _set_setting
+    mock_settings.save = lambda: True
     mock_settings.get_source_settings = lambda source_type: _settings["sources"][source_type]
     mock_settings.settings = _settings
     p.settings = mock_settings
@@ -130,16 +158,26 @@ def plugin(tmp_path):
     from sources.nfc_source import NfcSource
 
     p.source_manager = SourceManager(p._event_queue, logger=_mock_decky.logger)
-    p.nfc_source = NfcSource(p.settings.get_source_settings("nfc"), logger=_mock_decky.logger)
+
+    # Registered rather than assigned to p.nfc_source: the manager's registry
+    # is the only record of what exists, and Plugin.nfc_source is a lookup
+    # into it. Assigning both was how a source could be registered but not
+    # remembered, or the reverse.
+    nfc = NfcSource(p.settings.get_source_settings("nfc"), logger=_mock_decky.logger)
+    p.source_manager.register(nfc)
 
     # Hardware mock reader — tests configure this to control NFC behaviour.
     # Reads return a valid NTAG215 capability container by default (magic 0xE1,
     # version, 0x3E×8 = 496 bytes of user memory), so the default tag under test
     # is a real, writable NTAG. A bare MagicMock here would read as a tag whose
     # CC cannot be parsed, which the write path now correctly refuses.
-    p.nfc_source._reader = MagicMock()
-    p.nfc_source._reader.read_uid = MagicMock()
-    p.nfc_source._reader.ntag2xx_read_block.return_value = bytes([0xE1, 0x10, 0x3E, 0x00])
+    nfc._reader = MagicMock()
+    nfc._reader.read_uid = MagicMock()
+    nfc._reader.ntag2xx_read_block.return_value = bytes([0xE1, 0x10, 0x3E, 0x00])
+
+    # Registering above logs. Tests assert on what the code under test logged,
+    # not on fixture setup, so start them from a clean slate.
+    _mock_decky.logger.reset_mock()
 
     # Plugin state
     p.state           = PluginState.READY

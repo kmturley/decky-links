@@ -6,6 +6,7 @@ polls its source independently and pushes events into a shared
 """
 
 import asyncio
+import time
 import traceback
 from typing import List, Optional
 
@@ -59,6 +60,25 @@ class SourceManager:
                 f"SourceManager: registered {source.source_type.value} "
                 f"source ({source.source_id})"
             )
+
+    def replace(self, source: MediaSource) -> None:
+        """Swap the registered source of this type for another, in place.
+
+        The registry is the only record of what sources exist — the plugin's
+        ``nfc_source`` and ``storage_source`` are lookups into it — so
+        substituting one (tests standing in mock hardware, or a future
+        reconfiguration path) has to go through here rather than by assigning
+        over a reference that no longer exists.
+
+        Position is preserved, because the order sources were registered in is
+        the order the panel lists them. Only safe before ``start_all``: an
+        already-running task holds its own reference to the source it polls.
+        """
+        for i, existing in enumerate(self._sources):
+            if existing.source_type == source.source_type:
+                self._sources[i] = source
+                return
+        self.register(source)
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -184,6 +204,7 @@ class SourceManager:
                     ))
 
                 # ── Poll ───────────────────────────────────────────────
+                started = time.monotonic()
                 event = await source.poll()
                 if event is not None:
                     await self._queue.put(event)
@@ -206,7 +227,24 @@ class SourceManager:
                 # Mark source as needing reconnect on next iteration
                 was_connected = False
 
-            await asyncio.sleep(source.poll_interval)
+                # Back off here too, not just on a failed start(). A source
+                # raising on every poll used to fall straight through to the
+                # poll_interval sleep below — 0.1s for MQTT and serial — and
+                # hot-loop at 10Hz writing a full traceback each time, which
+                # buries every other log line and burns battery doing it.
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(RECONNECT_MAX, reconnect_delay * 2)
+                continue
+
+            # Sleep the remainder of the interval, measured from when the poll
+            # *started*. Sleeping the full interval afterwards made the real
+            # cadence `interval + work_time`, so the camera — a 5s ffmpeg
+            # capture on a 1s interval — actually sampled every 6s, and the
+            # configured number meant something different for every source.
+            # Clamped at zero: a poll that overruns its interval just runs
+            # again immediately rather than accumulating debt.
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(0.0, source.poll_interval - elapsed))
 
     # ── Introspection ──────────────────────────────────────────────────
 

@@ -96,23 +96,29 @@ GUARD
 #
 # `decky plugin build` zips a FIXED allowlist of paths — main.py, plugin.json,
 # package.json, dist/, py_modules/, LICENSE, README.md. Top-level sources/,
-# nfc/ and cards/ are NOT packaged even though the builder rsyncs them into its
-# staging dir, so they must be vendored into py_modules/ to reach the device.
+# nfc/, cards/ and decky_links/ are NOT packaged even though the builder rsyncs
+# them into its staging dir, so they must be vendored into py_modules/ to reach
+# the device.
+#
+# Anything new that main.py imports locally MUST be added here. It will import
+# fine in the repo and in tests and then fail on the device, which is why
+# tests/test_packaging.py checks this list against main.py's actual imports.
 #
 # main.py puts the plugin dir ahead of py_modules on sys.path, so this copy is
 # only ever used on-device (where it is the sole copy); during local dev the
 # checked-out tree wins and these copies cannot shadow the files being edited.
 # ---------------------------------------------------------------------------
 echo "Copying local Python packages into py_modules/..."
-rm -rf py_modules/sources py_modules/nfc py_modules/assets py_modules/cards
+rm -rf py_modules/sources py_modules/nfc py_modules/assets py_modules/cards py_modules/decky_links
 cp -r sources py_modules/sources
 cp -r nfc py_modules/nfc
 cp -r cards py_modules/cards
+cp -r decky_links py_modules/decky_links
 # assets/ is not in the CLI's allowlist either, so the sounds ride along in
 # py_modules or they are simply absent from the installed plugin — which is
 # exactly what happened: every _play_sound call logged "Sound file not found".
 cp -r assets py_modules/assets
-find py_modules/sources py_modules/nfc py_modules/cards -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find py_modules/sources py_modules/nfc py_modules/cards py_modules/decky_links -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # -t: the CLI's default staging dir (/tmp/decky) is not visible to Docker
 # Desktop on macOS; $HOME is shared by default.

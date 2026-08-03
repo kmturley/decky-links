@@ -196,7 +196,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   useEffect(() => {
     if (!modalVisible) return;
     const listener = addEventListener<[data: { uid: string; source_type?: string }]>(
-      "tag_detected",
+      "media_detected",
       (data) => {
         if (!data?.uid) return;
         const noun = mediumNoun(data.source_type ?? "nfc");
@@ -204,7 +204,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
         setStatusMessage(`Writing to ${noun} ${label}…`);
       }
     );
-    return () => removeEventListener("tag_detected", listener);
+    return () => removeEventListener("media_detected", listener);
   }, [modalVisible]);
 
   // Report the result, but leave the modal open.

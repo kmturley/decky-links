@@ -5,6 +5,8 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock
 
+from sources.base import SourceType
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,15 +45,16 @@ def _make_plugin_with_sources(tmp_path):
     p._event_queue = asyncio.Queue()
     p.source_manager = SourceManager(p._event_queue, logger=MagicMock())
 
-    p.nfc_source = NfcSource(_settings["sources"]["nfc"], logger=MagicMock())
-    p.mqtt_source = MqttSource(_settings["sources"]["mqtt"], logger=MagicMock())
-    p.serial_source = SerialSource(_settings["sources"]["serial"], logger=MagicMock())
-    p.file_watch_source = FileWatchSource(_settings["sources"]["file_watch"], logger=MagicMock())
-
-    p.source_manager.register(p.nfc_source)
-    p.source_manager.register(p.mqtt_source)
-    p.source_manager.register(p.serial_source)
-    p.source_manager.register(p.file_watch_source)
+    # Registered only. The manager's registry is the sole record of what
+    # exists; Plugin.nfc_source and friends are lookups into it, so assigning
+    # them as well was how a source could be registered but not remembered.
+    for source in (
+        NfcSource(_settings["sources"]["nfc"], logger=MagicMock()),
+        MqttSource(_settings["sources"]["mqtt"], logger=MagicMock()),
+        SerialSource(_settings["sources"]["serial"], logger=MagicMock()),
+        FileWatchSource(_settings["sources"]["file_watch"], logger=MagicMock()),
+    ):
+        p.source_manager.register(source)
 
     p.state = PluginState.READY
     p.is_pairing = False
@@ -159,7 +162,7 @@ class TestGetSourceStatuses:
     async def test_active_source_reports_true(self, tmp_path):
         p, _ = _make_plugin_with_sources(tmp_path)
         # Manually activate mqtt source
-        p.mqtt_source._active = True
+        p._source_of_type(SourceType.MQTT)._active = True
         result = await p.get_source_statuses()
         mqtt_entry = next(e for e in result if e["source_type"] == "mqtt")
         assert mqtt_entry["active"] is True
@@ -307,8 +310,7 @@ def _make_plugin_with_storage(tmp_path):
     from sources.storage_source import StorageSource
     p, settings = _make_plugin_with_sources(tmp_path)
     storage = StorageSource({}, logger=MagicMock())
-    p.storage_source = storage
-    p.source_manager.register(storage)
+    p.source_manager.register(storage)   # p.storage_source is a lookup into this
     return p, storage
 
 
@@ -364,7 +366,7 @@ class TestGetSourceStatusesHasMedia:
     @pytest.mark.asyncio
     async def test_non_storage_sources_use_is_active_via_has_media(self, tmp_path):
         p, _ = _make_plugin_with_sources(tmp_path)
-        p.mqtt_source._active = True
+        p._source_of_type(SourceType.MQTT)._active = True
         result = await p.get_source_statuses()
         mqtt_entry = next(e for e in result if e["source_type"] == "mqtt")
         assert mqtt_entry["active"] is True
@@ -408,3 +410,40 @@ class TestGetSourceStatusesCanPair:
         result = await p.get_source_statuses()
         pairable = [e for e in result if e["can_pair"] and e["active"]]
         assert [e["source_type"] for e in pairable] == ["storage"]
+
+
+# ── MQTT secret provisioning ──────────────────────────────────────────────────
+
+class TestMqttSecretIsProvisionedOnEnable:
+    """MqttSource refuses to start without a shared secret, and the panel has
+    no field to type one into — so enabling the toggle would silently do
+    nothing. One is minted instead of asking the user to invent it."""
+
+    @pytest.mark.asyncio
+    async def test_enabling_mqtt_mints_a_secret(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        assert await plugin.set_source_setting("mqtt", "enabled", True)
+        secret = plugin.settings.settings["sources"]["mqtt"]["secret"]
+        assert secret
+        assert len(secret) >= 24
+
+    @pytest.mark.asyncio
+    async def test_an_existing_secret_is_never_replaced(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = "mine"
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] == "mine"
+
+    @pytest.mark.asyncio
+    async def test_disabling_does_not_mint_one(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", False)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] == ""
+
+    @pytest.mark.asyncio
+    async def test_generated_secrets_differ_between_installs(self, plugin):
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        first = plugin.settings.settings["sources"]["mqtt"]["secret"]
+        plugin.settings.settings["sources"]["mqtt"]["secret"] = ""
+        await plugin.set_source_setting("mqtt", "enabled", True)
+        assert plugin.settings.settings["sources"]["mqtt"]["secret"] != first

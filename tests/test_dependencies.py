@@ -56,7 +56,7 @@ def test_ndef_importable():
 # ── Cryptography ──────────────────────────────────────────────────────────────
 
 def test_cryptography_importable():
-    """cryptography — key management and signing (nfc/key_manager.py, nfc/signature_manager.py)."""
+    """cryptography — Mifare key encryption at rest (nfc/key_manager.py)."""
     assert _can_import("cryptography"), (
         "cryptography not installed. Run: pip install cryptography"
     )

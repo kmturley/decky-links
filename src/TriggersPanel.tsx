@@ -1,4 +1,4 @@
-import { FC, ReactNode } from "react";
+import { FC, ReactNode, useEffect, useState } from "react";
 import {
   ButtonItem,
   DialogButton,
@@ -8,11 +8,12 @@ import {
   Spinner,
   ToggleField,
 } from "@decky/ui";
-import { FaGamepad, FaLink } from "react-icons/fa";
+import { FaEraser, FaGamepad, FaLink } from "react-icons/fa";
 import {
   sharedState,
   notifySubscribers,
   cancelPairing,
+  toaster,
   type ActiveMedium,
   type SourceStatus,
 } from "./shared";
@@ -22,6 +23,7 @@ import {
   isRowEnabled,
   mediaStateFor,
   mediumFor,
+  formatRow,
   pairRow,
   statusFor,
   toggleRow,
@@ -30,6 +32,28 @@ import {
 
 export { TRIGGER_ROWS } from "./lib/triggerRows";
 
+/** Copy text, and say whether it worked.
+ *
+ * The Steam UI is Chromium, so navigator.clipboard is normally there — but it
+ * is gated on a secure context and on focus, neither of which is guaranteed in
+ * a side menu. Silently failing would leave the user thinking they had the
+ * secret on the clipboard, which is worse than knowing they need to read it
+ * off the screen.
+ */
+async function copyToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    toaster.toast({ title: "Copied", body: "Secret copied to clipboard." });
+  } catch (e) {
+    console.error("[ Decky Links ] Clipboard write failed:", e);
+    toaster.toast({
+      title: "Could not copy",
+      body: "Read it from the panel instead.",
+      critical: true,
+    });
+  }
+}
+
 const MediaRow: FC<{
   row: TriggerRow;
   medium?: ActiveMedium;
@@ -37,6 +61,14 @@ const MediaRow: FC<{
   target: { uri: string; label: string } | null;
 }> = ({ row, medium, connected, target }) => {
   const state = mediaStateFor(row, connected, medium, target);
+  const [confirming, setConfirming] = useState(false);
+
+  // Drop a pending confirm if the disk changes underneath it — ejected,
+  // swapped, or newly readable. Leaving "Confirm" armed across a swap would
+  // aim the second press at a disk the user never saw the first one on.
+  useEffect(() => {
+    setConfirming(false);
+  }, [medium?.media_id, state.destructive]);
 
   // The medium's own icon, so a glance says "there is a disk in there".
   // While reading, a spinner takes its place: the disk is in the drive but
@@ -65,16 +97,32 @@ const MediaRow: FC<{
   // "Pair" came out ~500px wide and overhung the panel's right padding, which
   // every other control respects. Styling the button directly is the only way
   // to pin it to its content — ButtonItem exposes no style hook.
+  // Formatting erases the disk, so it asks first. The confirm is a second
+  // press of the same button rather than a modal: the guarantee that makes this
+  // safe is the backend's — it refuses any disk that has a filesystem — and a
+  // modal would imply the button is the thing standing between the user and
+  // data loss, which would be the wrong thing to believe.
+  const onPress = state.destructive
+    ? () => {
+        if (!confirming) {
+          setConfirming(true);
+          return;
+        }
+        setConfirming(false);
+        void formatRow(medium!);
+      }
+    : () => void pairRow(row, target!);
+
   return (
     <PanelSectionRow>
       <Field
         icon={icon}
-        label={state.text}
+        label={confirming ? `Erase this ${row.noun}?` : state.text}
         childrenContainerWidth="min"
         bottomSeparator="standard"
       >
         <DialogButton
-          onClick={() => void pairRow(row, target!)}
+          onClick={onPress}
           style={{
             minWidth: 0,
             width: "fit-content",
@@ -84,13 +132,50 @@ const MediaRow: FC<{
             gap: 6,
           }}
         >
-          <FaLink size={12} />
-          {state.action}
+          {state.destructive ? <FaEraser size={12} /> : <FaLink size={12} />}
+          {confirming ? "Confirm" : state.action}
         </DialogButton>
       </Field>
     </PanelSectionRow>
   );
 };
+
+/** The MQTT shared secret, shown so it can be given to a publisher.
+ *
+ * Enabling MQTT mints a secret, because the source refuses to start without one
+ * — without that, switching the toggle on produced a trigger that silently
+ * dropped every message. But a minted secret nobody can read is the same dead
+ * end from the other direction: every publisher has to include it, and it
+ * existed only in settings.json on the device.
+ *
+ * Shown in full rather than masked. It authenticates messages on a home LAN,
+ * the panel is on the device you already unlocked, and a secret you cannot read
+ * is one you cannot use — masking would restore the problem this row exists to
+ * fix.
+ */
+const MqttSecretRow: FC<{ secret: string }> = ({ secret }) => (
+  <PanelSectionRow>
+    <Field
+      label="Secret"
+      description={
+        <span style={{ fontFamily: "monospace", wordBreak: "break-all", fontSize: "0.9em" }}>
+          {secret}
+        </span>
+      }
+      focusable={false}
+      highlightOnFocus={false}
+      bottomSeparator="standard"
+      childrenContainerWidth="min"
+    >
+      <DialogButton
+        onClick={() => void copyToClipboard(secret)}
+        style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
+      >
+        Copy
+      </DialogButton>
+    </Field>
+  </PanelSectionRow>
+);
 
 export const TriggersPanel: FC<{
   statuses: SourceStatus[];
@@ -154,6 +239,12 @@ export const TriggersPanel: FC<{
               target={target}
             />,
           );
+          const secret = row.key === "mqtt"
+            ? sharedState.settings?.sources?.mqtt?.secret
+            : null;
+          if (secret) {
+            rows.push(<MqttSecretRow key={`${row.key}-secret`} secret={secret} />);
+          }
         }
         return rows;
       })}

@@ -17,7 +17,19 @@ export interface Settings {
         };
         storage?: { enabled: boolean; drive_kinds?: Record<string, boolean> };
         camera?: { enabled: boolean; device: string; poll_interval: number };
-        mqtt?: { enabled: boolean; broker_host: string; broker_port: number; topic: string; secret: string };
+        /** `secret` is mandatory: MQTT will not start without one, because
+         *  anything able to publish to the topic can launch games on this
+         *  device. Enabling the source mints one if it is empty. */
+        mqtt?: {
+            enabled: boolean;
+            broker_host: string;
+            broker_port: number;
+            topic: string;
+            secret: string;
+            tls?: boolean;
+            username?: string;
+            password?: string;
+        };
         serial?: { enabled: boolean; port: string; baudrate: number };
         file_watch?: { enabled: boolean; watch_dir: string; poll_interval: number };
     };
@@ -37,6 +49,13 @@ export interface ActiveMedium {
      *  for that whole time. Always replaced by a real state. */
     problem?: "blank" | "unreadable" | "blocked" | "loading" | null;
     error?: string;
+    /** Whether offering to format this medium would destroy anything.
+     *
+     *  Set by the backend only when blkid found no filesystem at all. A disk
+     *  holding a filesystem we do not mount (ntfs, hfsplus) is also
+     *  "unreadable" but has data on it, so the Format button must key off this
+     *  flag rather than off `problem === "unreadable"`. */
+    formattable?: boolean;
 }
 
 export interface DriveKindStatus {
@@ -66,11 +85,6 @@ export interface ReaderStatus {
     connected: boolean;
     path?: string;
     source_type?: SourceType;
-}
-
-export interface TagStatus {
-    uid: string | null;
-    uri: string | null;
 }
 
 export interface SectorInfo {
@@ -121,17 +135,14 @@ export interface ViewedApp {
 export interface SharedState {
   settings: Settings | null;
   readerStatus: ReaderStatus;
-  tagUid: string | null;
-  tagUri: string | null;
-  /** Which source is presenting the current medium — an NFC tag and a floppy
-   *  both land in tagUid, but only one of them has sectors to manage. */
-  tagSourceType: SourceType | null;
-  /** Why the current medium carries no URI. "blank" is ready to pair;
-   *  "unreadable" is the user's problem to fix and must say so. */
-  mediaProblem: { kind: "blank" | "unreadable" | "blocked" | "loading"; error?: string } | null;
-  /** Every medium presented anywhere, keyed by source_id. The single tagUid
-   *  slot above cannot express "a tag AND a disk are both here", which is
-   *  exactly what the Triggers list has to show. */
+  /** Every medium presented anywhere, keyed by source_id.
+   *
+   *  The single source of truth for what is present. There used to be a
+   *  parallel `tagUid`/`tagUri`/`tagSourceType`/`mediaProblem` slot holding
+   *  whichever medium was seen last on any source, which no component ever
+   *  read — every one of them already derives from this map, because one
+   *  global slot cannot express "a tag AND a disk are both here", which is
+   *  exactly what the Triggers list shows. */
   activeMedia: Record<string, ActiveMedium>;
   activeAppId: string | null;
   /** Game detail page currently open, or null when not on one. */
@@ -151,10 +162,6 @@ export type SettingKey =
 export const sharedState: SharedState = {
   settings: null,
   readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
-  tagUid: null,
-  tagUri: null,
-  tagSourceType: null,
-  mediaProblem: null,
   activeMedia: {},
   activeAppId: null,
   viewedApp: null,
@@ -166,7 +173,6 @@ export const sharedState: SharedState = {
 // asynchronous callbacks. They live outside of React so that closures keep a
 // stable handle to the current value.
 export const activeAppIdRef = { current: null as string | null };
-export const tagUidRef = { current: null as string | null };
 export const settingsRef = { current: null as any };
 export const viewedAppRef = { current: null as ViewedApp | null };
 
@@ -210,11 +216,20 @@ export function useSharedState(): SharedState {
 export const getSettings = callable<[], Settings>("get_settings");
 export const setSetting = callable<[key: SettingKey, value: any], boolean>("set_setting");
 // source_id targets one trigger; omitted, any writable trigger may claim it.
-export const startPairing = callable<[uri: string, source_id?: string], boolean>("start_pairing");
+// `title` is the game's name. It is written onto media whose format has room
+// for it, so a disk says what it is without resolving an app id against Steam.
+export const startPairing =
+  callable<[uri: string, source_id?: string, title?: string], boolean>("start_pairing");
 export const getActiveMedia = callable<[], ActiveMedium[]>("get_active_media");
+
+/** Write a fresh FAT filesystem to a disk. Destroys its contents.
+ *
+ * Only ever called for media the backend flagged `formattable` — no filesystem
+ * found, so nothing to lose. The backend re-checks every guard regardless. */
+export const formatMedia =
+  callable<[media_id: string], { success: boolean; error: string | null }>("format_media");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");
-export const getTagStatus = callable<[], TagStatus>("get_tag_status");
 export const setRunningGame = callable<[appid: number | null], void>("set_running_game");
 export const setTagKey = callable<[uid: string, key_a: string, key_b: string], boolean>("set_tag_key");
 export const getTagKey = callable<[uid: string], { key_a?: string; key_b?: string }>("get_tag_key");

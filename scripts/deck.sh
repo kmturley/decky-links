@@ -9,11 +9,15 @@
 #   ./scripts/deck.sh udev       Watch block-device udev events live
 #   ./scripts/deck.sh mount-test /dev/sdX   Try StorageSource's read-only mount
 #   ./scripts/deck.sh format /dev/sdX       ERASE a disk and format it as FAT
+#   ./scripts/deck.sh stop       Stop plugin_loader and reclaim plugin file ownership
+#   ./scripts/deck.sh start      Start plugin_loader
 #   ./scripts/deck.sh restart    Restart plugin_loader (reloads the plugin)
 #   ./scripts/deck.sh shell      Interactive SSH session
 #
 # Config is read from .vscode/settings.json when present, else these defaults.
-# Tip: run `ssh-copy-id deck@steamdeck.local` once to stop the password prompts.
+# The sudo password is NOT one of those defaults: set DECK_PASSWORD, or put
+# `deckpass` in .vscode/settings.json (gitignored), or answer the prompt.
+# Tip: run `ssh-copy-id deck@steamdeck.local` once to stop the ssh prompts.
 
 set -euo pipefail
 
@@ -40,7 +44,28 @@ except Exception:
 DECK_IP="$(read_setting deckip steamdeck.local)"
 DECK_PORT="$(read_setting deckport 22)"
 DECK_USER="$(read_setting deckuser deck)"
-DECK_PASS="$(read_setting deckpass ssap)"
+DECK_DIR="$(read_setting deckdir /home/deck)"
+
+# The sudo password is never carried in a tracked file. In order of preference:
+# the DECK_PASSWORD environment variable, then `deckpass` in the gitignored
+# .vscode/settings.json, then a prompt at the point a command actually needs
+# it. The empty fallback is deliberate — a default here is how the Deck's
+# stock password ended up committed in the first place.
+DECK_PASS="${DECK_PASSWORD:-$(read_setting deckpass "")}"
+
+# Ask for the password only when a command is about to use it, so the
+# read-only commands (logs, status, shell) never prompt at all.
+require_pass() {
+    if [[ -z "$DECK_PASS" ]]; then
+        printf 'sudo password for %s@%s: ' "$DECK_USER" "$DECK_IP" >&2
+        read -rs DECK_PASS
+        printf '\n' >&2
+    fi
+    if [[ -z "$DECK_PASS" ]]; then
+        echo "No password given — aborting." >&2
+        exit 1
+    fi
+}
 
 SSH=(ssh -p "$DECK_PORT" "${DECK_USER}@${DECK_IP}")
 
@@ -69,6 +94,7 @@ cmd_follow() {
 }
 
 cmd_loader() {
+    require_pass
     remote "echo '$DECK_PASS' | sudo -S journalctl -u plugin_loader -f -n 100" 2>&1
 }
 
@@ -195,6 +221,7 @@ REMOTE
 }
 
 cmd_udev() {
+    require_pass
     echo "Watching block-device udev events. Plug in the drive, then insert/eject a disk."
     echo "Ctrl-C to stop."
     echo
@@ -206,6 +233,7 @@ cmd_udev() {
 }
 
 cmd_mount_test() {
+    require_pass
     local dev="${1:-}"
     if [ -z "$dev" ]; then
         echo "usage: ./scripts/deck.sh mount-test /dev/sdX" >&2
@@ -252,6 +280,7 @@ REMOTE
 }
 
 cmd_format() {
+    require_pass
     local dev="${1:-}"
     if [ -z "$dev" ]; then
         echo "usage: ./scripts/deck.sh format /dev/sdX" >&2
@@ -285,7 +314,24 @@ mkfs.vfat -I "$dev" && echo "  done — reinsert the disk and it should appear a
 REMOTE
 }
 
+cmd_stop() {
+    require_pass
+    # chown after stopping: a deploy writes as the ssh user, but the loader
+    # runs the plugin as root, so files can come back root-owned and the next
+    # rsync fails on permissions.
+    remote "echo '$DECK_PASS' | sudo -S systemctl stop plugin_loader" \
+        && remote "echo '$DECK_PASS' | sudo -S chown -R ${DECK_USER}:${DECK_USER} ${DECK_DIR}/homebrew/plugins/" \
+        && echo "plugin_loader stopped"
+}
+
+cmd_start() {
+    require_pass
+    remote "echo '$DECK_PASS' | sudo -S systemctl start plugin_loader" \
+        && echo "plugin_loader started"
+}
+
 cmd_restart() {
+    require_pass
     remote "echo '$DECK_PASS' | sudo -S systemctl restart plugin_loader" \
         && echo "plugin_loader restarted"
 }
@@ -298,6 +344,8 @@ case "${1:-logs}" in
     udev)    cmd_udev ;;
     mount-test) cmd_mount_test "${2:-}" ;;
     format)  cmd_format "${2:-}" ;;
+    stop)    cmd_stop ;;
+    start)   cmd_start ;;
     restart) cmd_restart ;;
     shell)   exec "${SSH[@]}" ;;
     *)

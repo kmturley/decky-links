@@ -5,6 +5,7 @@ import {
   toaster,
   startPairing,
   setSourceSetting,
+  formatMedia,
   type ActiveMedium,
   type SourceStatus,
 } from "../shared";
@@ -123,6 +124,9 @@ export interface MediaState {
   dim: boolean;
   /** Work is in progress; show a spinner in place of the medium icon. */
   busy?: boolean;
+  /** The action erases the medium, so the row asks before doing it. Only ever
+   *  set for a disk the backend flagged as carrying no filesystem. */
+  destructive?: boolean;
 }
 
 /** Reduce a trigger's hardware + medium into the one line the UI shows.
@@ -154,7 +158,16 @@ export function mediaStateFor(
     return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
   }
   if (medium.problem === "unreadable") {
-    return { text: medium.error || `Unreadable ${row.noun}`, action: null, dim: false };
+    // Format is offered only when the backend found no filesystem at all — a
+    // disk holding one we cannot mount is also unreadable but has data on it,
+    // and that distinction is the whole reason this keys off `formattable`
+    // rather than off the problem or the error text.
+    return {
+      text: medium.error || `Unreadable ${row.noun}`,
+      action: medium.formattable ? "Format" : null,
+      dim: false,
+      destructive: !!medium.formattable,
+    };
   }
   if (medium.problem === "blocked") {
     return { text: "Blocked by allowlist", action: null, dim: false };
@@ -185,6 +198,31 @@ export function mediaStateFor(
   return { text: launchTargetName(medium.uri), action: target ? "Pair" : null, dim: false };
 }
 
+/** Format a disk that carries no filesystem.
+ *
+ * Destroys its contents — but the button is only ever offered for media the
+ * backend flagged `formattable`, meaning blkid found nothing on it, so there is
+ * nothing on it to lose. The backend re-checks that and every other guard,
+ * because the disk can be swapped between the panel drawing the button and the
+ * user pressing it.
+ */
+export async function formatRow(medium: ActiveMedium): Promise<boolean> {
+  const { success, error } = await formatMedia(medium.media_id);
+  if (!success) {
+    toaster.toast({
+      title: "Could not format",
+      body: error || "The disk was refused.",
+      critical: true,
+    });
+    return false;
+  }
+  toaster.toast({
+    title: "Disk formatted",
+    body: "Ready to pair.",
+  });
+  return true;
+}
+
 /** Arm pairing for one trigger.
  *
  * Targeted: with a tag on the reader and a disk in the drive, an untargeted
@@ -199,7 +237,10 @@ export async function pairRow(
   sourceId?: string,
 ): Promise<boolean> {
   const id = sourceId ?? mediumFor(row, sharedState.activeMedia)?.source_id;
-  const ok = await startPairing(target.uri, id);
+  // target.label is the game name, already resolved for the button's own text.
+  // Passing it lets the backend record it alongside the URI, so a disk read on
+  // another machine names the game instead of just carrying an app id.
+  const ok = await startPairing(target.uri, id, target.label);
   if (!ok) {
     toaster.toast({ title: "Pairing Error", body: `Could not pair ${row.label}.`, critical: true });
     return false;

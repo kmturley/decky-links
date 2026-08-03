@@ -158,12 +158,19 @@ class TestPoll:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_poll_marks_inactive_on_capture_failure(self):
+    async def test_poll_marks_inactive_after_repeated_capture_failures(self):
+        """Not on the first one. A dropped frame is ordinary for a webcam, and
+        tearing down on one cost a stop/start plus an ffmpeg spawn to recover
+        from something that fixes itself on the next poll."""
         src = _make_source()
         src._active = True
         with patch.object(src, "_capture_frame", return_value=None):
             result = await src.poll()
-        assert result is None
+            assert result is None
+            assert src.is_active(), "one dropped frame must not tear the source down"
+
+            for _ in range(src.CAPTURE_FAILURE_THRESHOLD - 1):
+                await src.poll()
         assert not src.is_active()
 
     @pytest.mark.asyncio
@@ -557,9 +564,12 @@ class TestIntegration:
         src._active = True
         src._last_qr = "steam://run/1"
 
-        # Simulate capture failing (camera unplugged)
+        # Simulate capture failing (camera unplugged). Takes several polls now:
+        # a device that has actually gone away keeps failing, where a dropped
+        # frame does not.
         with patch.object(src, "_capture_frame", return_value=None):
-            result = await src.poll()
+            for _ in range(src.CAPTURE_FAILURE_THRESHOLD):
+                result = await src.poll()
 
         assert result is None
         assert not src.is_active()

@@ -15,6 +15,35 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def isolate_from_host_block_devices():
+    """Stop these tests reading the machine's real block devices.
+
+    Most of them use ``/dev/sda`` as a stand-in floppy, and
+    ``_is_relevant_device`` asks sysfs whether that device is partitioned —
+    ignoring a whole disk in favour of its partitions. So the answer came from
+    whatever hardware happened to be running the tests.
+
+    That was invisible until the suite first ran on a GitHub runner: a real
+    ``/sys/class/block/sda`` exists there, carved into partitions, so ten tests
+    that pass on any machine without an ``sda`` failed on one with it. Nothing
+    about the plugin changed — the tests were reading the host.
+
+    sysfs lookups now fail as they would for a device that is not present,
+    which is what the tests always meant. Tests that exercise the partition
+    logic itself patch ``os.listdir`` directly and still win, since their patch
+    replaces this one for its duration.
+    """
+    real_listdir = os.listdir
+
+    def _listdir(path, *args, **kwargs):
+        if str(path).startswith("/sys/class/block"):
+            raise FileNotFoundError(path)
+        return real_listdir(path, *args, **kwargs)
+
+    with patch("os.listdir", _listdir):
+        yield
+
 def _make_source(settings=None):
     """A source with every drive category switched on.
 
@@ -453,20 +482,67 @@ class TestFindMountPoint:
 
 # ── _mount_device() ───────────────────────────────────────────────────────────
 
+def _blkid(fstype: str):
+    """A blkid result reporting ``fstype``."""
+    return MagicMock(returncode=0, stdout=fstype.encode())
+
+
+def _mount_calls(mock_run):
+    """Just the `mount` invocations, dropping the blkid probe."""
+    return [c[0][0] for c in mock_run.call_args_list if c[0][0][0] == "mount"]
+
+
 class TestMountDevice:
 
     @pytest.mark.asyncio
     async def test_successful_mount_returns_tmpdir(self):
         src = _make_source()
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+            mock_run.side_effect = [_blkid("vfat"), MagicMock(returncode=0)]
             with patch("tempfile.mkdtemp", return_value="/tmp/decky-links-test"):
                 result = await src._mount_device("/dev/sdb1")
         assert result == "/tmp/decky-links-test"
-        args = mock_run.call_args[0][0]
-        assert "mount" in args
-        assert "ro" in args
+        args = _mount_calls(mock_run)[0]
         assert "/dev/sdb1" in args
+        # The type is stated explicitly rather than left for mount to guess.
+        assert args[args.index("-t") + 1] == "vfat"
+
+    @pytest.mark.asyncio
+    async def test_mount_is_hardened_against_hostile_media(self):
+        """Untrusted media must not be able to carry a setuid binary or a
+        device node into a mount performed by a root process."""
+        src = _make_source()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [_blkid("vfat"), MagicMock(returncode=0)]
+            with patch("tempfile.mkdtemp", return_value="/tmp/decky-links-test"):
+                await src._mount_device("/dev/sdb1")
+        args = _mount_calls(mock_run)[0]
+        opts = args[args.index("-o") + 1].split(",")
+        assert set(opts) >= {"ro", "nosuid", "nodev", "noexec"}
+
+    @pytest.mark.asyncio
+    async def test_refuses_filesystem_outside_the_allowlist(self):
+        """Mounting runs the filesystem's kernel driver as root, so a type we
+        did not choose is never handed to it."""
+        src = _make_source()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [_blkid("ntfs")]
+            result = await src._mount_device("/dev/sdb1")
+        assert result is None
+        assert _mount_calls(mock_run) == []
+        assert "ntfs" in src._last_mount_error
+
+    @pytest.mark.asyncio
+    async def test_refuses_device_with_no_filesystem(self):
+        """An unformatted disk has no superblock; blkid says so in milliseconds
+        where the mount it replaces seeks for the full timeout."""
+        src = _make_source()
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [MagicMock(returncode=2, stdout=b"")]
+            result = await src._mount_device("/dev/sdb1")
+        assert result is None
+        assert _mount_calls(mock_run) == []
+        assert src._last_mount_error == "Unformatted disk"
 
     @pytest.mark.asyncio
     async def test_failed_mount_returns_none(self, tmp_path):
@@ -474,7 +550,10 @@ class TestMountDevice:
         tmpdir = str(tmp_path / "mnt")
         os.makedirs(tmpdir)
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=32, stderr=b"permission denied")
+            mock_run.side_effect = [
+                _blkid("vfat"),
+                MagicMock(returncode=32, stderr=b"permission denied"),
+            ]
             with patch("tempfile.mkdtemp", return_value=tmpdir):
                 result = await src._mount_device("/dev/sdb1")
         assert result is None
@@ -488,6 +567,27 @@ class TestMountDevice:
             with patch("tempfile.mkdtemp", return_value=tmpdir):
                 result = await src._mount_device("/dev/sdb1")
         assert result is None
+
+
+# ── _remount() ────────────────────────────────────────────────────────────────
+
+class TestRemount:
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["rw", "ro"])
+    async def test_remount_preserves_hardening_flags(self, mode):
+        """A remount does not inherit mount options — repeating them is what
+        stops pairing quietly clearing nosuid/nodev/noexec."""
+        src = _make_source()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert await src._remount("/tmp/decky-links-test", mode) is True
+        opts = mock_run.call_args[0][0][2].split(",")
+        assert "remount" in opts
+        assert mode in opts
+        assert set(opts) >= {"nosuid", "nodev", "noexec"}
+        # rw and ro are mutually exclusive; only the requested one is passed.
+        assert ("rw" in opts) == (mode == "rw")
 
 
 # ── _scan_existing_devices() ──────────────────────────────────────────────────
@@ -881,6 +981,33 @@ class TestWriteUri:
         assert payload is not None
         assert payload["uri"] == "steam://rungameid/400"
         assert payload["title"] == "Portal"
+
+    @pytest.mark.asyncio
+    async def test_title_reaches_the_disk_from_pairing(self, tmp_path):
+        """The whole point of carrying it: a disk read on another machine should
+        name the game rather than just carrying an app id."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/400", "Half-Life 2")
+        written = json.loads((tmp_path / "decky-links.json").read_text())
+        assert written["title"] == "Half-Life 2"
+
+    @pytest.mark.asyncio
+    async def test_title_survives_the_round_trip_into_a_load_event(self, tmp_path):
+        """Written, then read back, then forwarded into the MediaEvent the panel
+        sees — the read side already carried title, only the write dropped it."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/400", "Hades")
+
+        event = src._load_event(
+            "/dev/sdb1", "steam://rungameid/400",
+            **{k: v for k, v in src._read_payload(
+                str(tmp_path / "decky-links.json")).items() if k != "uri"}
+        )
+        assert event.payload.get("title") == "Hades"
 
     @pytest.mark.asyncio
     async def test_remounts_read_only_afterwards(self, tmp_path):
@@ -1437,3 +1564,39 @@ class TestRescan:
         with patch.object(src, "_has_media", return_value=False):
             await src.rescan()
         assert len(src._pending) == 0
+
+
+# ── write_uri and mount ownership ─────────────────────────────────────────────
+
+class TestWriteUriRemountOwnership:
+    """Pairing may target a mount the system created rather than one of ours.
+    Flipping that to rw and then forcing it back to ro would leave the user's
+    own mount read-only with no indication why."""
+
+    @pytest.mark.asyncio
+    async def test_our_own_mount_is_remounted_around_the_write(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", new_callable=AsyncMock) as remount:
+            remount.return_value = True
+            ok, err = await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        assert ok is True, err
+        assert [c[0][1] for c in remount.call_args_list] == ["rw", "ro"]
+
+    @pytest.mark.asyncio
+    async def test_system_mount_is_left_alone(self, tmp_path):
+        src = _make_source()  # not in _our_mounts
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            with patch.object(src, "_remount", new_callable=AsyncMock) as remount:
+                ok, err = await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        assert ok is True, err
+        remount.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_payload_is_written_either_way(self, tmp_path):
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/220")
+        written = json.loads((tmp_path / "decky-links.json").read_text())
+        assert written["uri"] == "steam://rungameid/220"
+        assert written["version"] == 1
