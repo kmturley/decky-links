@@ -954,6 +954,33 @@ class TestWriteUri:
         assert payload["title"] == "Portal"
 
     @pytest.mark.asyncio
+    async def test_title_reaches_the_disk_from_pairing(self, tmp_path):
+        """The whole point of carrying it: a disk read on another machine should
+        name the game rather than just carrying an app id."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/400", "Half-Life 2")
+        written = json.loads((tmp_path / "decky-links.json").read_text())
+        assert written["title"] == "Half-Life 2"
+
+    @pytest.mark.asyncio
+    async def test_title_survives_the_round_trip_into_a_load_event(self, tmp_path):
+        """Written, then read back, then forwarded into the MediaEvent the panel
+        sees — the read side already carried title, only the write dropped it."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        with patch.object(src, "_remount", AsyncMock(return_value=True)):
+            await src.write_uri("/dev/sdb1", "steam://rungameid/400", "Hades")
+
+        event = src._load_event(
+            "/dev/sdb1", "steam://rungameid/400",
+            **{k: v for k, v in src._read_payload(
+                str(tmp_path / "decky-links.json")).items() if k != "uri"}
+        )
+        assert event.payload.get("title") == "Hades"
+
+    @pytest.mark.asyncio
     async def test_remounts_read_only_afterwards(self, tmp_path):
         src = _make_source()
         src._our_mounts["/dev/sdb1"] = str(tmp_path)

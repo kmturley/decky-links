@@ -711,10 +711,18 @@ class NfcSource(MediaSource):
     def can_write(self) -> bool:
         return True
 
-    async def write_uri(self, media_id: str, uri: str) -> Tuple[bool, Optional[str]]:
+    async def write_uri(
+        self, media_id: str, uri: str, title: str = ""
+    ) -> Tuple[bool, Optional[str]]:
         """Source-generic pairing entry point.
 
         ``media_id`` is the tag UID as hex, the form carried by MediaEvents.
+
+        ``title`` is accepted and ignored: an NDEF URI record holds a URI and
+        nothing else, and adding a text record to carry the game name would
+        spend scarce tag memory storing what the app id already resolves to.
+        Storage media, whose payload is a JSON file with room to spare, do
+        record it.
 
         Offloaded for the same reason as :meth:`poll`: writing a tag is a
         page-at-a-time conversation with sleeps between key attempts, and it

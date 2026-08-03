@@ -72,38 +72,6 @@ ALLOWED_SETTING_KEYS = TOP_LEVEL_SETTING_KEYS | NFC_SETTING_KEYS
 
 
 # -----------------------------------------------------------------------
-# Frontend events
-# -----------------------------------------------------------------------
-
-# The old names date from when NFC was the only source. They now carry storage,
-# camera, MQTT, serial and file-watch events too, where "tag" and "reader"
-# describe nothing that exists — a floppy insert arrived as `tag_detected` with
-# a device node in the `uid` field. `media_loading` was added later and already
-# uses the current naming, so this brings the rest into line with it.
-#
-# Both names are emitted for now. The two halves of the plugin ship in one zip,
-# so a *deploy* cannot skew them — but the frontend bundle lives in the Steam UI
-# process, which outlives a plugin_loader restart. Restarting the backend
-# against a bundle the UI has not reloaded is the normal development loop, and
-# without the alias that window is one where no medium is ever detected.
-#
-# Retire the aliases once a release has shipped with both.
-LEGACY_EVENT_NAMES = {
-    "media_detected": "tag_detected",
-    "media_removed": "tag_removed",
-    "source_connection": "reader_status",
-}
-
-
-async def emit(event: str, payload: Any) -> None:
-    """Emit a frontend event, plus its legacy alias if it has one."""
-    await decky.emit(event, payload)
-    legacy = LEGACY_EVENT_NAMES.get(event)
-    if legacy is not None:
-        await decky.emit(legacy, payload)
-
-
-# -----------------------------------------------------------------------
 # State Machine (Spec §5)
 # -----------------------------------------------------------------------
 
@@ -132,6 +100,7 @@ class Plugin:
         self.is_pairing = False
         self.pairing_uri = None
         self.pairing_source_id = None
+        self.pairing_title = ""
         # What is presented where, and which medium started the running game.
         # See decky_links.media_registry for the invariants.
         self._registry = MediaRegistry()
@@ -196,6 +165,7 @@ class Plugin:
         self.is_pairing      = False
         self.pairing_uri     = None
         self.pairing_source_id = None
+        self.pairing_title   = ""
         self.running_game_id = None
         self.current_tag_uid = None
         self.current_tag_uri = None
@@ -357,7 +327,7 @@ class Plugin:
             )
             self._set_state(state.after_source_connected(self.state))
             if is_nfc:
-                await emit("source_connection", {
+                await decky.emit("source_connection", {
                     "connected": True,
                     "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
@@ -379,7 +349,7 @@ class Plugin:
                 self._registry.drop_origin_for_source(event.source_id)
 
             if is_nfc:
-                await emit("source_connection", {
+                await decky.emit("source_connection", {
                     "connected": False,
                     "path": self.settings.get("device_path"),
                     "source_type": event.source_type.value,
@@ -396,7 +366,7 @@ class Plugin:
             # way ejecting the disk would; otherwise it keeps showing media that
             # is no longer attached to anything.
             if had_media:
-                await emit("media_removed", {
+                await decky.emit("media_removed", {
                     "source_type": event.source_type.value,
                     "source_id": event.source_id,
                 })
@@ -504,7 +474,7 @@ class Plugin:
             and armed_for_this_source
             and self._pairable_source(event.source_id) is not None
         ):
-            await emit("media_detected", {
+            await decky.emit("media_detected", {
                 "uid": uid_hex,
                 "source_type": event.source_type.value,
                 "source_id": event.source_id,
@@ -515,7 +485,7 @@ class Plugin:
 
         # Emit media_detected immediately — matches old _handle_scan behavior
         # where the UID appeared in the UI as soon as the card was read.
-        await emit("media_detected", {
+        await decky.emit("media_detected", {
             "uid": uid_hex,
             "source_type": event.source_type.value,
             "source_id": event.source_id,
@@ -657,7 +627,7 @@ class Plugin:
             self.current_tag_uid = None
             self.current_tag_uri = None
             self.current_tag_meta = None
-        await emit("media_removed", {
+        await decky.emit("media_removed", {
             "source_type": event.source_type.value,
             "source_id": event.source_id,
         })
@@ -732,13 +702,15 @@ class Plugin:
         # Atomic state update: exit pairing mode immediately to prevent
         # new media from interfering with the write operation
         pairing_uri = self.pairing_uri
+        pairing_title = getattr(self, "pairing_title", "")
         self.is_pairing = False
         self.pairing_uri = None
         self.pairing_source_id = None
+        self.pairing_title = ""
 
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
-            success, error_msg = await source.write_uri(media_id, pairing_uri)
+            success, error_msg = await source.write_uri(media_id, pairing_uri, pairing_title)
             self._play_sound("success.flac" if success else "error.flac")
 
             if success:
@@ -927,13 +899,18 @@ class Plugin:
             self.nfc_source._reader = None  # force reconnect on next poll
         return True
 
-    async def start_pairing(self, uri, source_id: Optional[str] = None):
+    async def start_pairing(self, uri, source_id: Optional[str] = None, title: str = ""):
         """Arm pairing. With `source_id`, only that trigger may be written.
 
         The panel offers a Pair button per trigger, so it says which one it
         means. Without a target, any writable source wins — the game-page
         link button arms everything and lets the user choose by presenting a
         medium.
+
+        `title` is the game's name. The frontend already has it — every Pair
+        button is rendered next to the label it would write — and recording it
+        on the medium means a disk says what it is without resolving an app id
+        against Steam. Sources that cannot store it ignore it.
         """
         if not self._validate_uri(uri):
             decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
@@ -948,6 +925,7 @@ class Plugin:
         self.is_pairing  = True
         self.pairing_uri = uri
         self.pairing_source_id = source_id
+        self.pairing_title = title if isinstance(title, str) else ""
         # Re-arm every source so media already in place — a card resting on the
         # reader, a disk already in the drive — is picked up on the next poll,
         # instead of requiring the user to remove and re-present it.
@@ -962,6 +940,7 @@ class Plugin:
         self.is_pairing  = False
         self.pairing_uri = None
         self.pairing_source_id = None
+        self.pairing_title = ""
         return True
 
     async def get_reader_status(self):
@@ -999,7 +978,7 @@ class Plugin:
                 self.current_tag_meta = None
         else:
             self.current_tag_meta = None
-        await emit("media_detected", {"uid": uid_hex})
+        await decky.emit("media_detected", {"uid": uid_hex})
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
 
     async def get_tag_metadata(self, uid: Optional[str] = None):

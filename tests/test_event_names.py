@@ -1,19 +1,23 @@
 """
-test_event_names.py — the frontend event contract, and its compatibility shim.
+test_event_names.py — the frontend event contract.
 
 Three event names were NFC-shaped because NFC was the only source when they
 were written. They now carry storage, camera, MQTT, serial and file-watch
 events too, where "tag" and "reader" describe nothing that exists — a floppy
 insert arrived as `tag_detected` with a device node in the `uid` field.
 
-Both names are emitted during the transition. The two halves of the plugin ship
-in one zip, so a deploy cannot skew them — but the frontend bundle lives in the
-Steam UI process and outlives a plugin_loader restart, which is the normal
-development loop. These tests pin the shim so that window stays covered until
-it is deliberately removed.
+  tag_detected  → media_detected
+  tag_removed   → media_removed
+  reader_status → source_connection
+
+The compatibility shim that emitted both names is gone: the plugin has not
+shipped, so there is no installed frontend anywhere holding the old names. What
+these tests protect is that the old names do not creep back in — the backend and
+the panel agree by string literal and nothing type-checks across that boundary,
+so a stray `tag_detected` fails silently and looks like dead hardware.
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from sources.base import (
     MediaEvent,
@@ -22,6 +26,9 @@ from sources.base import (
     SourceEventKind,
     SourceType,
 )
+
+
+RETIRED_NAMES = ("tag_detected", "tag_removed", "reader_status")
 
 
 def _emitted(mock_decky):
@@ -33,72 +40,52 @@ def _payloads_for(mock_decky, name):
     return [c.args[1] for c in mock_decky.emit.call_args_list if c.args[0] == name]
 
 
-# ── The shim itself ───────────────────────────────────────────────────────────
+# ── The retired names are gone for good ───────────────────────────────────────
 
-class TestEmitAlias:
+class TestRetiredNames:
 
-    @pytest.mark.asyncio
-    async def test_aliased_event_emits_both_names(self, mock_decky):
-        import main
-
-        await main.emit("media_detected", {"uid": "DEADBEEF"})
-
-        assert _emitted(mock_decky) == ["media_detected", "tag_detected"]
-
-    @pytest.mark.asyncio
-    async def test_both_names_carry_the_identical_payload(self, mock_decky):
-        """A stale frontend has to behave exactly as it did before the rename,
-        which means the alias cannot be a reduced or reordered payload."""
-        import main
-
-        payload = {"uid": "DEADBEEF", "source_type": "nfc", "source_id": "nfc:0"}
-        await main.emit("media_detected", payload)
-
-        new, = _payloads_for(mock_decky, "media_detected")
-        old, = _payloads_for(mock_decky, "tag_detected")
-        assert new == old == payload
-        assert new is old, "the alias must not be a copy that can drift"
-
-    @pytest.mark.asyncio
-    async def test_unaliased_event_emits_once(self, mock_decky):
-        """Only the three renamed events are duplicated. Doubling every event
-        would double the RPC traffic this refactor spent Phase E reducing."""
-        import main
-
-        await main.emit("uri_detected", {"uri": None, "uid": "DEADBEEF"})
-
-        assert _emitted(mock_decky) == ["uri_detected"]
-
-    def test_alias_map_covers_every_renamed_event(self):
-        import main
-
-        assert main.LEGACY_EVENT_NAMES == {
-            "media_detected": "tag_detected",
-            "media_removed": "tag_removed",
-            "source_connection": "reader_status",
-        }
-
-    def test_no_emit_site_still_uses_a_legacy_name_directly(self):
-        """The shim only works if every site goes through main.emit. A stray
-        `decky.emit("tag_detected", ...)` would emit the old name alone, and
-        the migrated frontend would never see it."""
+    def test_backend_never_emits_a_retired_name(self):
+        """A stray emit of an old name reaches no listener and raises nothing —
+        it just looks like the medium was never detected."""
         import inspect
         import main
 
         source = inspect.getsource(main)
-        for legacy in main.LEGACY_EVENT_NAMES.values():
-            assert f'decky.emit("{legacy}"' not in source, (
-                f"{legacy} is emitted directly; it must go through main.emit "
-                f"so the new name is emitted too"
-            )
+        for name in RETIRED_NAMES:
+            assert f'"{name}"' not in source, f"{name} is still emitted by main.py"
+
+    def test_frontend_never_listens_for_a_retired_name(self):
+        """The other half of the same contract. A listener on a name nothing
+        emits is a panel row that never updates."""
+        import pathlib
+
+        src = pathlib.Path(__file__).resolve().parent.parent / "src"
+        offenders = []
+        for path in src.rglob("*.ts*"):
+            text = path.read_text(encoding="utf-8")
+            for name in RETIRED_NAMES:
+                if f'"{name}"' in text:
+                    offenders.append(f"{path.name}: {name}")
+        assert not offenders, f"retired event names still referenced: {offenders}"
+
+    def test_the_shim_is_gone(self):
+        """Both names were emitted during the rename. Removed once it was clear
+        no installed frontend existed to protect — the plugin has not shipped."""
+        import main
+
+        assert not hasattr(main, "LEGACY_EVENT_NAMES")
+        assert not hasattr(main, "emit"), (
+            "the emit wrapper existed only to add the alias; without it, "
+            "decky.emit is the whole story"
+        )
 
 
-# ── The real handler paths ────────────────────────────────────────────────────
+# ── The current names, from the real handler paths ────────────────────────────
 
-class TestHandlersEmitBothNames:
+class TestHandlersEmitCurrentNames:
 
     @pytest.mark.asyncio
-    async def test_media_load_emits_media_detected_and_tag_detected(self, plugin, mock_decky):
+    async def test_media_load_emits_media_detected(self, plugin, mock_decky):
         event = MediaEvent(
             kind=MediaEventKind.LOAD,
             source_type=SourceType.NFC,
@@ -110,12 +97,10 @@ class TestHandlersEmitBothNames:
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(event)
 
-        emitted = _emitted(mock_decky)
-        assert "media_detected" in emitted
-        assert "tag_detected" in emitted
+        assert "media_detected" in _emitted(mock_decky)
 
     @pytest.mark.asyncio
-    async def test_media_unload_emits_media_removed_and_tag_removed(self, plugin, mock_decky):
+    async def test_media_unload_emits_media_removed(self, plugin, mock_decky):
         from main import PluginState
         plugin.state = PluginState.READY
         plugin.current_tag_uid = "DEADBEEF"
@@ -129,12 +114,10 @@ class TestHandlersEmitBothNames:
         )
         await plugin._handle_media_unload(event)
 
-        emitted = _emitted(mock_decky)
-        assert "media_removed" in emitted
-        assert "tag_removed" in emitted
+        assert "media_removed" in _emitted(mock_decky)
 
     @pytest.mark.asyncio
-    async def test_reader_connect_emits_source_connection_and_reader_status(self, plugin, mock_decky):
+    async def test_reader_connect_emits_source_connection(self, plugin, mock_decky):
         from main import PluginState
         plugin.state = PluginState.IDLE
 
@@ -144,14 +127,13 @@ class TestHandlersEmitBothNames:
             source_id="nfc:/dev/ttyUSB0",
         ))
 
-        new, = _payloads_for(mock_decky, "source_connection")
-        old, = _payloads_for(mock_decky, "reader_status")
-        assert new["connected"] is True
-        assert new == old
+        payload, = _payloads_for(mock_decky, "source_connection")
+        assert payload["connected"] is True
+        assert payload["source_type"] == "nfc"
 
     @pytest.mark.asyncio
-    async def test_storage_connect_emits_neither(self, plugin, mock_decky):
-        """The rename does not widen what emits it. This is still the NFC
+    async def test_storage_connect_emits_no_connection_event(self, plugin, mock_decky):
+        """The rename did not widen what emits it. This is still the NFC
         reader's connection state, under a name that no longer implies the
         payload describes a tag."""
         await plugin._handle_source_event(SourceEvent(
@@ -160,9 +142,7 @@ class TestHandlersEmitBothNames:
             source_id="storage:udev",
         ))
 
-        emitted = _emitted(mock_decky)
-        assert "source_connection" not in emitted
-        assert "reader_status" not in emitted
+        assert "source_connection" not in _emitted(mock_decky)
 
 
 # ── The retired RPC ───────────────────────────────────────────────────────────
@@ -172,8 +152,7 @@ class TestGetTagStatusIsGone:
     def test_rpc_no_longer_exists(self, plugin):
         """It reported a single global slot that whichever source presented
         media last overwrote — a tag and a disk could not both be present.
-        get_active_media is the per-source replacement, and nothing has called
-        the old RPC since E5 removed the frontend's copy of that model."""
+        get_active_media is the per-source replacement."""
         assert not hasattr(plugin, "get_tag_status")
 
     def test_its_cache_went_with_it(self, plugin):

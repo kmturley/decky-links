@@ -199,7 +199,10 @@ export async function pairRow(
   sourceId?: string,
 ): Promise<boolean> {
   const id = sourceId ?? mediumFor(row, sharedState.activeMedia)?.source_id;
-  const ok = await startPairing(target.uri, id);
+  // target.label is the game name, already resolved for the button's own text.
+  // Passing it lets the backend record it alongside the URI, so a disk read on
+  // another machine names the game instead of just carrying an app id.
+  const ok = await startPairing(target.uri, id, target.label);
   if (!ok) {
     toaster.toast({ title: "Pairing Error", body: `Could not pair ${row.label}.`, critical: true });
     return false;

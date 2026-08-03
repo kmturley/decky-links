@@ -209,7 +209,10 @@ export function useSharedState(): SharedState {
 export const getSettings = callable<[], Settings>("get_settings");
 export const setSetting = callable<[key: SettingKey, value: any], boolean>("set_setting");
 // source_id targets one trigger; omitted, any writable trigger may claim it.
-export const startPairing = callable<[uri: string, source_id?: string], boolean>("start_pairing");
+// `title` is the game's name. It is written onto media whose format has room
+// for it, so a disk says what it is without resolving an app id against Steam.
+export const startPairing =
+  callable<[uri: string, source_id?: string, title?: string], boolean>("start_pairing");
 export const getActiveMedia = callable<[], ActiveMedium[]>("get_active_media");
 export const cancelPairing = callable<[], boolean>("cancel_pairing");
 export const getReaderStatus = callable<[], ReaderStatus>("get_reader_status");

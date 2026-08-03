@@ -190,12 +190,20 @@ class MediaSource(ABC):
         """
         return False
 
-    async def write_uri(self, media_id: str, uri: str) -> "tuple[bool, Optional[str]]":
+    async def write_uri(
+        self, media_id: str, uri: str, title: str = ""
+    ) -> "tuple[bool, Optional[str]]":
         """Persist ``uri`` onto the medium identified by ``media_id``.
 
         Returns ``(success, error_message)``. ``media_id`` is whatever this
         source puts in :attr:`MediaEvent.media_id` — a tag UID for NFC, a
         device node for storage.
+
+        ``title`` is the human name of what the URI launches, recorded so the
+        medium says what it is without a Steam lookup. It is advisory: sources
+        whose format has nowhere to put it ignore it. NFC is one — an NDEF URI
+        record carries a URI and nothing else, and a second record would eat
+        scarce tag memory to store what the app id already resolves to.
         """
         return False, f"{self.source_type.value} media cannot be paired"
 

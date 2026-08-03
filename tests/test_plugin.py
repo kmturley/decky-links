@@ -635,7 +635,7 @@ class TestReaderInit:
         assert plugin.current_tag_uid == uid.hex().upper()
         assert plugin.current_tag_uri == uri
         mock_decky.emit.assert_has_calls([
-            call("tag_detected", {"uid": uid.hex().upper()}),
+            call("media_detected", {"uid": uid.hex().upper()}),
             call("uri_detected", {"uri": uri, "uid": uid.hex().upper()}),
         ])
 
@@ -705,7 +705,7 @@ class TestReaderInit:
 class TestMediaRemoval:
 
     @pytest.mark.asyncio
-    async def test_unload_emits_tag_removed(self, plugin, mock_decky):
+    async def test_unload_emits_media_removed(self, plugin, mock_decky):
         from main import PluginState
         plugin.state           = PluginState.READY
         plugin.current_tag_uid = "DEADBEEF"
@@ -716,7 +716,7 @@ class TestMediaRemoval:
         await plugin._handle_media_unload(event)
 
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
-        assert "tag_removed" in emitted
+        assert "media_removed" in emitted
         assert plugin.current_tag_uid is None
 
     @pytest.mark.asyncio
@@ -736,7 +736,7 @@ class TestMediaRemoval:
 
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "card_removed_during_game" in emitted
-        assert "tag_removed" in emitted
+        assert "media_removed" in emitted
 
     @pytest.mark.asyncio
     async def test_blank_medium_elsewhere_does_not_break_auto_close(self, plugin, mock_decky):
@@ -809,10 +809,75 @@ class TestMediaRemoval:
 
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "card_removed_during_game" not in emitted
-        assert "tag_removed" in emitted
+        assert "media_removed" in emitted
 
 
 # ── §7 — Pairing Flow ─────────────────────────────────────────────────────────
+
+class TestPairingCarriesTheGameName:
+    """decky-links.json always shipped `"title": ""`.
+
+    The schema had the field and the reader parsed it; pairing simply never
+    passed one, so a paired disk carried a bare app id and you had to look it up
+    against Steam to know what was on it. The frontend has the name in hand —
+    it is the label on the Pair button being pressed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_pairing_records_the_title(self, plugin):
+        await plugin.start_pairing("steam://rungameid/400", None, "Portal 2")
+        assert plugin.pairing_title == "Portal 2"
+
+    @pytest.mark.asyncio
+    async def test_title_is_optional(self, plugin):
+        """Older call sites, and any source armed without a known name."""
+        await plugin.start_pairing("steam://rungameid/400")
+        assert plugin.pairing_title == ""
+
+    @pytest.mark.asyncio
+    async def test_a_non_string_title_does_not_reach_the_medium(self, plugin):
+        """It is written into a JSON file on removable media, so it is worth one
+        type check at the boundary rather than trusting the caller."""
+        await plugin.start_pairing("steam://rungameid/400", None, {"evil": True})
+        assert plugin.pairing_title == ""
+
+    @pytest.mark.asyncio
+    async def test_title_reaches_write_uri(self, plugin, mock_decky):
+        await plugin.start_pairing("steam://rungameid/400", None, "Hollow Knight")
+
+        writer = AsyncMock(return_value=(True, None))
+        with patch.object(plugin.nfc_source, "write_uri", writer), \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing("DEADBEEF", source_id="nfc:/dev/ttyUSB0")
+
+        writer.assert_awaited_once_with("DEADBEEF", "steam://rungameid/400", "Hollow Knight")
+
+    @pytest.mark.asyncio
+    async def test_title_is_cleared_when_pairing_ends(self, plugin, mock_decky):
+        """It must not leak into the next pairing, which may target a different
+        game — writing the previous game's name onto this disk."""
+        await plugin.start_pairing("steam://rungameid/400", None, "Celeste")
+        with patch.object(plugin.nfc_source, "write_uri", AsyncMock(return_value=(True, None))), \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing("DEADBEEF", source_id="nfc:/dev/ttyUSB0")
+        assert plugin.pairing_title == ""
+
+    @pytest.mark.asyncio
+    async def test_cancelling_clears_the_title(self, plugin):
+        await plugin.start_pairing("steam://rungameid/400", None, "Celeste")
+        await plugin.cancel_pairing()
+        assert plugin.pairing_title == ""
+
+    @pytest.mark.asyncio
+    async def test_nfc_accepts_and_ignores_the_title(self, plugin):
+        """An NDEF URI record holds a URI and nothing else. NFC must not raise
+        on a title it cannot store — every source takes the same call."""
+        source = plugin.nfc_source
+        with patch.object(source, "write_ndef_uri", return_value=(True, None)) as write:
+            ok, err = await source.write_uri("DEADBEEF", "steam://rungameid/400", "Tunic")
+        assert (ok, err) == (True, None)
+        write.assert_called_once_with(b"\xde\xad\xbe\xef", "steam://rungameid/400")
+
 
 class TestPairing:
 
@@ -864,7 +929,7 @@ class TestPairing:
 
         emitted = {c.args[0] for c in mock_decky.emit.call_args_list}
         assert "uri_detected" not in emitted
-        assert "tag_detected" in emitted
+        assert "media_detected" in emitted
 
     @pytest.mark.asyncio
     async def test_start_pairing_rearms_nfc_source(self, plugin, mock_decky):
@@ -987,7 +1052,9 @@ class TestPairing:
         assert payload["success"] is True
         assert payload["uid"] == "/dev/sda"
         assert payload["source_type"] == "storage"
-        storage.write_uri.assert_awaited_once_with("/dev/sda", "steam://rungameid/400")
+        # Empty title: this arms pairing directly rather than through
+        # start_pairing, so no game name was supplied.
+        storage.write_uri.assert_awaited_once_with("/dev/sda", "steam://rungameid/400", "")
 
     @pytest.mark.asyncio
     async def test_pairing_does_not_launch_game_after_write(self, plugin, mock_decky):
@@ -1269,7 +1336,7 @@ class TestCardRemovedDuringGame:
 
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
         assert "card_removed_during_game" not in emitted
-        assert "tag_removed" in emitted
+        assert "media_removed" in emitted
 
 
 # ── Feature 2 — Custom Key Management ────────────────────────────────────────
@@ -1418,12 +1485,12 @@ class TestHandleSourceEvent:
         assert plugin.state == PluginState.READY
 
     @pytest.mark.asyncio
-    async def test_nfc_connected_emits_reader_status_true(self, plugin, mock_decky):
+    async def test_nfc_connected_emits_source_connection_true(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         plugin.state = __import__("main").PluginState.IDLE
         event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
         await plugin._handle_source_event(event)
-        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "reader_status"]
+        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "source_connection"]
         assert len(reader_calls) == 1
         assert reader_calls[0].args[1]["connected"] is True
         assert reader_calls[0].args[1]["source_type"] == "nfc"
@@ -1451,12 +1518,12 @@ class TestHandleSourceEvent:
         assert plugin.state == PluginState.GAME_RUNNING
 
     @pytest.mark.asyncio
-    async def test_storage_connected_does_not_emit_reader_status(self, plugin, mock_decky):
+    async def test_storage_connected_does_not_emit_source_connection(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         event = SourceEvent(kind=SourceEventKind.CONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
         await plugin._handle_source_event(event)
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
-        assert "reader_status" not in emitted
+        assert "source_connection" not in emitted
 
     @pytest.mark.asyncio
     async def test_nfc_disconnected_sets_state_idle(self, plugin, mock_decky):
@@ -1468,11 +1535,11 @@ class TestHandleSourceEvent:
         assert plugin.state == PluginState.IDLE
 
     @pytest.mark.asyncio
-    async def test_nfc_disconnected_emits_reader_status_false(self, plugin, mock_decky):
+    async def test_nfc_disconnected_emits_source_connection_false(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.NFC, source_id="nfc:/dev/ttyUSB0")
         await plugin._handle_source_event(event)
-        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "reader_status"]
+        reader_calls = [c for c in mock_decky.emit.call_args_list if c.args[0] == "source_connection"]
         assert len(reader_calls) == 1
         assert reader_calls[0].args[1]["connected"] is False
 
@@ -1506,15 +1573,15 @@ class TestHandleSourceEvent:
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
         await plugin._handle_source_event(event)
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
-        assert "tag_removed" in emitted
+        assert "media_removed" in emitted
 
     @pytest.mark.asyncio
-    async def test_storage_disconnected_does_not_emit_reader_status(self, plugin, mock_decky):
+    async def test_storage_disconnected_does_not_emit_source_connection(self, plugin, mock_decky):
         from sources.base import SourceEvent, SourceEventKind, SourceType
         event = SourceEvent(kind=SourceEventKind.DISCONNECTED, source_type=SourceType.STORAGE, source_id="storage:udev")
         await plugin._handle_source_event(event)
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
-        assert "reader_status" not in emitted
+        assert "source_connection" not in emitted
 
     @pytest.mark.asyncio
     async def test_connected_event_emits_source_statuses(self, plugin, mock_decky):
