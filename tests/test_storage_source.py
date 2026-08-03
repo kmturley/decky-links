@@ -15,6 +15,35 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def isolate_from_host_block_devices():
+    """Stop these tests reading the machine's real block devices.
+
+    Most of them use ``/dev/sda`` as a stand-in floppy, and
+    ``_is_relevant_device`` asks sysfs whether that device is partitioned —
+    ignoring a whole disk in favour of its partitions. So the answer came from
+    whatever hardware happened to be running the tests.
+
+    That was invisible until the suite first ran on a GitHub runner: a real
+    ``/sys/class/block/sda`` exists there, carved into partitions, so ten tests
+    that pass on any machine without an ``sda`` failed on one with it. Nothing
+    about the plugin changed — the tests were reading the host.
+
+    sysfs lookups now fail as they would for a device that is not present,
+    which is what the tests always meant. Tests that exercise the partition
+    logic itself patch ``os.listdir`` directly and still win, since their patch
+    replaces this one for its duration.
+    """
+    real_listdir = os.listdir
+
+    def _listdir(path, *args, **kwargs):
+        if str(path).startswith("/sys/class/block"):
+            raise FileNotFoundError(path)
+        return real_listdir(path, *args, **kwargs)
+
+    with patch("os.listdir", _listdir):
+        yield
+
 def _make_source(settings=None):
     """A source with every drive category switched on.
 
