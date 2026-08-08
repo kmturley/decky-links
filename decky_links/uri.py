@@ -78,6 +78,38 @@ def _valid_launch_id(prefix: str, value: str) -> bool:
     return False
 
 
+def launch_appid(uri) -> Optional[str]:
+    """The app id a launch URI refers to, in a form two URIs can be compared by.
+
+    ``steam://run/400`` and ``steam://rungameid/400`` name the same game, and a
+    non-Steam shortcut's rungameid packs its app id into the high 32 bits — so
+    comparing URI strings is not an identity test. The twin of
+    ``comparableAppIdFromUri`` in src/lib/steamIds.ts, which the frontend has
+    always needed for the same reason.
+
+    Kid mode is what brought it to this side: deciding whether a running game
+    matches a presented medium is the backend's call, since the backend is the
+    only side that holds every medium and the launch attribution.
+    """
+    if not isinstance(uri, str):
+        return None
+    for prefix in ALLOWED_STEAM_URI_PREFIXES:
+        if not uri.startswith(prefix):
+            continue
+        value = uri[len(prefix):].split("/")[0]
+        if not value or not value.isdigit():
+            return None
+        n = int(value)
+        # A gameID64 is wider than a uint32; its app id is the whole high word,
+        # shortcut flag included. The flag is kept deliberately: Steam reports
+        # a running shortcut's appid with that bit set, so masking it off here
+        # would stop a shortcut's medium ever matching its own running game.
+        if n > U32_MASK:
+            return str((n >> 32) & U32_MASK)
+        return value
+    return None
+
+
 def is_valid_appid(appid) -> bool:
     """True for something that could be a Steam app id.
 

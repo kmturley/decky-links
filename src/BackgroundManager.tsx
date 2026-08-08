@@ -552,6 +552,32 @@ export function startBackgroundManager(): () => void {
     }
   });
 
+  // Kid mode: a game started without a medium to vouch for it.
+  //
+  // The backend decides — it holds every presented medium and the launch
+  // attribution — and this end carries it out, because TerminateApp lives on
+  // SteamClient. The game does visibly start before it closes; that is the
+  // honest cost of enforcing this without Valve's cooperation, and it is a
+  // deterrent rather than a boundary, which is what the README says.
+  const restrictedListener = addEventListener<[data: { appid: number }]>(
+    "restricted_game",
+    (data) => {
+      if (!data || data.appid === undefined || data.appid === null) return;
+      const appId = String(data.appid);
+      console.info(`[ Decky Links ] Kid mode: closing unauthorised game ${appId}.`);
+      void (async () => {
+        const closed = await terminateSteamApp(appId);
+        toaster.toast({
+          title: "Restricted title",
+          body: closed
+            ? "In kid mode, present the tag or disk for a game to play it."
+            : "This game is not allowed, and Steam would not close it.",
+          critical: true,
+        });
+      })();
+    },
+  );
+
   const gameRemovalListener = addEventListener<[data: {
     appid: number, uid: string, uri: string, action?: "close" | "pause",
   }]>("card_removed_during_game", (data) => {
@@ -680,6 +706,7 @@ export function startBackgroundManager(): () => void {
     removeEventListener("pairing_result", pairingListener);
     removeEventListener("kiosk_lock", kioskLockListener);
     removeEventListener("kiosk_state", kioskStateListener);
+    removeEventListener("restricted_game", restrictedListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
     removeEventListener("source_statuses", sourceStatusesListener);
     stopBackgroundManagerFn = null;

@@ -62,26 +62,35 @@ kid mode on and off. Nothing is stored about *which* object it is: the key is a
 random token written onto the medium, exactly like a game pairing, so it works
 on any Deck you register it with and there is no database to keep in step.
 
-Two locks come down together, owned by two different pieces of software:
+While locked:
 
-| What | Who enforces it |
-| --- | --- |
-| Pairing, settings, formatting and the Mifare key tools | Decky Links, in the backend — not by hiding buttons |
-| Which games may run; the Store, Community, Friends, Chat and Browser | **Steam Family View**, which you set up once in Steam |
+- **Only games you hand it will run.** A game started by presenting a medium
+  plays; a game started from the library is closed with a "Restricted title"
+  notice. The allowlist is the box of tags and disks you leave out — there is no
+  list to build and nothing to keep in step with your library.
+- **Nothing can be written or configured.** Pairing, settings, formatting and
+  the Mifare key tools are refused in the backend, not merely hidden.
 
-Family View is Valve's own parental control, so the allowlist is edited in
-Steam's UI, enforced by the Steam client, and still there if this plugin is
-uninstalled. Presenting the key calls Steam's lock, which needs no secret.
-Unlocking needs Family View's PIN: store it in the panel and the key unlocks
-too, or leave it empty and unlock through Steam's own prompt — which is also the
-way back in if the key is lost.
+A game already running when you lock is left alone, so locking mid-session never
+costs anyone their progress.
 
-Without Family View set up, kid mode still stops anything being written or
-configured, but every game stays launchable; the panel says so and links to
-Steam's setup page.
+### What it does not do
 
-Presenting a medium for a game that Family View does not allow shows
-"Restricted title" instead of launching it.
+Steam's own menus stay reachable: the Store, Steam Settings and Desktop Mode are
+not blocked. Valve's only per-account restriction that can bind the account
+holding the library is **Family View**, its older PIN-protected mode — and Steam
+no longer offers to set that up on an account that never had it. Its replacement,
+Steam Families, applies its controls to *child* accounts, which is the opposite
+of what a shared Deck needs: the games are in the parent's library.
+
+If your account does still have Family View, Decky Links locks it alongside its
+own lock, and the panel shows a Manage row. Store its PIN there and the master
+key unlocks Family View too; leave it empty and Steam's own prompt is the way
+back in.
+
+Kid mode is a guardrail for a shared living-room device, not a security boundary.
+A restricted game does visibly start before it is closed, and anyone who can read
+the medium can copy it.
 
 ## Decky Links vs Zaparoo
 

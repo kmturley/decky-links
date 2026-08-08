@@ -22,74 +22,72 @@ import {
 } from "./shared";
 import { familyViewStatus, FAMILY_VIEW_SETUP_URL } from "./lib/familyView";
 
-/** What Steam's half of kid mode is currently able to do.
+/** What kid mode restricts, stated plainly.
  *
- * Worth a row of its own rather than a footnote: the plugin's lock and Family
- * View are independent, and a user who locks with Family View unconfigured
- * gets a device that still refuses tag writes but happily launches anything.
- * Saying which half is missing is the difference between a setting that looks
- * broken and one that has a next step.
+ * This row used to sell Family View as the thing that decided which games may
+ * run. It is not, for most accounts: Family View is Steam's older per-account
+ * PIN mode, and the client only offers to set it up on accounts that already
+ * had it — a modern account gets Steam Families instead, whose controls apply
+ * to *child* accounts and so cannot restrict the one holding the library.
+ *
+ * So the rule is the plugin's own, and it is worth saying out loud, because a
+ * kid mode that silently closes a game the child launched is alarming unless
+ * you were told that is what it does.
  */
-const FamilyViewRow: FC = () => {
+const ScopeRow: FC = () => {
   const status = familyViewStatus();
 
-  if (!status.available) {
-    return (
+  return (
+    <>
       <PanelSectionRow>
         <Field
-          label="Family View"
-          description="Not available on this Steam build."
-          focusable={false}
-          highlightOnFocus={false}
-          bottomSeparator="standard"
-        />
-      </PanelSectionRow>
-    );
-  }
-
-  if (status.enabled) {
-    return (
-      <PanelSectionRow>
-        <Field
-          label="Family View"
+          label="While locked"
           description={
-            status.locked
-              ? "Set up and locked. Steam is enforcing the allowed games."
-              : "Set up. Locking will restrict games and menus."
+            "Only games started by presenting a tag, disk or code will run. " +
+            "Anything launched from the library is closed. Steam's own menus " +
+            "stay reachable."
           }
           focusable={false}
           highlightOnFocus={false}
           bottomSeparator="standard"
         />
       </PanelSectionRow>
-    );
-  }
 
-  return (
-    <PanelSectionRow>
-      <Field
-        label="Family View"
-        description="Not set up — kid mode will not restrict which games run."
-        childrenContainerWidth="min"
-        bottomSeparator="standard"
-      >
-        <DialogButton
-          onClick={() => Navigation.NavigateToExternalWeb(FAMILY_VIEW_SETUP_URL)}
-          style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
-        >
-          Set up
-        </DialogButton>
-      </Field>
-    </PanelSectionRow>
+      {/* Shown only when the account actually has Family View. Offering a
+          "Set up" button for something Steam will not let most accounts turn
+          on is worse than not mentioning it. */}
+      {status.available && status.enabled && (
+        <PanelSectionRow>
+          <Field
+            label="Family View"
+            description={
+              status.locked
+                ? "Locked too — Steam is also restricting its own menus and store."
+                : "Set up on this account. Kid mode will lock it as well."
+            }
+            childrenContainerWidth="min"
+            bottomSeparator="standard"
+          >
+            <DialogButton
+              onClick={() => Navigation.NavigateToExternalWeb(FAMILY_VIEW_SETUP_URL)}
+              style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
+            >
+              Manage
+            </DialogButton>
+          </Field>
+        </PanelSectionRow>
+      )}
+    </>
   );
 };
 
-/** The Family View PIN, stored so a tap can unlock as well as lock.
+/** The Family View PIN, stored so a tap can unlock Steam's half as well.
  *
- * Optional on purpose. Locking never needs a secret; only unlocking does, and
- * keeping one here means Steam's PIN lives in the plugin's settings on the
- * device it protects. Left empty, the master key still locks, and unlocking
- * goes through Steam's own prompt.
+ * Only rendered for accounts that actually have Family View, since it is the
+ * only thing this PIN is for. Optional even then: locking never needs a
+ * secret, only unlocking does, and keeping one here means Steam's PIN lives in
+ * the plugin's settings on the device it protects. Left empty, the master key
+ * still locks, and unlocking goes through Steam's own prompt.
  */
 const PinRow: FC<{ hasPin: boolean }> = ({ hasPin }) => {
   const [pin, setPin] = useState("");
@@ -218,8 +216,8 @@ export const KioskPanel: FC<{ kiosk: KioskState }> = ({ kiosk }) => {
         </PanelSectionRow>
       )}
 
-      <FamilyViewRow />
-      <PinRow hasPin={kiosk.has_pin} />
+      <ScopeRow />
+      {familyViewStatus().enabled && <PinRow hasPin={kiosk.has_pin} />}
 
       {/* A toggle rather than a button, because it reflects a state — but it
           only ever moves one way from here. Unlocking is the master key's job,

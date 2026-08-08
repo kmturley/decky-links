@@ -219,3 +219,51 @@ class TestSteamGamesAreUnaffected:
     @pytest.mark.parametrize("prefix", ["steam://run/", "steam://rungameid/"])
     def test_things_that_were_rejected_still_are(self, prefix, appid):
         assert not uri.is_valid(f"{prefix}{appid}")
+
+
+class TestLaunchAppId:
+    """`launch_appid` — the twin of comparableAppIdFromUri in steamIds.ts.
+
+    Two URIs naming the same game do not compare as strings: `steam://run/400`
+    and `steam://rungameid/400` are the same title, and a shortcut's rungameid
+    packs its app id into the high 32 bits. Kid mode asks "is the running game
+    the one on this disk?", so getting this wrong either lets everything
+    through or restricts everything.
+    """
+
+    @pytest.mark.parametrize("uri_str,expected", [
+        ("steam://run/400", "400"),
+        ("steam://rungameid/400", "400"),
+        ("steam://run/620/", "620"),
+    ])
+    def test_both_forms_reduce_to_the_same_id(self, uri_str, expected):
+        assert uri.launch_appid(uri_str) == expected
+
+    def test_a_shortcut_gameid64_reduces_to_its_app_id(self):
+        appid = 0x80000001
+        gameid64 = ((appid | 0x80000000) << 32) | 0x02000000
+        assert uri.launch_appid(f"steam://rungameid/{gameid64}") == str(appid)
+
+    def test_the_shortcut_flag_is_kept(self):
+        """Steam reports a running shortcut's appid with the high bit set.
+        Masking it off here would stop a shortcut's medium ever matching its
+        own running game."""
+        appid = 0x80000001
+        gameid64 = ((appid | 0x80000000) << 32) | 0x02000000
+        assert int(uri.launch_appid(f"steam://rungameid/{gameid64}")) & 0x80000000
+
+    def test_the_two_forms_of_one_game_agree(self):
+        assert uri.launch_appid("steam://run/400") == uri.launch_appid("steam://rungameid/400")
+
+    @pytest.mark.parametrize("uri_str", [
+        "https://example.com",
+        "decky-links://master/" + "a" * 32,
+        "steam://open/games/details/400",
+        "steam://run/abc",
+        "steam://run/",
+        "",
+        None,
+        400,
+    ])
+    def test_anything_that_is_not_a_launch_uri_has_no_app_id(self, uri_str):
+        assert uri.launch_appid(uri_str) is None

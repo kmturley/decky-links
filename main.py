@@ -816,6 +816,29 @@ class Plugin:
         await decky.emit("kiosk_lock", payload)
         return True
 
+    def _medium_authorizes(self, appid) -> bool:
+        """Whether a presented medium vouches for this running game.
+
+        The kid-mode launch rule, and the reason it needs no allowlist: the
+        Deck plays what you hand it. A game qualifies if a medium started it,
+        or if a medium naming it is presented right now — the second clause is
+        not redundant, because with auto-launch switched off the plugin only
+        opens the game's page and the user presses Play themselves, which
+        produces a launch with no attribution at all.
+
+        Non-Steam shortcuts compare through ``uri.launch_appid``: the medium
+        carries a gameID64 and Steam reports the running app by its app id.
+        """
+        if self._registry.launch_origin is not None:
+            return True
+        if appid is None:
+            return False
+        target = str(appid)
+        return any(
+            uri_rules.launch_appid(medium.get("uri")) == target
+            for medium in self._registry.all()
+        )
+
     async def _handle_master_key(self, event: MediaEvent, uid_hex: str, token: str):
         """A medium carrying a master payload was presented.
 
@@ -1443,6 +1466,16 @@ class Plugin:
                     f"Game {appid} attributed to {self._registry.launch_origin}"
                 )
             self._set_state(PluginState.GAME_RUNNING)
+
+            # Kid mode's launch rule. Checked here rather than in the frontend
+            # because this is where attribution is settled — and only on a
+            # game *starting*, so locking the plugin mid-session never kills
+            # the game already being played.
+            if self.locked and prev != appid and not self._medium_authorizes(appid):
+                decky.logger.info(
+                    f"Kid mode: game {appid} started without a medium — restricted."
+                )
+                await decky.emit("restricted_game", {"appid": appid})
         else:
             self._registry.clear_launch()
             self._set_state(state.after_game_exited(

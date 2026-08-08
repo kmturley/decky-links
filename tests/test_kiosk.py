@@ -198,6 +198,106 @@ class TestLocking:
         assert "pin" not in events[-1]
 
 
+# ── The launch rule ───────────────────────────────────────────────────────────
+
+class TestOnlyMediaLaunchedGamesRun:
+    """Kid mode's answer to "which games may run", and why it needs no list.
+
+    Steam cannot answer it for us: Family View is the only per-account
+    restriction that applies to the account holding the library, and Steam no
+    longer offers to set it up on accounts that never had it — Steam Families
+    replaced it, and those controls only bind *child* accounts.
+
+    So the rule is the plugin's own: the Deck plays what you hand it. The
+    allowlist is the box of tags and disks, which means there is nothing to
+    maintain and nothing to drift.
+    """
+
+    @pytest.fixture
+    def locked(self, plugin):
+        _register(plugin)
+        plugin.settings.set_kiosk("locked", True)
+        return plugin
+
+    @pytest.mark.asyncio
+    async def test_a_game_started_from_the_library_is_restricted(self, locked, mock_decky):
+        await locked.set_running_game(400)
+        assert _emitted(mock_decky, "restricted_game") == [{"appid": 400}]
+
+    @pytest.mark.asyncio
+    async def test_a_game_a_medium_launched_is_allowed(self, locked, mock_decky):
+        await locked._handle_media_load(_load_event("steam://rungameid/400"))
+        await locked.set_running_game(400)
+        assert _emitted(mock_decky, "restricted_game") == []
+
+    @pytest.mark.asyncio
+    async def test_a_presented_medium_vouches_without_having_launched_it(
+        self, locked, mock_decky,
+    ):
+        """With auto-launch off the plugin only opens the game's page and the
+        user presses Play, so the launch has no attribution at all. The disk is
+        still in the drive, and that is the thing kid mode is really asking
+        about."""
+        locked.settings.set("auto_launch", False)
+        await locked._handle_media_load(_load_event("steam://run/620"))
+        locked._registry.clear_launch()
+
+        await locked.set_running_game(620)
+
+        assert _emitted(mock_decky, "restricted_game") == []
+
+    @pytest.mark.asyncio
+    async def test_a_different_game_than_the_medium_names_is_restricted(
+        self, locked, mock_decky,
+    ):
+        locked.settings.set("auto_launch", False)
+        await locked._handle_media_load(_load_event("steam://run/620"))
+        locked._registry.clear_launch()
+
+        await locked.set_running_game(400)
+
+        assert _emitted(mock_decky, "restricted_game") == [{"appid": 400}]
+
+    @pytest.mark.asyncio
+    async def test_a_shortcut_medium_matches_its_running_app_id(self, locked, mock_decky):
+        """The medium carries a gameID64; Steam reports the app id. Comparing
+        the two as strings would restrict every non-Steam game."""
+        from decky_links import uri as uri_rules
+        gameid64 = str(((0x80000001 | 0x80000000) << 32) | 0x02000000)
+        locked.settings.set("auto_launch", False)
+        await locked._handle_media_load(_load_event(f"steam://rungameid/{gameid64}"))
+        locked._registry.clear_launch()
+
+        await locked.set_running_game(int(uri_rules.launch_appid(f"steam://rungameid/{gameid64}")))
+
+        assert _emitted(mock_decky, "restricted_game") == []
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_restricted_while_unlocked(self, plugin, mock_decky):
+        await plugin.set_running_game(400)
+        assert _emitted(mock_decky, "restricted_game") == []
+
+    @pytest.mark.asyncio
+    async def test_a_game_already_running_is_left_alone_when_the_lock_comes_down(
+        self, plugin, mock_decky,
+    ):
+        """Locking mid-session must not kill the game being played — that is
+        lost progress for whoever is holding the Deck."""
+        _register(plugin)
+        await plugin.set_running_game(400)
+        mock_decky.emit.reset_mock()
+
+        await plugin.set_kiosk_locked(True)
+        await plugin.set_running_game(400)   # the frontend re-reports it
+
+        assert _emitted(mock_decky, "restricted_game") == []
+
+    @pytest.mark.asyncio
+    async def test_the_game_exiting_is_not_a_restriction(self, locked, mock_decky):
+        await locked.set_running_game(None)
+        assert _emitted(mock_decky, "restricted_game") == []
+
+
 # ── The key, presented ────────────────────────────────────────────────────────
 
 class TestMasterKeyPresented:

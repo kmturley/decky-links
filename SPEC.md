@@ -411,22 +411,45 @@ While locked, the backend refuses: pairing, `set_setting`, `set_source_setting`,
 RPC other than reading the state. Unlocking from the panel is refused by design.
 Locking with no key registered is refused, because the panel offers no way back.
 
-Launching is *not* restricted here — see §16.3.
+### 16.3 The launch rule
 
-### 16.3 Family View
+While locked, a game may run only if a medium vouches for it:
 
-Which games may run, and which parts of Steam are reachable, are delegated to
-Steam's Family View. The frontend calls `SteamClient.Parental.LockParentalLock`
-on lock — it needs no secret — and `UnlockParentalLock(pin)` on unlock when the
-user has chosen to store the PIN. Before launching, a medium's app id is checked
-against Family View's allowlist and refused with a notice rather than a silent
-non-launch.
+1. a medium launched it (`MediaRegistry.launch_origin` is set), or
+2. a medium naming it is presented right now.
+
+The second clause is not redundant: with `auto_launch` disabled the plugin only
+opens the game's page and the user presses Play, producing a launch with no
+attribution. Comparison goes through `uri.launch_appid`, because a medium
+carries a gameID64 for a non-Steam shortcut while Steam reports the app id.
+
+Anything else is reported as `restricted_game` and terminated by the frontend,
+which owns the mechanism. Evaluated only when a game *starts*: locking
+mid-session never terminates the game being played.
+
+This is a deterrent, not a boundary — the game visibly starts before it closes.
+
+### 16.4 Family View, where it exists
+
+Family View is Steam's older per-account PIN mode, and the only Valve control
+that restricts the account holding the library. Steam Families, which replaced
+it, applies its controls to *child* accounts and therefore cannot restrict the
+account a shared Deck is signed into.
+
+The client offers Family View setup only to accounts where `wasEverEnabled` is
+true, so it cannot be relied on and is not the mechanism for §16.3. Where it is
+already configured, locking also calls `SteamClient.Parental.LockParentalLock`
+(no secret needed) and unlocking calls `UnlockParentalLock(pin)` when the user
+stored the PIN.
 
 Steam's parental store is located by shape, never by webpack module id: ids
 change with every client build.
 
-### 16.4 Non-goals within kid mode
+### 16.5 Non-goals within kid mode
 
+* Blocking Steam's own menus — the Store, Settings and Desktop Mode stay
+  reachable. Steam's internal kiosk mode could do it, but it is undocumented,
+  frontend-only, resets on a client restart and carries a hardcoded escape PIN.
 * Replacing the Steam Home view with a kiosk overlay.
 * Hiding other Decky Loader plugins — another plugin's UI is not this one's to
   hide, and Decky Loader has no lock of its own.
