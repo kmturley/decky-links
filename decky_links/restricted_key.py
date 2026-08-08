@@ -30,6 +30,13 @@ from typing import Optional
 # rejected as an unknown scheme, which is exactly right.
 KEY_URI_PREFIX = "decky-links://key/"
 
+# Read, never written. The payload was called "master" while this feature was
+# being built, and keys written then are on physical objects that someone still
+# has in a drawer — a rename here turns one of those into a medium that reads
+# as an unrecognised URI, which is the silent breakage the presence model
+# exists to avoid. Droppable once no such key can still be in circulation.
+_LEGACY_URI_PREFIXES = ("decky-links://master/",)
+
 TOKEN_BYTES = 16
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
@@ -52,10 +59,13 @@ def parse_token(uri) -> Optional[str]:
     key" are different questions and the caller needs to tell a
     stranger's tag apart from a game tag.
     """
-    if not isinstance(uri, str) or not uri.startswith(KEY_URI_PREFIX):
+    if not isinstance(uri, str):
         return None
-    token = uri[len(KEY_URI_PREFIX):].strip().lower()
-    return token if _TOKEN_PATTERN.match(token) else None
+    for prefix in (KEY_URI_PREFIX, *_LEGACY_URI_PREFIXES):
+        if uri.startswith(prefix):
+            token = uri[len(prefix):].strip().lower()
+            return token if _TOKEN_PATTERN.match(token) else None
+    return None
 
 
 def hash_token(token: str) -> str:
