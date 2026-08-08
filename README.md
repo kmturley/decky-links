@@ -65,7 +65,7 @@ in a lock:
 | **Register a key** | Pick the trigger from the list; restricted mode is on from then on |
 | **Key removed** | Locked |
 | **Key present** | Unlocked |
-| **Disable Key** | Restricted mode off, and the key is wiped from its medium |
+| **Deregister** | Restricted mode off, and the key is wiped from its medium |
 
 Nothing is stored about which object it is, and nothing is stored about whether
 the Deck is locked — being locked *is* the key being absent. There is no lock

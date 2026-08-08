@@ -84,9 +84,11 @@ const MediaRow: FC<{
   // While reading, a spinner takes its place: the disk is in the drive but
   // there is nothing to say about it yet, and a static icon next to
   // "Reading disk…" reads as stalled.
+  // A state may override the glyph — a key wears a key rather than the disk it
+  // happens to be written on.
   const icon: ReactNode = state.busy
     ? <Spinner style={{ width: "1.1em", height: "1.1em" }} />
-    : <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{row.icon}</span>;
+    : <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{state.icon ?? row.icon}</span>;
 
   if (!state.action) {
     return (

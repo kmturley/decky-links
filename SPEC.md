@@ -399,7 +399,10 @@ goes to whichever source the backend reads first and the user cannot say which.
 The panel arms the Triggers list into a "choose the key" state, and the row
 pressed is the target — `register_key` takes that `source_id`. A medium that
 already holds a game is confirmed with a second press, since registering over
-it destroys that pairing.
+it destroys that pairing; the medium that is *already* the registered key
+offers no button at all, since writing a second token over the first changes
+nothing. A key wears a key glyph in the list rather than its medium's, because
+it is otherwise indistinguishable from an ordinary disk or tag.
 
 The token is committed only once the write succeeds, and any pending token is
 dropped when a pairing is cancelled or re-armed — otherwise a cancelled
@@ -417,7 +420,10 @@ emitted event.
 Two facts, and only one of them is stored:
 
 * **Restricted mode is on** when a key is registered (`restricted.key_hash` is
-  non-empty). Registering a key switches it on; "Disable Key" switches it off.
+  non-empty). Registering a key switches it on; "Deregister" switches it off.
+  Those are the only two moves, and they are one button: a "replace" that keeps
+  restricted mode on across the swap is deregistering and registering again,
+  with an intermediate state neither the user nor the backend has a use for.
 * **The plugin is locked** when restricted mode is on and the key is *not*
   presented on any source. This is derived from the media registry on every
   read and never persisted.

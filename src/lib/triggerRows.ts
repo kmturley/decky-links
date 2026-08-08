@@ -116,6 +116,14 @@ export async function toggleRow(row: TriggerRow, value: boolean, status?: Source
   notifySubscribers();
 }
 
+/** Shown in place of the trigger's own glyph when the medium is the key.
+ *
+ * The row's icon otherwise says which *kind* of medium is present, which is
+ * already on the toggle above it — while a key looks exactly like every other
+ * disk or tag until you read the label. Swapping the glyph is what makes "this
+ * one is not a game" legible at a glance. */
+const KEY_ICON = "🔑";
+
 export interface MediaState {
   /** Left-hand text: what is on this trigger right now. */
   text: string;
@@ -123,6 +131,8 @@ export interface MediaState {
   action: string | null;
   /** Dim the row — no hardware, so nothing here is actionable. */
   dim: boolean;
+  /** Overrides the trigger's glyph for this state. */
+  icon?: string;
   /** Work is in progress; show a spinner in place of the medium icon. */
   busy?: boolean;
   /** The action erases the medium, so the row asks before doing it. Only ever
@@ -167,13 +177,14 @@ export function mediaStateFor(
   // unusable on it, so it keeps its Pair button — without one it could never
   // be reused for anything.
   if (medium.key && medium.authorized !== false) {
-    return { text: "Key", action: null, dim: false };
+    return { text: "Key", action: null, dim: false, icon: KEY_ICON };
   }
   if (medium.key) {
     return {
       text: "Unknown key",
       action: target ? "Pair" : null,
       dim: false,
+      icon: KEY_ICON,
     };
   }
   if (medium.problem === "unreadable") {
@@ -274,8 +285,13 @@ export function keyStateFor(
     return { text: `No ${row.noun} — insert one`, action: "Register", dim: false };
   }
 
+  // No button: this medium is already the answer to the question the list is
+  // asking, and pressing Register on it would write a *second* token over the
+  // first — a key that still unlocks, having pointlessly rewritten itself.
+  // Choosing a different trigger, or deregistering, are the only two moves
+  // from here, and both live elsewhere.
   if (medium.key && medium.authorized) {
-    return { text: "Already the key", action: "Register", dim: false };
+    return { text: "Already the key", action: null, dim: false, icon: KEY_ICON };
   }
 
   // Overwriting a game destroys that pairing, so the row says whose it is and

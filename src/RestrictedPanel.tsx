@@ -17,66 +17,41 @@ import {
   toaster,
   type RestrictedState,
 } from "./shared";
+import { cancelKeyRegistration } from "./lib/triggerRows";
 import { familyViewStatus, FAMILY_VIEW_SETUP_URL } from "./lib/familyView";
 
-/** What restricted mode restricts, stated plainly.
+/** Steam's half of the lock, where the account has it.
  *
- * This row used to sell Family View as the thing that decided which games may
- * run. It is not, for most accounts: Family View is Steam's older per-account
- * PIN mode, and the client only offers to set it up on accounts that already
- * had it — a modern account gets Steam Families instead, whose controls apply
- * to *child* accounts and so cannot restrict the one holding the library.
- *
- * So the rule is the plugin's own, and it is worth saying out loud, because a
- * restricted mode that silently closes a game the child launched is alarming unless
- * you were told that is what it does.
+ * Shown only when the account actually has Family View. It used to head this
+ * section as the thing that decided which games may run — it is not, for most
+ * accounts: Family View is Steam's older per-account PIN mode, and the client
+ * only offers to set it up on accounts that already had it. A modern account
+ * gets Steam Families instead, whose controls apply to *child* accounts and so
+ * cannot restrict the one holding the library. Offering a "Set up" button for
+ * something Steam will not let most accounts turn on is worse than not
+ * mentioning it, so an account without it never sees this row.
  */
-const ScopeRow: FC = () => {
-  const status = familyViewStatus();
-
-  return (
-    <>
-      <PanelSectionRow>
-        <Field
-          label="While locked"
-          description={
-            "Only games started by presenting a tag, disk or code will run. " +
-            "Anything launched from the library is closed. Steam's own menus " +
-            "stay reachable."
-          }
-          focusable={false}
-          highlightOnFocus={false}
-          bottomSeparator="standard"
-        />
-      </PanelSectionRow>
-
-      {/* Shown only when the account actually has Family View. Offering a
-          "Set up" button for something Steam will not let most accounts turn
-          on is worse than not mentioning it. */}
-      {status.available && status.enabled && (
-        <PanelSectionRow>
-          <Field
-            label="Family View"
-            description={
-              status.locked
-                ? "Locked too — Steam is also restricting its own menus and store."
-                : "Set up on this account. Restricted mode will lock it as well."
-            }
-            childrenContainerWidth="min"
-            bottomSeparator="standard"
-          >
-            <DialogButton
-              onClick={() => Navigation.NavigateToExternalWeb(FAMILY_VIEW_SETUP_URL)}
-              style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
-            >
-              Manage
-            </DialogButton>
-          </Field>
-        </PanelSectionRow>
-      )}
-    </>
-  );
-};
+const FamilyViewRow: FC<{ locked: boolean }> = ({ locked }) => (
+  <PanelSectionRow>
+    <Field
+      label="Family View"
+      description={
+        locked
+          ? "Locked too — Steam is also restricting its own menus and store."
+          : "Set up on this account. Restricted mode will lock it as well."
+      }
+      childrenContainerWidth="min"
+      bottomSeparator="standard"
+    >
+      <DialogButton
+        onClick={() => Navigation.NavigateToExternalWeb(FAMILY_VIEW_SETUP_URL)}
+        style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
+      >
+        Manage
+      </DialogButton>
+    </Field>
+  </PanelSectionRow>
+);
 
 /** The Family View PIN, stored so a tap can unlock Steam's half as well.
  *
@@ -163,58 +138,84 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
     notifySubscribers();
   };
 
-  const disable = async () => {
+  const deregister = async () => {
     if (await disableKey()) {
       toaster.toast({
-        title: "Key disabled",
+        title: "Key deregistered",
         body: "Restricted mode is off and the medium has been wiped.",
       });
       return;
     }
     toaster.toast({
-      title: "Could not disable",
+      title: "Could not deregister",
       body: "The key must be present, and writable, to be wiped.",
       critical: true,
     });
   };
 
+  // One button, because there is only ever one move to make here.
+  //
+  // It used to be two — "Replace" beside the key row and a "Disable Key"
+  // button below it — which offered a choice that is not really a choice:
+  // replacing is deregistering and registering again, and the intermediate
+  // state (a key registered, a second write in flight) is one neither the user
+  // nor the backend has a use for. Register ⇄ Deregister is the whole switch.
+  const action = registering
+    ? { label: "Cancel", run: cancelKeyRegistration }
+    : restricted.has_key
+      ? { label: "Deregister", run: () => void deregister() }
+      : { label: "Register", run: register };
+
+  const familyView = familyViewStatus();
+  const showFamilyView = familyView.available && familyView.enabled;
+
   return (
     <PanelSection title="Restricted Mode">
+      {/* What the mode does, above the control that arms it.
+          This used to sit *below* the key row, so the button asking to be
+          pressed was explained by text you reached after pressing it. */}
+      <PanelSectionRow>
+        <Field
+          description={
+            restricted.has_key
+              // The one sentence that explains the whole feature. There is no
+              // lock button, and this is why: the key *is* the switch.
+              ? "Take the key away to lock these controls, and to allow only " +
+                "games started from a tag, disk or code. Steam's own menus stay open."
+              : "Register a key. Taking it away locks these controls, and allows " +
+                "only games started from a tag, disk or code. Steam's own menus stay open."
+          }
+          focusable={false}
+          highlightOnFocus={false}
+          bottomSeparator="standard"
+        />
+      </PanelSectionRow>
+
       <PanelSectionRow>
         <Field
           icon={<FaKey />}
-          label={restricted.has_key ? `Key: ${restricted.label}` : "Off"}
+          label={restricted.has_key ? "Key" : "No key"}
           description={
             registering
               ? "Choose a trigger in the list above"
-              : restricted.has_key
-                // The one sentence that explains the whole feature. There is
-                // no lock button, and this is why: the key *is* the switch.
-                ? "Take the key away to lock. Put it back to unlock."
-                : "Register a medium as the key to switch restricted mode on."
+              : restricted.has_key && restricted.label
+                ? `On the ${restricted.label}`
+                : undefined
           }
           childrenContainerWidth="min"
           bottomSeparator="standard"
         >
           <DialogButton
-            onClick={register}
+            onClick={action.run}
             style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
           >
-            {restricted.has_key ? "Replace" : "Register"}
+            {action.label}
           </DialogButton>
         </Field>
       </PanelSectionRow>
 
-      {restricted.has_key && (
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void disable()}>
-            Disable Key
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-
-      <ScopeRow />
-      {familyViewStatus().enabled && <PinRow hasPin={restricted.has_pin} />}
+      {showFamilyView && <FamilyViewRow locked={familyView.locked} />}
+      {showFamilyView && <PinRow hasPin={restricted.has_pin} />}
     </PanelSection>
   );
 };
