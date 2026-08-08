@@ -369,3 +369,19 @@ class TestRegistration:
         await plugin._handle_pairing("04AABBCC", source_id="nfc:/dev/ttyUSB0")
 
         source.write_uri.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pairing_a_game_clears_the_master_flag(self, plugin):
+        """Otherwise the row keeps reading "Master key" over a medium that now
+        holds a game, until it is removed and presented again."""
+        _register(plugin)
+        _writable_nfc_source(plugin)
+        stranger = master_key.uri_for(master_key.mint_token())
+
+        await plugin._handle_media_load(_load_event(stranger))
+        await plugin.start_pairing("steam://rungameid/400", "nfc:/dev/ttyUSB0")
+        await plugin._handle_pairing("04AABBCC", source_id="nfc:/dev/ttyUSB0")
+
+        media = await plugin.get_active_media()
+        assert media and media[0]["master"] is False
+        assert media[0]["uri"] == "steam://rungameid/400"

@@ -1040,6 +1040,11 @@ class Plugin:
             entry = self._registry.first_of_type("nfc")
         if entry is not None:
             entry["uri"] = uri
+            # It holds a game now. Leaving the flags behind kept the row
+            # reading "Master key" over a medium that had just been paired to
+            # something else, until it was removed and presented again.
+            entry["master"] = False
+            entry["authorized"] = False
 
         # current_tag_* is the NFC-only view the write path reads back from
         # (write_tag needs the UID of the tag on the reader); pairing a floppy
