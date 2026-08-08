@@ -157,6 +157,16 @@ export function mediaStateFor(
   if (medium.problem === "loading") {
     return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
   }
+  // The master key is not a link and must never be offered a Pair button:
+  // writing a game onto it would destroy the only thing that can unlock the
+  // device. The backend refuses it too — this stops the user asking.
+  if (medium.master) {
+    return {
+      text: medium.authorized === false ? "Unknown master key" : "Master key",
+      action: null,
+      dim: false,
+    };
+  }
   if (medium.problem === "unreadable") {
     // Format is offered only when the backend found no filesystem at all — a
     // disk holding one we cannot mount is also unreadable but has data on it,

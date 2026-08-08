@@ -935,6 +935,22 @@ class Plugin:
             self.pairing_source_id = None
             return
 
+        # Never write a game over the master key. The medium would keep
+        # working as a game tag while the registered hash stayed behind,
+        # leaving a device that can be locked by a key that no longer exists.
+        entry = self._registry.get(source_id) if source_id else None
+        if self._pending_master_token is None and (entry or {}).get("master"):
+            decky.logger.warning(f"Refusing to pair over the master key on {source_id}")
+            self.is_pairing = False
+            self.pairing_uri = None
+            self.pairing_source_id = None
+            await decky.emit("pairing_result", {
+                "success": False,
+                "uid":     media_id,
+                "error":   "This is the master key — use another medium",
+            })
+            return
+
         source = self._pairable_source(source_id)
         if source is None:
             decky.logger.warning(

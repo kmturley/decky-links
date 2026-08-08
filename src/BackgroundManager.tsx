@@ -4,9 +4,11 @@ import {
   getReaderStatus,
   getSourceStatuses,
   getActiveMedia,
+  getKioskState,
   setRunningGame,
   sharedState,
   settingsRef,
+  kioskRef,
   activeAppIdRef,
   notifySubscribers,
   addEventListener,
@@ -17,6 +19,12 @@ import {
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
+import {
+  familyViewStatus,
+  isAppBlocked,
+  lockFamilyView,
+  unlockFamilyView,
+} from "./lib/familyView";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -176,6 +184,56 @@ async function terminateSteamApp(appId: string, launchUri?: string): Promise<boo
   return false;
 }
 
+/** Apply a lock change to Steam's Family View, and say what happened.
+ *
+ * Locking needs no secret, so it always works when Family View is set up at
+ * all. Unlocking needs the PIN the user asked us to keep; without one this
+ * deliberately does nothing and leaves them Steam's own prompt, which is the
+ * fallback the whole design leans on.
+ */
+async function applyFamilyView(locked: boolean, pin: string): Promise<void> {
+  const status = familyViewStatus();
+  if (!status.available) return;
+
+  if (!status.enabled) {
+    // The plugin's own write lock is still on; only Steam's half is missing.
+    // Worth saying, because "kid mode" that does not restrict a single game is
+    // not what the user thinks they just switched on.
+    if (locked) {
+      toaster.toast({
+        title: "Locked",
+        body: "Set up Steam Family View to restrict games and menus.",
+      });
+    }
+    return;
+  }
+
+  if (locked) {
+    if (lockFamilyView()) {
+      toaster.toast({ title: "Kid mode on", body: "Family View locked." });
+    }
+    return;
+  }
+
+  if (!pin) {
+    toaster.toast({
+      title: "Decky Links unlocked",
+      body: "Family View still locked — enter its PIN in Steam.",
+    });
+    return;
+  }
+
+  if (await unlockFamilyView(pin)) {
+    toaster.toast({ title: "Kid mode off", body: "Family View unlocked." });
+  } else {
+    toaster.toast({
+      title: "Family View not unlocked",
+      body: "Steam refused the stored PIN. Enter it in Steam.",
+      critical: true,
+    });
+  }
+}
+
 export function startBackgroundManager(): () => void {
   if (stopBackgroundManagerFn) {
     return stopBackgroundManagerFn;
@@ -197,6 +255,14 @@ export function startBackgroundManager(): () => void {
     const statuses = await getSourceStatuses();
     if (active) {
       sharedState.sourceStatuses = statuses;
+    }
+
+    // Before the media seed below: a locked device must not draw the unlocked
+    // panel, however briefly, and the launch path consults this.
+    const kiosk = await getKioskState();
+    if (active) {
+      sharedState.kiosk = kiosk;
+      kioskRef.current = kiosk;
     }
 
     // Seed the per-source view: media already presented before the panel was
@@ -297,7 +363,7 @@ export function startBackgroundManager(): () => void {
     uri: string | null, uid: string, paired?: boolean, source_id?: string,
     source_type?: SourceType,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
-    formattable?: boolean,
+    formattable?: boolean, master?: boolean, authorized?: boolean,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
 
@@ -317,6 +383,36 @@ export function startBackgroundManager(): () => void {
       ? data.uid
       : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
+
+    // A master key carries no URI by design, so every "no URI" branch below
+    // would mislabel it — as a blank tag, and then as an error sound and a
+    // Pair button offering to overwrite the key with a game.
+    if (data.master) {
+      if (key && sharedState.activeMedia[key]) {
+        sharedState.activeMedia = {
+          ...sharedState.activeMedia,
+          [key]: {
+            ...sharedState.activeMedia[key],
+            media_id: normalizedUid,
+            uri: null,
+            problem: null,
+            master: true,
+            authorized: data.authorized !== false,
+          },
+        };
+      }
+      notifySubscribers();
+      if (data.authorized === false) {
+        // Named rather than silent: a key that has stopped being recognised
+        // looks exactly like a reader that has stopped reading.
+        toaster.toast({
+          title: "Not the master key",
+          body: "This medium is not registered on this device.",
+          critical: true,
+        });
+      }
+      return;
+    }
 
     const problem = uri
       ? null
@@ -354,6 +450,19 @@ export function startBackgroundManager(): () => void {
     if (uri) {
       const currentSettings = settingsRef.current;
       const uriAppId = parseSteamAppIdFromUri(uri);
+
+      // Kid mode: which games are allowed is Family View's answer, not ours.
+      // Asked before launching rather than left to Steam to refuse, so the
+      // user gets a sentence instead of a tap that appears to do nothing.
+      if (kioskRef.current?.locked && isAppBlocked(uriAppId)) {
+        console.info(`[ Decky Links ] Restricted title ${uriAppId}; not launching.`);
+        toaster.toast({
+          title: "Restricted title",
+          body: "This game is not on the allowed list.",
+          critical: true,
+        });
+        return;
+      }
 
       if (currentSettings?.auto_launch) {
         const currentAppId = activeAppIdRef.current;
@@ -401,6 +510,32 @@ export function startBackgroundManager(): () => void {
         executeSteamUri(detailsUri);
       }
     }
+  });
+
+  // The lock changed — by a master key on a reader, or from the panel. The
+  // backend owns the state and has already persisted it; this half exists
+  // because SteamClient lives only here.
+  const kioskLockListener = addEventListener<[data: {
+    locked: boolean, has_master_key: boolean, label: string, has_pin: boolean,
+    reason?: string, pin?: string,
+  }]>("kiosk_lock", (data) => {
+    if (!data || typeof data.locked !== "boolean") return;
+    const { pin, reason, ...state } = data;
+    sharedState.kiosk = state;
+    kioskRef.current = state;
+    notifySubscribers();
+    console.info(`[ Decky Links ] Kid mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
+    void applyFamilyView(data.locked, pin ?? "");
+  });
+
+  // Registration, replacement or PIN changes: state only, no Family View call.
+  const kioskStateListener = addEventListener<[data: {
+    locked: boolean, has_master_key: boolean, label: string, has_pin: boolean,
+  }]>("kiosk_state", (data) => {
+    if (!data || typeof data.locked !== "boolean") return;
+    sharedState.kiosk = data;
+    kioskRef.current = data;
+    notifySubscribers();
   });
 
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
@@ -543,6 +678,8 @@ export function startBackgroundManager(): () => void {
     removeEventListener("source_connection", statusListener);
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
+    removeEventListener("kiosk_lock", kioskLockListener);
+    removeEventListener("kiosk_state", kioskStateListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
     removeEventListener("source_statuses", sourceStatusesListener);
     stopBackgroundManagerFn = null;
