@@ -3,6 +3,7 @@ import {
   sharedState,
   notifySubscribers,
   toaster,
+  disableKey,
   registerKey,
   startPairing,
   setSourceSetting,
@@ -176,8 +177,12 @@ export function mediaStateFor(
   // stale key, or someone else's. That is an ordinary medium with something
   // unusable on it, so it keeps its Pair button — without one it could never
   // be reused for anything.
+  // Deregistering from here as well as from the Restricted Mode section, which
+  // is up to nine trigger rows further down: this row is where you are already
+  // looking when you decide the key is in the wrong place, and it is the row
+  // whose toggle is pinned on until you do.
   if (medium.key && medium.authorized !== false) {
-    return { text: "Key", action: null, dim: false, icon: KEY_ICON };
+    return { text: "Key", action: "Deregister", dim: false, icon: KEY_ICON };
   }
   if (medium.key) {
     return {
@@ -360,6 +365,29 @@ export async function registerKeyOn(
   sharedState.pairing = true;
   notifySubscribers();
   return true;
+}
+
+/** Switch restricted mode off and wipe the key from its medium.
+ *
+ * Shared by the Restricted Mode section and the key's own trigger row, so the
+ * two cannot come to say different things about what the button did. No
+ * confirm: it is only reachable while unlocked — the key is right there — and
+ * registering again is one press.
+ */
+export async function deregisterKey(): Promise<boolean> {
+  if (await disableKey()) {
+    toaster.toast({
+      title: "Key deregistered",
+      body: "Restricted mode is off and the medium has been wiped.",
+    });
+    return true;
+  }
+  toaster.toast({
+    title: "Could not deregister",
+    body: "The key must be present, and writable, to be wiped.",
+    critical: true,
+  });
+  return false;
 }
 
 /** Leave key-registration mode without writing anything.

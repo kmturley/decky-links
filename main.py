@@ -871,7 +871,12 @@ class Plugin:
             await self.cancel_pairing()
 
         decky.logger.info(f"Restricted mode {'locked' if locked else 'unlocked'} ({reason})")
-        self._play_sound("success.flac")
+        # Its own pair of sounds, and not success.flac, which is what a pairing
+        # and a launch already say. The lock is the one event with no screen to
+        # look at — the key comes out while the Deck is being handed over — so
+        # the sound is the whole notification, and it has to say *which way* it
+        # went. A bolt going over falls; a latch springing open rises.
+        self._play_sound("lock.flac" if locked else "unlock.flac")
 
         payload = dict(self._restricted_state())
         payload["reason"] = reason
@@ -1205,7 +1210,9 @@ class Plugin:
         Only whitelisted sound files are allowed to prevent path traversal attacks.
         """
         # Whitelist allowed sounds
-        ALLOWED_SOUNDS = {"scan.flac", "success.flac", "error.flac"}
+        ALLOWED_SOUNDS = {
+            "scan.flac", "success.flac", "error.flac", "lock.flac", "unlock.flac",
+        }
         
         if filename not in ALLOWED_SOUNDS:
             decky.logger.warning(f"Attempted to play unauthorized sound: {filename}")

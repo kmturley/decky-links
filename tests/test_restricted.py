@@ -785,3 +785,44 @@ class TestTheKeysTriggerCannotBeSwitchedOff:
         # the test cannot pass for the wrong reason if the lock ever moves.
         assert plugin.locked is True
         assert await plugin.set_source_setting("storage", "enabled", False) is False
+
+
+# ── What the lock sounds like ─────────────────────────────────────────────────
+
+class TestTheLockHasItsOwnSound:
+    """The lock is the one event with nothing on screen to look at — the key
+    comes out while the Deck is being handed over — so the sound is the whole
+    notification, and it has to say which way it went.
+
+    It used to play success.flac in both directions, which is also what a
+    pairing and a launch play.
+    """
+
+    @pytest.mark.asyncio
+    async def test_locking_and_unlocking_sound_different(self, plugin):
+        token = _register(plugin)
+        plugin._play_sound = MagicMock()
+
+        await _present_key(plugin, token)
+        await plugin._handle_media_unload(_unload_event())
+
+        played = [c.args[0] for c in plugin._play_sound.call_args_list]
+        assert played[-2:] == ["unlock.flac", "lock.flac"]
+
+    @pytest.mark.asyncio
+    async def test_neither_is_the_pairing_sound(self, plugin):
+        token = _register(plugin)
+        plugin._play_sound = MagicMock()
+        await _present_key(plugin, token)
+        assert "success.flac" not in [c.args[0] for c in plugin._play_sound.call_args_list]
+
+    def test_both_files_ship(self):
+        """_play_sound refuses anything off its allowlist, and a missing file
+        is a silent no-op — so a name that ships without its audio is a lock
+        that just stops making a sound."""
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for name in ("lock.flac", "unlock.flac"):
+            path = os.path.join(root, "assets", "sounds", name)
+            assert os.path.isfile(path), path
+            assert os.path.getsize(path) > 1000, path

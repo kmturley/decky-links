@@ -19,6 +19,7 @@ import {
 } from "./shared";
 import {
   TRIGGER_ROWS,
+  deregisterKey,
   isRowConnected,
   isRowEnabled,
   mediaStateFor,
@@ -122,6 +123,10 @@ const MediaRow: FC<{
       void registerKeyOn(row, sourceId);
       return;
     }
+    if (state.action === "Deregister") {
+      void deregisterKey();
+      return;
+    }
     if (state.destructive) {
       void formatRow(medium!);
       return;
@@ -163,7 +168,7 @@ const MediaRow: FC<{
             gap: 6,
           }}
         >
-          {registeringKey
+          {registeringKey || state.action === "Deregister"
             ? <FaKey size={12} />
             : state.destructive ? <FaEraser size={12} /> : <FaLink size={12} />}
           {confirming ? "Confirm" : state.action}
@@ -283,7 +288,7 @@ export const TriggersPanel: FC<{
               label={row.label}
               checked={enabled}
               disabled={holdsKey}
-              description={holdsKey ? "Holds the key — deregister it to switch this off" : undefined}
+              description={holdsKey ? "Deregister the key to disable this trigger" : undefined}
               bottomSeparator={enabled ? "none" : "standard"}
               onChange={(v: boolean) => void toggleRow(row, v, status)}
             />

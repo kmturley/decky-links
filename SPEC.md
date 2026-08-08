@@ -339,11 +339,16 @@ The detection method must:
 
 Audio feedback should be provided for:
 
-* Card detected
-* Pairing success
+* Card detected — `scan.flac`
+* Pairing success — `success.flac`, failure `error.flac`
+* Restricted mode locking and unlocking — `lock.flac` / `unlock.flac` (§16.2.2)
 * Optional: Launch initiated
 
 Audio must be lightweight and non-intrusive.
+
+`_play_sound` takes a filename from a fixed allowlist, never a path, and a
+missing file is a logged no-op rather than an error — so a name added here
+without its audio is a silent event, not a crash.
 
 ---
 
@@ -479,6 +484,15 @@ locked plugin can be talked into doing. Deregistering releases the trigger.
 Nothing extra is stored to know which trigger that is. The check only runs
 while unlocked, which is exactly when the key is present and the registry can
 say.
+
+The key's own row carries a Deregister button as well as the Restricted Mode
+section, since that row is where the user is looking when they decide the key
+is in the wrong place — and it is the row whose toggle is pinned.
+
+Locking and unlocking play `lock.flac` and `unlock.flac`, not the `success.flac`
+a pairing and a launch play. The key usually comes out while the Deck is being
+handed over and nobody is watching the screen, so the sound is the whole
+notification and has to say which way it went.
 
 ### 16.3 The launch rule
 

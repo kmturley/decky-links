@@ -7,13 +7,11 @@ import {
 } from "@decky/ui";
 import { FaKey, FaLock, FaLockOpen } from "react-icons/fa";
 import {
-  disableKey,
   notifySubscribers,
   sharedState,
-  toaster,
   type RestrictedState,
 } from "./shared";
-import { cancelKeyRegistration } from "./lib/triggerRows";
+import { cancelKeyRegistration, deregisterKey } from "./lib/triggerRows";
 
 /** Restricted mode, as configured while unlocked.
  *
@@ -39,21 +37,6 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
     notifySubscribers();
   };
 
-  const deregister = async () => {
-    if (await disableKey()) {
-      toaster.toast({
-        title: "Key deregistered",
-        body: "Restricted mode is off and the medium has been wiped.",
-      });
-      return;
-    }
-    toaster.toast({
-      title: "Could not deregister",
-      body: "The key must be present, and writable, to be wiped.",
-      critical: true,
-    });
-  };
-
   // One button, because there is only ever one move to make here.
   //
   // It used to be two — "Replace" beside the key row and a "Disable Key"
@@ -64,7 +47,7 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
   const action = registering
     ? { label: "Cancel", run: cancelKeyRegistration }
     : restricted.has_key
-      ? { label: "Deregister", run: () => void deregister() }
+      ? { label: "Deregister", run: () => void deregisterKey() }
       : { label: "Register", run: register };
 
   return (
