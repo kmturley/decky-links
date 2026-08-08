@@ -51,6 +51,37 @@ your own data, and mounting that uninvited is both a surprise and a delay.
   that launched a game may quit it, so ejecting an unrelated disk does nothing.
 - **Portable payloads.** `steam://run/…`, `steam://rungameid/…` (including
   non-Steam shortcuts) and `https://…`, validated against an allowlist backend-side.
+- **Kid mode with a physical key.** Register any medium as a master key and
+  present it to lock the Deck down — see below.
+
+## Kid Mode
+
+For handing the Deck to a child or a guest. Register a medium — a tag, a disk, a
+USB stick — as a **master key** from the plugin panel, and presenting it toggles
+kid mode on and off. Nothing is stored about *which* object it is: the key is a
+random token written onto the medium, exactly like a game pairing, so it works
+on any Deck you register it with and there is no database to keep in step.
+
+Two locks come down together, owned by two different pieces of software:
+
+| What | Who enforces it |
+| --- | --- |
+| Pairing, settings, formatting and the Mifare key tools | Decky Links, in the backend — not by hiding buttons |
+| Which games may run; the Store, Community, Friends, Chat and Browser | **Steam Family View**, which you set up once in Steam |
+
+Family View is Valve's own parental control, so the allowlist is edited in
+Steam's UI, enforced by the Steam client, and still there if this plugin is
+uninstalled. Presenting the key calls Steam's lock, which needs no secret.
+Unlocking needs Family View's PIN: store it in the panel and the key unlocks
+too, or leave it empty and unlock through Steam's own prompt — which is also the
+way back in if the key is lost.
+
+Without Family View set up, kid mode still stops anything being written or
+configured, but every game stays launchable; the panel says so and links to
+Steam's setup page.
+
+Presenting a medium for a game that Family View does not allow shows
+"Restricted title" instead of launching it.
 
 ## Decky Links vs Zaparoo
 

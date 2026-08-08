@@ -371,7 +371,6 @@ If NDEF URI parsing fails:
 
 * Desktop Mode support
 * Cross-platform support
-* Parental restrictions
 * Custom UI overlays for quitting
 * Tag locking
 
@@ -379,6 +378,59 @@ Since shipped, and no longer non-goals:
 
 * **Multiple simultaneous media** — one per source, tracked independently.
 * **Metadata storage** — storage payloads carry optional `title` and `icon`.
+* **Parental restrictions** — see §16. Listed here as a non-goal in v1 on the
+  grounds that a launcher should not also be a parental control. That still
+  holds, and is why the plugin supplies the *key* while Steam's Family View
+  supplies the lock.
+
+---
+
+## 16. Kid Mode
+
+### 16.1 The master key
+
+A master key is a medium carrying `decky-links://master/<token>`, where the
+token is 128 random bits, written through the ordinary pairing path. The device
+stores only its SHA-256. Any medium the plugin can write can be a key.
+
+The scheme is deliberately outside the §4 allowlist: a control payload is not
+something a tapped card may launch, so a copy reaching any other code path is
+rejected as an unknown scheme. It is recognised before the allowlist is
+consulted, and its token never reaches the frontend, the media registry, or any
+emitted event.
+
+### 16.2 States
+
+Presenting the registered key toggles `locked`, which is persisted. Presenting
+a master payload that is *not* the registered one changes nothing and is
+reported to the user; it remains an ordinary medium, and may be paired to a
+game like any other.
+
+While locked, the backend refuses: pairing, `set_setting`, `set_source_setting`,
+`format_media`, `set_tag_key`, `lock_sector`, `simulate_tag`, and every kiosk
+RPC other than reading the state. Unlocking from the panel is refused by design.
+Locking with no key registered is refused, because the panel offers no way back.
+
+Launching is *not* restricted here — see §16.3.
+
+### 16.3 Family View
+
+Which games may run, and which parts of Steam are reachable, are delegated to
+Steam's Family View. The frontend calls `SteamClient.Parental.LockParentalLock`
+on lock — it needs no secret — and `UnlockParentalLock(pin)` on unlock when the
+user has chosen to store the PIN. Before launching, a medium's app id is checked
+against Family View's allowlist and refused with a notice rather than a silent
+non-launch.
+
+Steam's parental store is located by shape, never by webpack module id: ids
+change with every client build.
+
+### 16.4 Non-goals within kid mode
+
+* Replacing the Steam Home view with a kiosk overlay.
+* Hiding other Decky Loader plugins — another plugin's UI is not this one's to
+  hide, and Decky Loader has no lock of its own.
+* Intercepting the STEAM button inside a running game. Not exposed to plugins.
 
 ---
 
