@@ -160,10 +160,18 @@ export function mediaStateFor(
   // The master key is not a link and must never be offered a Pair button:
   // writing a game onto it would destroy the only thing that can unlock the
   // device. The backend refuses it too — this stops the user asking.
+  //
+  // A master payload this device does *not* recognise is a different thing: a
+  // stale key, or someone else's. That is an ordinary medium with something
+  // unusable on it, so it keeps its Pair button — without one it could never
+  // be reused for anything.
+  if (medium.master && medium.authorized !== false) {
+    return { text: "Master key", action: null, dim: false };
+  }
   if (medium.master) {
     return {
-      text: medium.authorized === false ? "Unknown master key" : "Master key",
-      action: null,
+      text: "Unknown master key",
+      action: target ? "Pair" : null,
       dim: false,
     };
   }

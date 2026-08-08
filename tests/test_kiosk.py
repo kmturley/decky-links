@@ -352,3 +352,20 @@ class TestRegistration:
         source.write_uri.assert_not_awaited()
         results = _emitted(mock_decky, "pairing_result")
         assert results and results[-1]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_master_medium_can_still_be_paired(self, plugin):
+        """Someone else's key, or ours after it was replaced, is just a medium
+        with a stale payload. Refusing to pair it left it unusable for good,
+        with no way back from the panel."""
+        _register(plugin)
+        source = _writable_nfc_source(plugin)
+        stranger = master_key.uri_for(master_key.mint_token())
+
+        await plugin._handle_media_load(_load_event(stranger))
+        assert plugin.locked is False, "an unknown key must not have locked it"
+
+        await plugin.start_pairing("steam://rungameid/400", "nfc:/dev/ttyUSB0")
+        await plugin._handle_pairing("04AABBCC", source_id="nfc:/dev/ttyUSB0")
+
+        source.write_uri.assert_awaited_once()

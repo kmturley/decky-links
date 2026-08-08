@@ -826,6 +826,13 @@ class Plugin:
         stored = self.settings.get_kiosk("master_key_hash") if self.settings else ""
         recognised = master_key.matches(token, stored)
 
+        # Recorded on the medium's registry entry, because two later decisions
+        # turn on it: the panel labels the row, and pairing refuses to write a
+        # game over the key — but only over the one this device actually knows.
+        entry = self._registry.get(event.source_id)
+        if entry is not None:
+            entry["authorized"] = recognised
+
         await decky.emit("media_detected", {
             "uid": uid_hex,
             "source_type": event.source_type.value,
@@ -902,6 +909,7 @@ class Plugin:
             # get_active_media, which the panel polls every five seconds.
             entry["uri"] = None
             entry["master"] = True
+            entry["authorized"] = True
 
         await decky.emit("uri_detected", {
             "uri": None, "uid": (entry or {}).get("media_id", ""),
@@ -938,8 +946,14 @@ class Plugin:
         # Never write a game over the master key. The medium would keep
         # working as a game tag while the registered hash stayed behind,
         # leaving a device that can be locked by a key that no longer exists.
+        #
+        # Only the *recognised* key, though. A medium carrying a master payload
+        # this device does not know — someone else's key, or ours after it was
+        # replaced — is just a medium with a stale payload on it, and refusing
+        # to pair that left it permanently unusable with no way back.
         entry = self._registry.get(source_id) if source_id else None
-        if self._pending_master_token is None and (entry or {}).get("master"):
+        is_our_key = (entry or {}).get("master") and (entry or {}).get("authorized")
+        if self._pending_master_token is None and is_our_key:
             decky.logger.warning(f"Refusing to pair over the master key on {source_id}")
             self.is_pairing = False
             self.pairing_uri = None
