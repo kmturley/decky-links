@@ -282,3 +282,65 @@ class TestFormatRpc:
                 plugin.source_manager._sources.remove(source)
         result = await plugin.format_media("/dev/sda")
         assert result["success"] is False
+
+
+class TestErase:
+    """Removing this plugin's payload, for "Disable Key".
+
+    Deleting the file rather than blanking it: on a filesystem the payload's
+    absence is expressible, and a disk with no `decky-links.json` on it is a
+    disk this plugin has never touched — which is what disabling a key should
+    leave behind on someone's own USB stick.
+    """
+
+    def _mounted(self, tmp_path, devnode="/dev/sda1"):
+        src = _make_source()
+        src._our_mounts[devnode] = str(tmp_path)
+        src._remount = AsyncMock(return_value=True)
+        return src
+
+    @pytest.mark.asyncio
+    async def test_deletes_the_payload_file(self, tmp_path):
+        payload = tmp_path / "decky-links.json"
+        payload.write_text('{"version": 1, "uri": "decky-links://key/x"}')
+        src = self._mounted(tmp_path)
+
+        ok, err = await src.erase("/dev/sda1")
+
+        assert (ok, err) == (True, None)
+        assert not payload.exists()
+
+    @pytest.mark.asyncio
+    async def test_leaves_everything_else_alone(self, tmp_path):
+        """It is the user's stick. One file, the one we wrote."""
+        (tmp_path / "decky-links.json").write_text("{}")
+        (tmp_path / "holiday.jpg").write_text("not ours")
+        src = self._mounted(tmp_path)
+
+        await src.erase("/dev/sda1")
+
+        assert (tmp_path / "holiday.jpg").exists()
+
+    @pytest.mark.asyncio
+    async def test_a_disk_with_no_payload_is_already_erased(self, tmp_path):
+        src = self._mounted(tmp_path)
+        ok, err = await src.erase("/dev/sda1")
+        assert (ok, err) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_puts_the_mount_back_read_only(self, tmp_path):
+        """A disk sitting in a drive is never left writable — the same rule
+        pairing follows, and for the same reason."""
+        (tmp_path / "decky-links.json").write_text("{}")
+        src = self._mounted(tmp_path)
+
+        await src.erase("/dev/sda1")
+
+        assert [c.args[1] for c in src._remount.await_args_list] == ["rw", "ro"]
+
+    @pytest.mark.asyncio
+    async def test_refuses_when_the_disk_is_not_mounted(self):
+        src = _make_source()
+        ok, err = await src.erase("/dev/sda1")
+        assert ok is False
+        assert "not mounted" in err

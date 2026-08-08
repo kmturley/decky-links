@@ -51,16 +51,30 @@ your own data, and mounting that uninvited is both a surprise and a delay.
   that launched a game may quit it, so ejecting an unrelated disk does nothing.
 - **Portable payloads.** `steam://run/…`, `steam://rungameid/…` (including
   non-Steam shortcuts) and `https://…`, validated against an allowlist backend-side.
-- **Restricted mode with a physical key.** Register any medium as a key and
-  present it to lock the Deck down — see below.
+- **Restricted mode with a physical key.** Register any medium as a key; take it
+  away and the Deck locks down — see below.
 
 ## Restricted Mode
 
 For handing the Deck to a child or a guest. Register a medium — a tag, a disk, a
-USB stick — as a **key** from the plugin panel, and presenting it toggles
-restricted mode on and off. Nothing is stored about *which* object it is: the key is a
-random token written onto the medium, exactly like a game pairing, so it works
-on any Deck you register it with and there is no database to keep in step.
+USB stick — as the **key** from the plugin panel, and it behaves like a key left
+in a lock:
+
+| | |
+| --- | --- |
+| **Register a key** | Restricted mode is on from now on |
+| **Key removed** | Locked |
+| **Key present** | Unlocked |
+| **Disable Key** | Restricted mode off, and the key is wiped from its medium |
+
+Nothing is stored about which object it is, and nothing is stored about whether
+the Deck is locked — being locked *is* the key being absent. There is no lock
+switch to get out of step with the key, and a Deck that boots with the key in a
+drawer comes up locked because the key is in a drawer.
+
+The key is a random token written onto the medium, exactly like a game pairing,
+so it works on any Deck you register it with and there is no database to keep in
+step. One medium cannot be both a key and a game tag.
 
 While locked:
 
@@ -71,8 +85,13 @@ While locked:
 - **Nothing can be written or configured.** Pairing, settings, formatting and
   the Mifare key tools are refused in the backend, not merely hidden.
 
-A game already running when you lock is left alone, so locking mid-session never
-costs anyone their progress.
+A game already running when the key comes out is left alone, so locking
+mid-session never costs anyone their progress.
+
+Worth knowing for an NFC key: the tag has to stay on the reader to stay
+unlocked, because that is what "the key is in the lock" means. Lift it and the
+Deck locks. A disk or USB stick suits an admin session better — it sits in the
+drive while you work and locks the Deck when you pull it out.
 
 ### What it does not do
 
@@ -85,8 +104,12 @@ of what a shared Deck needs: the games are in the parent's library.
 
 If your account does still have Family View, Decky Links locks it alongside its
 own lock, and the panel shows a Manage row. Store its PIN there and the key
-key unlocks Family View too; leave it empty and Steam's own prompt is the way
-back in.
+unlocks Family View too; leave it empty and Steam's own prompt is the way back
+in.
+
+Losing the key means editing `settings.json` in Desktop Mode to clear
+`restricted.key_hash` — there is no PIN of our own, deliberately, since a second
+way in is a second thing to leave switched on by accident.
 
 Restricted mode is a guardrail for a shared living-room device, not a security boundary.
 A restricted game does visibly start before it is closed, and anyone who can read

@@ -207,6 +207,23 @@ class MediaSource(ABC):
         """
         return False, f"{self.source_type.value} media cannot be paired"
 
+    async def erase(
+        self, media_id: str
+    ) -> "tuple[bool, Optional[str]]":
+        """Remove this plugin's payload from the medium. ``(success, error)``.
+
+        Added for "Disable key", which has to leave the medium as it found it
+        — a stick still carrying a token the device has forgotten would read
+        as an unknown key forever.
+
+        The default writes an empty URI, which is what erasure means for a
+        format that is a fixed record: an NDEF tag keeps its record and empties
+        it. Sources whose payload is a file they created delete it instead,
+        because there the payload's *absence* is expressible and leaving an
+        empty one behind would be litter on the user's disk.
+        """
+        return await self.write_uri(media_id, "")
+
     def rearm(self) -> None:
         """Re-report media that is already present on the next poll.
 

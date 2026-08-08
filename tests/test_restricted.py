@@ -6,10 +6,15 @@ panel's buttons is presentation; the panel is not the only way to reach a
 plugin's RPCs, so every test in TestLockedRpcs calls the backend directly and
 asserts it refuses.
 
-The other half is the key itself: recognised before any URI branch, so
-it never launches and never reads as a blank tag; committed only once it is
-physically written; and never paired over, because a game written onto the key
-leaves a device that can be locked with a key that no longer exists.
+**The lock is derived, not stored.** A key registered and present means
+unlocked; registered and absent means locked. That is why so many tests here
+lock a device simply by registering a key and presenting nothing: there is no
+lock flag to set, and no way for one to disagree with the medium in the drive.
+
+The other half is the key itself: recognised before any URI branch, so it never
+launches and never reads as a blank tag; committed only once it is physically
+written; and never paired over, because a game written onto the key leaves a
+device that can be locked with a key that no longer exists.
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -47,11 +52,45 @@ def _writable_nfc_source(plugin, write_result=(True, None)):
 
 
 def _register(plugin, token=None):
-    """Put a key on the device, as a completed registration would."""
+    """Register a key, as a completed registration would.
+
+    With no medium presented this also *locks* the device, because that is what
+    the lock is: a registered key that is not here.
+    """
     token = token or restricted_key.mint_token()
     plugin.settings.set_restricted("key_hash", restricted_key.hash_token(token))
     plugin.settings.set_restricted("key_label", "NFC tag")
     return token
+
+
+async def _present_key(plugin, token, **kwargs):
+    """Put the key on a reader, which unlocks."""
+    await plugin._handle_media_load(_load_event(restricted_key.uri_for(token), **kwargs))
+
+
+def _unload_event(source_id="nfc:/dev/ttyUSB0", media_id="04AABBCC"):
+    from sources.base import MediaEvent, MediaEventKind, SourceType
+    return MediaEvent(
+        kind=MediaEventKind.UNLOAD,
+        source_type=SourceType.NFC,
+        source_id=source_id,
+        media_id=media_id,
+        uri=None,
+        payload={},
+    )
+
+
+async def _register_by_presenting(plugin):
+    """Register a key the way the panel does: arm, then present the medium.
+
+    The whole sequence matters here — arming alone records nothing, and it is
+    the presentation that both writes the token and puts the medium in the
+    registry, which is what makes the freshly-made key count as present.
+    """
+    source = _writable_nfc_source(plugin)
+    await plugin.register_key("nfc:/dev/ttyUSB0")
+    await plugin._handle_media_load(_load_event(""))
+    return source
 
 
 def _emitted(mock_decky, name):
@@ -65,8 +104,8 @@ class TestLockedRpcs:
 
     @pytest.fixture
     def locked(self, plugin):
+        """A key registered and not present — which is all "locked" means."""
         _register(plugin)
-        plugin.settings.set_restricted("locked", True)
         return plugin
 
     @pytest.mark.asyncio
@@ -111,16 +150,16 @@ class TestLockedRpcs:
         assert await locked.set_family_view_pin("1234") is False
 
     @pytest.mark.asyncio
-    async def test_the_panel_cannot_unlock(self, locked):
-        """A panel button that undid the lock would mean the key protects
-        nothing. Unlocking is the key's job, or Steam's PIN prompt."""
-        assert await locked.set_restricted_locked(False) is False
+    async def test_there_is_no_rpc_that_unlocks(self, locked):
+        """The only way out is the key. The lock is derived from what is
+        present, so there is nothing for an RPC to set."""
+        assert not hasattr(locked, "set_restricted_locked")
         assert locked.locked is True
 
     @pytest.mark.asyncio
     async def test_games_still_launch(self, locked, mock_decky):
-        """Restricted mode restricts writing, not playing. Which games are allowed is
-        Family View's answer, and it is enforced in the frontend."""
+        """Restricted mode restricts writing, not playing — which games may
+        run is the launch rule's business, tested below."""
         await locked._handle_media_load(_load_event("steam://rungameid/400"))
         assert [e for e in _emitted(mock_decky, "uri_detected")
                 if e.get("uri") == "steam://rungameid/400"]
@@ -129,34 +168,89 @@ class TestLockedRpcs:
 # ── Locking and unlocking ─────────────────────────────────────────────────────
 
 class TestLocking:
+    """The lock is where the key is.
+
+    There is no lock flag and no lock button. Every state below is reached by
+    putting the key somewhere or taking it away, which is the whole reason the
+    plugin and the panel cannot end up disagreeing about whether the Deck is
+    locked.
+    """
 
     @pytest.mark.asyncio
-    async def test_locking_needs_a_registered_key(self, plugin):
-        """A lock whose key does not exist is a device nobody can get back
-        into — the panel offers no unlock button by design."""
-        assert await plugin.set_restricted_locked(True) is False
+    async def test_no_key_means_no_restrictions(self, plugin):
+        """Restricted mode is off until a key exists, so a fresh install is
+        not a device its owner has to unlock."""
+        assert plugin.key_registered is False
         assert plugin.locked is False
 
     @pytest.mark.asyncio
-    async def test_locks_from_the_panel_once_a_key_exists(self, plugin):
+    async def test_a_registered_key_that_is_absent_is_a_locked_device(self, plugin):
         _register(plugin)
-        assert await plugin.set_restricted_locked(True) is True
+        assert plugin.locked is True
+
+    @pytest.mark.asyncio
+    async def test_presenting_the_key_unlocks(self, plugin):
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_removing_the_key_locks_again(self, plugin):
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        await plugin._handle_media_unload(_unload_event())
+        assert plugin.locked is True
+
+    @pytest.mark.asyncio
+    async def test_presenting_it_twice_does_not_lock_it_again(self, plugin):
+        """It is presence, not a toggle. A source re-reporting the medium it
+        is holding — which storage does on a rearm — must not flip the lock."""
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        await _present_key(plugin, token)
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_removing_some_other_medium_does_not_lock(self, plugin):
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        await plugin._handle_media_unload(_unload_event(source_id="storage:udev"))
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_a_restart_with_the_key_out_comes_up_locked(self, plugin):
+        """Nothing is remembered, so nothing has to be trusted: an empty
+        registry is a key that is not here."""
+        _register(plugin)
+        plugin._registry.reset()
         assert plugin.locked is True
 
     @pytest.mark.asyncio
     async def test_locking_cancels_an_armed_pairing(self, plugin):
         """A pairing armed before the lock came down would write the next
         medium presented, which is what the lock exists to stop."""
-        _register(plugin)
+        token = _register(plugin)
+        await _present_key(plugin, token)
         await plugin.start_pairing("steam://rungameid/400")
         assert plugin.is_pairing is True
-        await plugin.set_restricted_locked(True)
+
+        await plugin._handle_media_unload(_unload_event())
+
+        assert plugin.locked is True
         assert plugin.is_pairing is False
+
+    @pytest.mark.asyncio
+    async def test_the_lock_is_announced_once_per_change(self, plugin, mock_decky):
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        await _present_key(plugin, token)
+        assert len(_emitted(mock_decky, "restricted_lock")) == 1
 
     @pytest.mark.asyncio
     async def test_the_pin_never_appears_in_the_state_rpc(self, plugin):
         """The panel needs to know a PIN exists, never what it is."""
-        _register(plugin)
+        token = _register(plugin)
+        await _present_key(plugin, token)     # configuring needs to be unlocked
         await plugin.set_family_view_pin("4321")
         state = await plugin.get_restricted_state()
         assert state["has_pin"] is True
@@ -174,11 +268,12 @@ class TestLocking:
         """Only the frontend can call Steam, so the PIN travels exactly once,
         at the moment it is needed."""
         token = _register(plugin)
+        await _present_key(plugin, token)
         await plugin.set_family_view_pin("4321")
-        await plugin.set_restricted_locked(True)
+        await plugin._handle_media_unload(_unload_event())
         mock_decky.emit.reset_mock()
 
-        await plugin._handle_media_load(_load_event(restricted_key.uri_for(token)))
+        await _present_key(plugin, token)
 
         events = _emitted(mock_decky, "restricted_lock")
         assert events and events[-1]["locked"] is False
@@ -188,10 +283,11 @@ class TestLocking:
     async def test_lock_event_does_not_carry_the_pin(self, plugin, mock_decky):
         """Locking Family View needs no secret, so nothing is handed over."""
         token = _register(plugin)
+        await _present_key(plugin, token)
         await plugin.set_family_view_pin("4321")
         mock_decky.emit.reset_mock()
 
-        await plugin._handle_media_load(_load_event(restricted_key.uri_for(token)))
+        await plugin._handle_media_unload(_unload_event())
 
         events = _emitted(mock_decky, "restricted_lock")
         assert events and events[-1]["locked"] is True
@@ -215,8 +311,8 @@ class TestOnlyMediaLaunchedGamesRun:
 
     @pytest.fixture
     def locked(self, plugin):
+        """A key registered and not present — which is all "locked" means."""
         _register(plugin)
-        plugin.settings.set_restricted("locked", True)
         return plugin
 
     @pytest.mark.asyncio
@@ -281,15 +377,17 @@ class TestOnlyMediaLaunchedGamesRun:
     async def test_a_game_already_running_is_left_alone_when_the_lock_comes_down(
         self, plugin, mock_decky,
     ):
-        """Locking mid-session must not kill the game being played — that is
-        lost progress for whoever is holding the Deck."""
-        _register(plugin)
+        """Taking the key out mid-session must not kill the game being played
+        — that is lost progress for whoever is holding the Deck."""
+        token = _register(plugin)
+        await _present_key(plugin, token)
         await plugin.set_running_game(400)
         mock_decky.emit.reset_mock()
 
-        await plugin.set_restricted_locked(True)
+        await plugin._handle_media_unload(_unload_event())
         await plugin.set_running_game(400)   # the frontend re-reports it
 
+        assert plugin.locked is True
         assert _emitted(mock_decky, "restricted_game") == []
 
     @pytest.mark.asyncio
@@ -300,22 +398,7 @@ class TestOnlyMediaLaunchedGamesRun:
 
 # ── The key, presented ────────────────────────────────────────────────────────
 
-class TestMasterKeyPresented:
-
-    @pytest.mark.asyncio
-    async def test_toggles_the_lock_on(self, plugin):
-        token = _register(plugin)
-        await plugin._handle_media_load(_load_event(restricted_key.uri_for(token)))
-        assert plugin.locked is True
-
-    @pytest.mark.asyncio
-    async def test_toggles_the_lock_off_again(self, plugin):
-        """One physical object, both directions — which is all a single tag
-        can express."""
-        token = _register(plugin)
-        await plugin._handle_media_load(_load_event(restricted_key.uri_for(token)))
-        await plugin._handle_media_load(_load_event(restricted_key.uri_for(token)))
-        assert plugin.locked is False
+class TestKeyPresented:
 
     @pytest.mark.asyncio
     async def test_never_launches(self, plugin, mock_decky):
@@ -347,7 +430,6 @@ class TestMasterKeyPresented:
     @pytest.mark.asyncio
     async def test_an_unregistered_key_does_not_unlock(self, plugin):
         _register(plugin)
-        plugin.settings.set_restricted("locked", True)
         stranger = restricted_key.uri_for(restricted_key.mint_token())
         await plugin._handle_media_load(_load_event(stranger))
         assert plugin.locked is True
@@ -426,6 +508,9 @@ class TestRegistration:
     async def test_registering_again_replaces_the_old_key(self, plugin):
         _writable_nfc_source(plugin)
         old = _register(plugin)
+        # Replacing a key happens while unlocked, which means the old one is
+        # present — here on a second trigger, so the new one goes to the tag.
+        await _present_key(plugin, old, source_id="storage:udev", media_id="/dev/sda1")
 
         await plugin.register_key("nfc:/dev/ttyUSB0")
         await plugin._handle_pairing("04AABBCC", source_id="nfc:/dev/ttyUSB0")
@@ -458,8 +543,11 @@ class TestRegistration:
         """Someone else's key, or ours after it was replaced, is just a medium
         with a stale payload. Refusing to pair it left it unusable for good,
         with no way back from the panel."""
-        _register(plugin)
+        token = _register(plugin)
         source = _writable_nfc_source(plugin)
+        # Our own key in the drive, so the device is unlocked; a stranger's on
+        # the reader, which is the medium being paired.
+        await _present_key(plugin, token, source_id="storage:udev", media_id="/dev/sda1")
         stranger = restricted_key.uri_for(restricted_key.mint_token())
 
         await plugin._handle_media_load(_load_event(stranger))
@@ -474,14 +562,91 @@ class TestRegistration:
     async def test_pairing_a_game_clears_the_key_flag(self, plugin):
         """Otherwise the row keeps reading "Key" over a medium that now
         holds a game, until it is removed and presented again."""
-        _register(plugin)
+        token = _register(plugin)
         _writable_nfc_source(plugin)
+        await _present_key(plugin, token, source_id="storage:udev", media_id="/dev/sda1")
         stranger = restricted_key.uri_for(restricted_key.mint_token())
 
         await plugin._handle_media_load(_load_event(stranger))
         await plugin.start_pairing("steam://rungameid/400", "nfc:/dev/ttyUSB0")
         await plugin._handle_pairing("04AABBCC", source_id="nfc:/dev/ttyUSB0")
 
+        paired = next(m for m in await plugin.get_active_media()
+                      if m["source_id"] == "nfc:/dev/ttyUSB0")
+        assert paired["key"] is False
+        assert paired["uri"] == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_registering_switches_restricted_mode_on(self, plugin):
+        """The key is the switch. There is no separate "enable" step to forget
+        — and none to be in a different state from the key."""
+        await _register_by_presenting(plugin)
+        assert plugin.key_registered is True
+
+    @pytest.mark.asyncio
+    async def test_registering_leaves_the_device_unlocked(self, plugin):
+        """The key was just written, so it is right there — locking the user
+        out at the moment they made the key would be absurd."""
+        await _register_by_presenting(plugin)
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_taking_the_new_key_away_locks_it(self, plugin):
+        await _register_by_presenting(plugin)
+        await plugin._handle_media_unload(_unload_event())
+        assert plugin.locked is True
+
+
+# ── Disabling the key ─────────────────────────────────────────────────────────
+
+class TestDisableKey:
+    """Switching restricted mode off, which also wipes the medium.
+
+    Both halves or neither: a medium still carrying a token the device has
+    forgotten reads as "Unknown key" forever, and a registered hash with no
+    medium is a lock with no key.
+    """
+
+    async def _armed_and_unlocked(self, plugin, erase_result=(True, None)):
+        source = _writable_nfc_source(plugin)
+        source.erase = AsyncMock(return_value=erase_result)
+        token = _register(plugin)
+        await _present_key(plugin, token)
+        return source
+
+    @pytest.mark.asyncio
+    async def test_switches_restricted_mode_off(self, plugin):
+        await self._armed_and_unlocked(plugin)
+        assert await plugin.disable_key() is True
+        assert plugin.key_registered is False
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_erases_the_medium(self, plugin):
+        source = await self._armed_and_unlocked(plugin)
+        await plugin.disable_key()
+        source.erase.assert_awaited_once_with("04AABBCC")
+
+    @pytest.mark.asyncio
+    async def test_the_medium_stops_reading_as_a_key(self, plugin):
+        await self._armed_and_unlocked(plugin)
+        await plugin.disable_key()
         media = await plugin.get_active_media()
         assert media and media[0]["key"] is False
-        assert media[0]["uri"] == "steam://rungameid/400"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_erase_leaves_the_key_registered(self, plugin):
+        """Otherwise the feature is off while the stick still looks like a
+        key, and nothing has told the user which of the two is true."""
+        await self._armed_and_unlocked(plugin, erase_result=(False, "read-only"))
+        assert await plugin.disable_key() is False
+        assert plugin.key_registered is True
+
+    @pytest.mark.asyncio
+    async def test_refused_when_the_key_is_not_present(self, plugin):
+        """Which is the same thing as being locked — this is belt and braces
+        for the case where the registry has lost it some other way."""
+        _writable_nfc_source(plugin)
+        _register(plugin)
+        assert await plugin.disable_key() is False
+        assert plugin.key_registered is True

@@ -25,7 +25,7 @@ def _make_plugin_with_sources(tmp_path):
         "auto_close": False,
         # Unlocked, no key — the shipped state. Plugin.locked reads this on
         # every guarded RPC, and a bare MagicMock attribute reads as locked.
-        "restricted": {"locked": False, "key_hash": "",
+        "restricted": {"key_hash": "",
                   "key_label": "", "family_view_pin": ""},
         "sources": {
             "nfc":  {"device_path": "/dev/ttyUSB0", "baudrate": 115200,

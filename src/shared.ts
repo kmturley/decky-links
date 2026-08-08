@@ -291,10 +291,9 @@ export const getKioskState = callable<[], RestrictedState>("get_restricted_state
  *  With a source_id, only that trigger may claim it. */
 export const registerKey =
     callable<[source_id?: string], boolean>("register_key");
+/** Switch restricted mode off and wipe the key from its medium. Needs the key
+ *  present, which being unlocked already guarantees. */
 export const disableKey = callable<[], boolean>("disable_key");
-/** Lock only. The backend refuses `false` — an unlock button in the panel
- *  would mean the key protected nothing. */
-export const setKioskLocked = callable<[locked: boolean], boolean>("set_restricted_locked");
 /** Store, or clear with "", the Family View PIN used to unlock on a tap. */
 export const setFamilyViewPin = callable<[pin: string], boolean>("set_family_view_pin");
 

@@ -107,6 +107,13 @@ class Plugin:
         # is actually on the medium — recording it at the moment the button was
         # pressed would leave a device locked by a key that was never written.
         self._pending_key_token = None
+        # The lock state last announced to the frontend. The lock itself is
+        # derived from key presence and never stored; this exists only so a
+        # change can be told from a no-op. None means "nothing announced yet",
+        # so the first sync always speaks — registering a key moves the derived
+        # state without going through _sync_lock, and starting this at False
+        # would swallow the announcement that follows.
+        self._announced_lock = None
         # What is presented where, and which medium started the running game.
         # See decky_links.media_registry for the invariants.
         self._registry = MediaRegistry()
@@ -714,6 +721,11 @@ class Plugin:
             self.state, any_media_present=self._registry.any_present()
         ))
 
+        # Taking the key away locks the plugin. The registry entry went with
+        # the removal above, so the derived lock has already changed by the
+        # time this runs — all that is left is to say so.
+        await self._sync_lock("key removed")
+
     # ── URI Validation ─────────────────────────────────────────────────
 
     def _validate_uri(self, uri: str) -> bool:
@@ -755,14 +767,38 @@ class Plugin:
     # the user asked us to keep.
 
     @property
+    def key_registered(self) -> bool:
+        """Whether restricted mode is switched on at all.
+
+        Registering a key arms the feature; disabling the key switches it off.
+        Nothing else does, which is what keeps the two from disagreeing.
+        """
+        return bool(self.settings and self.settings.get_restricted("key_hash"))
+
+    def _key_present(self) -> bool:
+        """Whether the registered key is on a reader or in a drive right now."""
+        return any(
+            medium.get("key") and medium.get("authorized")
+            for medium in self._registry.all()
+        )
+
+    @property
     def locked(self) -> bool:
-        """Whether restricted mode is on."""
-        return bool(self.settings and self.settings.get_restricted("locked"))
+        """Whether the plugin is locked, derived rather than remembered.
+
+        The key behaves like a key left in a lock: present means unlocked,
+        absent means locked. Deriving it is the point — a stored ``locked``
+        flag is a second answer to a question the media registry already
+        answers, and the two drift the moment anything changes while the
+        plugin is not running. A Deck that boots with the key out is locked
+        because the key is out, not because a flag on disk says so.
+        """
+        return self.key_registered and not self._key_present()
 
     def _refuse_when_locked(self, action: str) -> bool:
         """True when ``action`` must not proceed, having logged why."""
         if self.locked:
-            decky.logger.warning(f"{action} refused: restricted mode is locked")
+            decky.logger.warning(f"{action} refused: locked — present the key")
             return True
         return False
 
@@ -777,27 +813,25 @@ class Plugin:
         if not self.settings:
             return {"locked": False, "has_key": False, "label": "", "has_pin": False}
         return {
-            "locked":         bool(self.settings.get_restricted("locked")),
-            "has_key": bool(self.settings.get_restricted("key_hash")),
-            "label":          self.settings.get_restricted("key_label") or "",
-            "has_pin":        bool(self.settings.get_restricted("family_view_pin")),
+            "locked":   self.locked,
+            "has_key":  self.key_registered,
+            "label":    self.settings.get_restricted("key_label") or "",
+            "has_pin":  bool(self.settings.get_restricted("family_view_pin")),
         }
 
-    async def _set_locked(self, locked: bool, reason: str) -> bool:
-        """Change the lock, persist it, and tell the frontend.
+    async def _sync_lock(self, reason: str) -> None:
+        """Announce the lock if presenting or removing something changed it.
 
-        Refuses to lock with no key registered. A lock whose only key does not
-        exist is not a safety feature, it is a device the user has to
-        reinstall the plugin to get back into — and the panel offers no unlock
-        button by design, because one would defeat the lock.
+        Called wherever the derived state could have moved: a medium loading
+        or unloading, a key being registered or disabled. It compares against
+        what was last announced rather than against a stored lock, so a
+        redundant call is free and a missed one is the only way to get out of
+        step.
         """
-        if locked and not self.settings.get_restricted("key_hash"):
-            decky.logger.warning("Refusing to lock: no key is registered")
-            return False
-
-        if not self.settings.set_restricted("locked", bool(locked)):
-            decky.logger.error("Lock state could not be written to disk")
-            return False
+        locked = self.locked
+        if locked == self._announced_lock:
+            return
+        self._announced_lock = locked
 
         # A pairing armed before the lock came down would otherwise write the
         # next medium presented, which is exactly what the lock is for.
@@ -814,7 +848,6 @@ class Plugin:
         if not locked:
             payload["pin"] = self.settings.get_restricted("family_view_pin") or ""
         await decky.emit("restricted_lock", payload)
-        return True
 
     def _medium_authorizes(self, appid) -> bool:
         """Whether a presented medium vouches for this running game.
@@ -842,9 +875,12 @@ class Plugin:
     async def _handle_key_medium(self, event: MediaEvent, uid_hex: str, token: str):
         """A medium carrying a key payload was presented.
 
-        Toggling rather than two separate keys: the user has one physical
-        object and both directions have to be reachable from it, which is what
-        the issue asked for and what a single tag can express.
+        Presence, not a toggle. Presenting the key unlocks; taking it away
+        locks, which is ``_handle_media_unload``'s half. A toggle could be
+        knocked out of step with the thing it was toggling — a missed removal,
+        a restart, a second reader — and then the panel and the device
+        disagreed about whether the Deck was locked. Presence cannot: the
+        answer is recomputed from what is physically here.
         """
         stored = self.settings.get_restricted("key_hash") if self.settings else ""
         recognised = restricted_key.matches(token, stored)
@@ -885,7 +921,7 @@ class Plugin:
             "source_id": event.source_id,
             "source_type": event.source_type.value,
         })
-        await self._set_locked(not self.locked, "restricted_key")
+        await self._sync_lock("key presented")
 
         # Never a launch, and never a reason to forget a running game.
         self._set_state(state.after_unusable_media(
@@ -917,7 +953,13 @@ class Plugin:
         await decky.emit("restricted_state", self._restricted_state())
 
     async def _commit_key(self, token: str, source, source_id: Optional[str]):
-        """Record a token that is now physically on a medium."""
+        """Record a token that is now physically on a medium.
+
+        This is what switches restricted mode on: registering a key arms the
+        feature, and from here on the lock follows the key. The device is not
+        locked yet — the key is sitting right there, having just been written
+        — so the user stays in admin mode until they take it away.
+        """
         label = self._medium_label(source, source_id)
         if not self.settings.set_restricted("key_hash", restricted_key.hash_token(token)):
             decky.logger.error("Key could not be written to disk")
@@ -940,6 +982,7 @@ class Plugin:
             "source_id": source_id,
             "source_type": (entry or {}).get("source_type"),
         })
+        await self._sync_lock("key registered")
         await self._emit_restricted_state()
 
     # ── Pairing Handler ────────────────────────────────────────────────
@@ -1532,32 +1575,57 @@ class Plugin:
         return True
 
     async def disable_key(self):
-        """Forget the registered key. Refused while locked, for obvious reasons."""
+        """Switch restricted mode off, and wipe the key from its medium.
+
+        Both halves, because either alone leaves something misleading behind:
+        a medium still carrying a token this device has forgotten reads as
+        "Unknown key" forever, and a registered hash with no medium is a lock
+        with no key. Erasing needs the medium present — which it is, since
+        being unlocked is what having it present *means*.
+
+        Refused while locked, so the way to switch the feature off runs
+        through the key rather than around it.
+        """
         if self._refuse_when_locked("disable_key"):
             return False
         self._pending_key_token = None
+
+        # Wipe the medium first. If it fails the key stays registered, so the
+        # user is told rather than left with a disabled feature and a stick
+        # that still looks like a key.
+        erased, error = await self._erase_key_medium()
+        if not erased:
+            decky.logger.warning(f"Key not disabled: could not erase the medium — {error}")
+            return False
+
         ok = self.settings.set_restricted("key_hash", "")
         self.settings.set_restricted("key_label", "")
-        decky.logger.info("Key cleared")
+        decky.logger.info("Key disabled and erased; restricted mode off")
+        await self._sync_lock("key disabled")
         await self._emit_restricted_state()
         return ok
 
-    async def set_restricted_locked(self, locked: bool):
-        """Lock restricted mode from the panel.
-
-        Only ever used to lock. Unlocking is refused here — the guard in
-        ``_set_locked``'s callers is the whole point of the feature, and a
-        panel button that undid it would mean the key protected
-        nothing.
-        """
-        if not isinstance(locked, bool):
-            return False
-        if not locked:
-            decky.logger.warning(
-                "Unlock refused: present the key, or use Steam's PIN"
-            )
-            return False
-        return await self._set_locked(True, "panel")
+    async def _erase_key_medium(self):
+        """Remove the key payload from whichever medium is carrying it."""
+        for medium in self._registry.all():
+            if not (medium.get("key") and medium.get("authorized")):
+                continue
+            source = self._pairable_source(medium.get("source_id"))
+            if source is None:
+                return False, "the trigger holding the key cannot be written to"
+            success, error = await source.erase(medium["media_id"])
+            if not success:
+                return False, error
+            medium["key"] = False
+            medium["authorized"] = False
+            medium["uri"] = None
+            await decky.emit("uri_detected", {
+                "uri": None, "uid": medium["media_id"], "blank": True,
+                "source_id": medium.get("source_id"),
+                "source_type": medium.get("source_type"),
+            })
+            return True, None
+        return False, "the key is not present"
 
     async def set_family_view_pin(self, pin: str):
         """Store (or clear, with "") Steam's Family View PIN.

@@ -401,15 +401,41 @@ emitted event.
 
 ### 16.2 States
 
-Presenting the registered key toggles `locked`, which is persisted. Presenting
-a key payload that is *not* the registered one changes nothing and is
+Two facts, and only one of them is stored:
+
+* **Restricted mode is on** when a key is registered (`restricted.key_hash` is
+  non-empty). Registering a key switches it on; "Disable Key" switches it off.
+* **The plugin is locked** when restricted mode is on and the key is *not*
+  presented on any source. This is derived from the media registry on every
+  read and never persisted.
+
+Deriving the lock is the design. A stored `locked` flag is a second answer to a
+question the registry already answers, and the two disagree the moment anything
+changes while the plugin is not running — which is exactly how a user ends up
+with a key that says one thing and a panel that says another. A Deck that boots
+with the key out is locked because the key is out.
+
+There is therefore no RPC that locks or unlocks, and no lock control in the
+panel.
+
+Presenting a key payload that is *not* the registered one changes nothing and is
 reported to the user; it remains an ordinary medium, and may be paired to a
 game like any other.
 
 While locked, the backend refuses: pairing, `set_setting`, `set_source_setting`,
 `format_media`, `set_tag_key`, `lock_sector`, `simulate_tag`, and every restricted
-RPC other than reading the state. Unlocking from the panel is refused by design.
-Locking with no key registered is refused, because the panel offers no way back.
+RPC other than reading the state.
+
+### 16.2.1 Disabling the key
+
+`disable_key` clears the stored hash *and* erases the payload from the medium —
+`MediaSource.erase`, which storage implements by deleting `decky-links.json` and
+the default implements by writing an empty URI. Both halves or neither: a medium
+still carrying a token the device has forgotten reads as an unknown key forever,
+and a registered hash with no medium is a lock with no key. If the erase fails
+the hash is kept, so the user is told rather than left with the two out of step.
+
+It requires the key to be present, which being unlocked already guarantees.
 
 ### 16.3 The launch rule
 

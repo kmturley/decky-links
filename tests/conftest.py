@@ -100,7 +100,6 @@ def plugin(tmp_path):
         # Present rather than omitted because Plugin.locked reads it on every
         # guarded RPC, and a MagicMock attribute would read as locked.
         "restricted": {
-            "locked": False,
             "key_hash": "",
             "key_label": "",
             "family_view_pin": "",

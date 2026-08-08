@@ -25,7 +25,6 @@ from decky_links.settings_schema import (
 
 # What ``get_restricted`` falls back to for a key an older settings.json never had.
 _RESTRICTED_DEFAULTS = {
-    "locked": False,
     "key_hash": "",
     "key_label": "",
     "family_view_pin": "",
@@ -51,10 +50,10 @@ class SettingsManager:
             # because top-level keys are what the generic set_setting RPC is
             # allowed to write, and the lock must not be one of those.
             "restricted": {
-                "locked": False,
-                # SHA-256 of the token carried by the key medium. Empty
-                # means no key has been registered, and locking is refused —
-                # a lock with no key is a device nobody can get back into.
+                # SHA-256 of the token carried by the key medium, and the one
+                # thing that switches restricted mode on. Empty means no key,
+                # which means the feature is off. Whether the plugin is
+                # *locked* is not stored: it is whether that key is present.
                 "key_hash": "",
                 "key_label": "",
                 # Optional. Locking Family View needs no secret; unlocking it

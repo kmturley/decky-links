@@ -168,14 +168,24 @@ class TestEverySourceIsLoaded:
         assert isinstance(loaded["file_watch"]["poll_interval"], float)
 
 
-class TestKioskBlockPersists:
+class TestRestrictedBlockPersists:
 
     def test_a_registered_key_survives_a_restart(self, tmp_path):
+        """The key is what switches restricted mode on, so it is the one thing
+        that has to come back. Whether the device is *locked* is not stored at
+        all — it is whether that key is present."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"restricted": {"key_hash": "a" * 64}}))
+        mgr = SettingsManager(str(path))
+        assert mgr.get_restricted("key_hash") == "a" * 64
+
+    def test_a_stored_lock_from_an_older_build_is_ignored(self, tmp_path):
+        """It was briefly persisted. Loading it now would resurrect the second
+        source of truth this design exists to remove."""
         path = tmp_path / "settings.json"
         path.write_text(json.dumps({"restricted": {"locked": True, "key_hash": "a" * 64}}))
         mgr = SettingsManager(str(path))
-        assert mgr.get_restricted("locked") is True
-        assert mgr.get_restricted("key_hash") == "a" * 64
+        assert "locked" not in mgr.get_restricted()
 
     def test_an_invalid_hash_is_refused(self, tmp_path):
         """A malformed hash that loaded would be a key nothing can match, on a
@@ -185,12 +195,12 @@ class TestKioskBlockPersists:
         mgr = SettingsManager(str(path))
         assert mgr.get_restricted("key_hash") == ""
 
-    def test_settings_from_before_kid_mode_read_as_unlocked(self, tmp_path):
-        """An upgrade must not lock anybody out of their own device."""
+    def test_settings_from_before_restricted_mode_have_no_key(self, tmp_path):
+        """An upgrade must not lock anybody out of their own device: no key
+        means the feature is off."""
         path = tmp_path / "settings.json"
         path.write_text(json.dumps({"auto_launch": True}))
         mgr = SettingsManager(str(path))
-        assert mgr.get_restricted("locked") is False
         assert mgr.get_restricted("key_hash") == ""
 
 

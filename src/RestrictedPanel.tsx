@@ -7,7 +7,6 @@ import {
   PanelSection,
   PanelSectionRow,
   TextField,
-  ToggleField,
 } from "@decky/ui";
 import { FaKey, FaLock } from "react-icons/fa";
 import {
@@ -15,7 +14,6 @@ import {
   notifySubscribers,
   registerKey,
   setFamilyViewPin,
-  setKioskLocked,
   sharedState,
   toaster,
   type RestrictedState,
@@ -167,20 +165,19 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
     notifySubscribers();
   };
 
-  const forget = async () => {
+  const disable = async () => {
     if (await disableKey()) {
-      toaster.toast({ title: "Key cleared", body: "Restricted mode cannot be locked." });
-    }
-  };
-
-  const lock = async () => {
-    if (!(await setKioskLocked(true))) {
       toaster.toast({
-        title: "Could not lock",
-        body: "Register a key first.",
-        critical: true,
+        title: "Key disabled",
+        body: "Restricted mode is off and the medium has been wiped.",
       });
+      return;
     }
+    toaster.toast({
+      title: "Could not disable",
+      body: "The key must be present, and writable, to be wiped.",
+      critical: true,
+    });
   };
 
   return (
@@ -188,13 +185,15 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
       <PanelSectionRow>
         <Field
           icon={<FaKey />}
-          label={restricted.has_key ? `Key: ${restricted.label}` : "No key"}
+          label={restricted.has_key ? `Key: ${restricted.label}` : "Off"}
           description={
             registering
               ? "Present the medium to use as the key…"
               : restricted.has_key
-                ? "Present it to lock or unlock."
-                : "Register a medium to lock the plugin with."
+                // The one sentence that explains the whole feature. There is
+                // no lock button, and this is why: the key *is* the switch.
+                ? "Take the key away to lock. Put it back to unlock."
+                : "Register a medium as the key to switch restricted mode on."
           }
           childrenContainerWidth="min"
           bottomSeparator="standard"
@@ -210,32 +209,14 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
 
       {restricted.has_key && (
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void forget()}>
-            Forget Key
+          <ButtonItem layout="below" onClick={() => void disable()}>
+            Disable Key
           </ButtonItem>
         </PanelSectionRow>
       )}
 
       <ScopeRow />
       {familyViewStatus().enabled && <PinRow hasPin={restricted.has_pin} />}
-
-      {/* A toggle rather than a button, because it reflects a state — but it
-          only ever moves one way from here. Unlocking is the key's job,
-          or Steam's PIN prompt; a switch in the panel that undid the lock
-          would mean the lock protected nothing. */}
-      <PanelSectionRow>
-        <ToggleField
-          label="Lock now"
-          description={
-            restricted.has_key
-              ? "Hides pairing and settings until the key is presented."
-              : "Register a key first."
-          }
-          checked={false}
-          disabled={!restricted.has_key}
-          onChange={(v: boolean) => { if (v) void lock(); }}
-        />
-      </PanelSectionRow>
     </PanelSection>
   );
 };

@@ -700,6 +700,47 @@ class StorageSource(MediaSource):
             self._logger.info(f"StorageSource: wrote uri={uri} to {devnode}")
         return True, None
 
+    async def erase(self, media_id: str) -> Tuple[bool, Optional[str]]:
+        """Delete ``decky-links.json`` from the disk.
+
+        Deleted rather than blanked, because on a filesystem the payload's
+        absence is expressible: a disk with no file on it is a disk this
+        plugin has never touched, which is exactly what disabling a key should
+        leave behind. Writing `{"uri": ""}` would leave litter on the user's
+        own USB stick.
+
+        Nothing else on the disk is touched — this removes one file it wrote
+        itself, and a missing file counts as success.
+        """
+        devnode = media_id
+        ours = self._our_mounts.get(devnode)
+        mountpoint = ours or self._find_mount_point(devnode)
+        if not mountpoint:
+            return False, f"{devnode} is not mounted"
+
+        remounted = False
+        if ours:
+            if not await self._remount(mountpoint, "rw"):
+                return False, f"could not remount {mountpoint} read-write"
+            remounted = True
+
+        try:
+            os.remove(os.path.join(mountpoint, PAYLOAD_FILENAME))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            if self._logger:
+                self._logger.error(f"StorageSource: failed erasing {devnode}: {e}")
+            return False, str(e)
+        finally:
+            if remounted:
+                await self._remount(mountpoint, "ro")
+
+        self._active_media[devnode] = ""
+        if self._logger:
+            self._logger.info(f"StorageSource: erased {PAYLOAD_FILENAME} from {devnode}")
+        return True, None
+
     # ── Formatting ─────────────────────────────────────────────────────
 
     # _is_removable already exists above, and guards every mount we perform.

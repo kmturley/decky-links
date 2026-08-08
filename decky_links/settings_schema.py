@@ -144,13 +144,18 @@ SOURCE_RULES: Dict[str, Dict[str, Rule]] = {
     },
 }
 
-# ── Kiosk settings ─────────────────────────────────────────────────────────
+# ── Restricted mode settings ───────────────────────────────────────────────
 #
 # Kept out of TOP_LEVEL_RULES on purpose. Those keys are writable through the
-# generic ``set_setting`` RPC, and the lock state must not be: a switch that
-# turns the lock off is not a setting, it is the thing the lock exists to
+# generic ``set_setting`` RPC, and what arms the lock must not be: a switch
+# that turns the lock off is not a setting, it is the thing the lock exists to
 # protect. These are reached only through the dedicated restricted RPCs, which
 # refuse while locked.
+#
+# There is no ``locked`` key here. Whether the plugin is locked is derived from
+# whether the key is present, so storing it would be a second answer to a
+# question the media registry already answers — and the two would disagree the
+# moment anything happened while the plugin was not running.
 
 _PIN_PATTERN = re.compile(r"^[0-9]{4,8}$")
 
@@ -170,7 +175,6 @@ def _is_family_view_pin(value: str) -> bool:
 
 
 RESTRICTED_RULES: Dict[str, Rule] = {
-    "locked": Rule((bool,), describe="true or false"),
     "key_hash": Rule((str,), _is_token_hash, "a SHA-256 hex digest"),
     "key_label": Rule(
         (str,), lambda v: len(v) <= 128, "at most 128 characters"
