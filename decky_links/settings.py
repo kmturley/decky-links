@@ -27,7 +27,6 @@ from decky_links.settings_schema import (
 _RESTRICTED_DEFAULTS = {
     "key_hash": "",
     "key_label": "",
-    "family_view_pin": "",
 }
 
 
@@ -56,10 +55,6 @@ class SettingsManager:
                 # *locked* is not stored: it is whether that key is present.
                 "key_hash": "",
                 "key_label": "",
-                # Optional. Locking Family View needs no secret; unlocking it
-                # does, and the user chose to trade the storage of a PIN for a
-                # key that works both ways.
-                "family_view_pin": "",
             },
             "sources": {
                 "nfc": {
@@ -132,8 +127,25 @@ class SettingsManager:
                     if not isinstance(loaded, dict):
                         raise ValueError("Settings file must contain a JSON object.")
                     self._merge_loaded_settings(loaded)
+                    self._forget_family_view_pin(loaded)
         except Exception as e:
             self._log.error(f"Failed to load settings: {e}")
+
+    def _forget_family_view_pin(self, loaded: Dict[str, Any]) -> None:
+        """Erase a Family View PIN left by a version that stored one.
+
+        Dropping the key from the schema already stops it being read, but a
+        secret nobody reads is still a secret on disk — and this one is the PIN
+        protecting the account on the device the file sits on. It would survive
+        until something else happened to save, which for a user who never
+        changes a setting is never.
+        """
+        if not isinstance(loaded.get("restricted"), dict):
+            return
+        if "family_view_pin" not in loaded["restricted"]:
+            return
+        self._log.info("Discarding stored Family View PIN — no longer used")
+        self.save()
 
     def save(self) -> bool:
         """Persist the settings. Returns whether they actually reached disk.

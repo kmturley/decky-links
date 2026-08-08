@@ -272,11 +272,18 @@ export const TriggersPanel: FC<{
         const status = statusFor(row, statuses);
         const enabled = isRowEnabled(row, status);
         const connected = isRowConnected(row, status);
+        const medium = mediumFor(row, media);
+        // Switching off the trigger the key sits on would lock the plugin with
+        // no way to switch it back on — the backend refuses it outright, and
+        // this stops the panel offering a switch that cannot move.
+        const holdsKey = !!(medium?.key && medium.authorized);
         const rows = [
           <PanelSectionRow key={row.key}>
             <ToggleField
               label={row.label}
               checked={enabled}
+              disabled={holdsKey}
+              description={holdsKey ? "Holds the key — deregister it to switch this off" : undefined}
               bottomSeparator={enabled ? "none" : "standard"}
               onChange={(v: boolean) => void toggleRow(row, v, status)}
             />
@@ -287,7 +294,7 @@ export const TriggersPanel: FC<{
             <MediaRow
               key={`${row.key}-media`}
               row={row}
-              medium={mediumFor(row, media)}
+              medium={medium}
               connected={connected}
               // The backend's own answer to "can this be written to", rather
               // than the panel guessing from the row: a camera reads codes it

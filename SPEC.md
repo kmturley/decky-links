@@ -379,9 +379,10 @@ Since shipped, and no longer non-goals:
 * **Multiple simultaneous media** — one per source, tracked independently.
 * **Metadata storage** — storage payloads carry optional `title` and `icon`.
 * **Parental restrictions** — see §16. Listed here as a non-goal in v1 on the
-  grounds that a launcher should not also be a parental control. That still
-  holds, and is why the plugin supplies the *key* while Steam's Family View
-  supplies the lock.
+  grounds that a launcher should not also be a parental control. What shipped
+  is narrower than that: a physical key, and one rule about which games may
+  run. It is not integrated with Steam's parental controls and does not try to
+  be one — see §16.4.
 
 ---
 
@@ -459,6 +460,26 @@ the hash is kept, so the user is told rather than left with the two out of step.
 
 It requires the key to be present, which being unlocked already guarantees.
 
+### 16.2.2 The trigger holding the key
+
+While a key is registered and present, `set_source_setting` refuses any change
+that would switch off the trigger it is on — the source's `enabled`, or its
+`drive_kind` for storage. The panel disables that toggle to match.
+
+Otherwise it is a one-way door: the medium unloads, the key reads as absent,
+the plugin locks, and `set_source_setting` is one of the RPCs a locked plugin
+refuses — so the trigger can never be switched back on, and the key cannot help
+because the trigger that would read it is off. Recovery meant editing
+settings.json in Desktop Mode.
+
+Refused rather than made recoverable, because every recovery is a hole in the
+lock: anything that lets a locked plugin re-enable a source is something a
+locked plugin can be talked into doing. Deregistering releases the trigger.
+
+Nothing extra is stored to know which trigger that is. The check only runs
+while unlocked, which is exactly when the key is present and the registry can
+say.
+
 ### 16.3 The launch rule
 
 While locked, a game may run only if a medium vouches for it:
@@ -477,21 +498,26 @@ mid-session never terminates the game being played.
 
 This is a deterrent, not a boundary — the game visibly starts before it closes.
 
-### 16.4 Family View, where it exists
+### 16.4 Why Steam's parental controls are not used
 
-Family View is Steam's older per-account PIN mode, and the only Valve control
-that restricts the account holding the library. Steam Families, which replaced
-it, applies its controls to *child* accounts and therefore cannot restrict the
-account a shared Deck is signed into.
+Recorded so it is not re-derived. Restricted mode once drove **Family View**,
+Steam's older per-account PIN mode and the only Valve control that restricts
+the account holding the library: locking called
+`SteamClient.Parental.LockParentalLock`, unlocking called
+`UnlockParentalLock(pin)` with a PIN stored in `settings.json`, and Family
+View's allowlist decided which games could run.
 
-The client offers Family View setup only to accounts where `wasEverEnabled` is
-true, so it cannot be relied on and is not the mechanism for §16.3. Where it is
-already configured, locking also calls `SteamClient.Parental.LockParentalLock`
-(no secret needed) and unlocking calls `UnlockParentalLock(pin)` when the user
-stored the PIN.
+All of it is gone. The client offers Family View setup only to accounts where
+`wasEverEnabled` is true, so on any account that never had it — which is any
+account made since — the integration restricted precisely nothing while
+presenting a panel row that said otherwise. Its replacement, Steam Families,
+binds *child* accounts, and a shared Deck is signed into the parent's.
 
-Steam's parental store is located by shape, never by webpack module id: ids
-change with every client build.
+What went with it: the `set_family_view_pin` RPC, the `family_view_pin`
+setting (erased from disk on load, since a PIN nobody reads is still a PIN on
+disk), `has_pin` in the restricted state, the `pin` field on the unlock event,
+and the frontend's `familyView` module. §16.3 is the whole of "which games may
+run", and no secret leaves the backend at all.
 
 ### 16.5 Non-goals within restricted mode
 

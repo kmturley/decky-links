@@ -32,13 +32,11 @@ class TestParsing:
     def test_recognises_a_key_payload(self):
         assert restricted_key.parse_token("decky-links://key/" + "a" * 32) == "a" * 32
 
-    def test_a_key_written_before_the_rename_is_still_recognised(self):
-        """Those payloads are on physical objects someone still has. A rename
-        that stops recognising one turns a key into an unreadable medium."""
-        assert restricted_key.parse_token("decky-links://master/" + "a" * 32) == "a" * 32
-
-    def test_the_old_prefix_is_never_written(self):
-        assert restricted_key.uri_for("a" * 32).startswith("decky-links://key/")
+    def test_the_prefix_used_while_this_was_being_built_is_not_a_key(self):
+        """`master/` was the scheme during development and was read for a
+        while afterwards. Nobody paired one, so it is an unknown payload now —
+        and one fewer way to be a key is one fewer way in."""
+        assert restricted_key.parse_token("decky-links://master/" + "a" * 32) is None
 
     def test_uppercase_token_is_normalised(self):
         """Media round-trips can change case; the token is hex either way."""

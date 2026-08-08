@@ -146,10 +146,6 @@ class TestLockedRpcs:
         assert locked.settings.get_restricted("key_hash") != ""
 
     @pytest.mark.asyncio
-    async def test_storing_a_pin_is_refused(self, locked):
-        assert await locked.set_family_view_pin("1234") is False
-
-    @pytest.mark.asyncio
     async def test_there_is_no_rpc_that_unlocks(self, locked):
         """The only way out is the key. The lock is derived from what is
         present, so there is nothing for an RPC to set."""
@@ -247,16 +243,6 @@ class TestLocking:
         assert len(_emitted(mock_decky, "restricted_lock")) == 1
 
     @pytest.mark.asyncio
-    async def test_the_pin_never_appears_in_the_state_rpc(self, plugin):
-        """The panel needs to know a PIN exists, never what it is."""
-        token = _register(plugin)
-        await _present_key(plugin, token)     # configuring needs to be unlocked
-        await plugin.set_family_view_pin("4321")
-        state = await plugin.get_restricted_state()
-        assert state["has_pin"] is True
-        assert "4321" not in str(state)
-
-    @pytest.mark.asyncio
     async def test_the_key_hash_never_appears_in_the_state_rpc(self, plugin):
         token = _register(plugin)
         state = await plugin.get_restricted_state()
@@ -264,34 +250,20 @@ class TestLocking:
         assert restricted_key.hash_token(token) not in str(state)
 
     @pytest.mark.asyncio
-    async def test_unlock_event_carries_the_pin_for_the_frontend(self, plugin, mock_decky):
-        """Only the frontend can call Steam, so the PIN travels exactly once,
-        at the moment it is needed."""
+    async def test_no_secret_travels_with_the_lock_event(self, plugin, mock_decky):
+        """The lock is announced, not negotiated.
+
+        It used to carry Steam's Family View PIN on the unlock event, because
+        only the frontend could hand it to Steam. Nothing is handed to Steam
+        any more, so nothing secret leaves the backend at all.
+        """
         token = _register(plugin)
         await _present_key(plugin, token)
-        await plugin.set_family_view_pin("4321")
-        await plugin._handle_media_unload(_unload_event())
-        mock_decky.emit.reset_mock()
-
-        await _present_key(plugin, token)
-
-        events = _emitted(mock_decky, "restricted_lock")
-        assert events and events[-1]["locked"] is False
-        assert events[-1]["pin"] == "4321"
-
-    @pytest.mark.asyncio
-    async def test_lock_event_does_not_carry_the_pin(self, plugin, mock_decky):
-        """Locking Family View needs no secret, so nothing is handed over."""
-        token = _register(plugin)
-        await _present_key(plugin, token)
-        await plugin.set_family_view_pin("4321")
-        mock_decky.emit.reset_mock()
-
         await plugin._handle_media_unload(_unload_event())
 
-        events = _emitted(mock_decky, "restricted_lock")
-        assert events and events[-1]["locked"] is True
-        assert "pin" not in events[-1]
+        for event in _emitted(mock_decky, "restricted_lock"):
+            assert "pin" not in event
+            assert restricted_key.hash_token(token) not in str(event)
 
 
 # ── The launch rule ───────────────────────────────────────────────────────────
@@ -299,10 +271,10 @@ class TestLocking:
 class TestOnlyMediaLaunchedGamesRun:
     """Restricted mode's answer to "which games may run", and why it needs no list.
 
-    Steam cannot answer it for us: Family View is the only per-account
-    restriction that applies to the account holding the library, and Steam no
-    longer offers to set it up on accounts that never had it — Steam Families
-    replaced it, and those controls only bind *child* accounts.
+    Steam cannot answer it for us. Its only per-account restriction is Family
+    View, which the client no longer offers to set up on accounts that never
+    had it; Steam Families replaced it, and those controls bind *child*
+    accounts, not the one holding the library.
 
     So the rule is the plugin's own: the Deck plays what you hand it. The
     allowlist is the box of tags and disks, which means there is nothing to
@@ -706,3 +678,110 @@ class TestDisableKey:
         _register(plugin)
         assert await plugin.disable_key() is False
         assert plugin.key_registered is True
+
+
+# ── The trigger the key is on ─────────────────────────────────────────────────
+
+class TestTheKeysTriggerCannotBeSwitchedOff:
+    """The one-way door this closes.
+
+    Register a key on a trigger, then switch that trigger off: the medium
+    unloads, the key reads as absent, the plugin locks — and set_source_setting
+    is one of the RPCs a locked plugin refuses, so the trigger can never be
+    switched back on. The key cannot help, because the trigger that would read
+    it is off. Recovery meant editing settings.json in Desktop Mode.
+
+    So the trigger holding the key is pinned on for as long as it holds it, and
+    deregistering the key releases it — the same order the user did it in.
+    """
+
+    def _storage_event(self, uri, drive_kind="usb"):
+        from sources.base import MediaEvent, MediaEventKind, SourceType
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.STORAGE,
+            source_id="storage:udev",
+            media_id="usb-0001",
+            uri=uri,
+            payload={"drive_kind": drive_kind},
+        )
+
+    async def _key_on_storage(self, plugin):
+        """A key registered and sitting in a USB drive, so unlocked."""
+        token = _register(plugin)
+        await plugin._handle_media_load(self._storage_event(restricted_key.uri_for(token)))
+        assert plugin.locked is False
+        return token
+
+    @pytest.mark.asyncio
+    async def test_disabling_the_source_holding_the_key_is_refused(self, plugin):
+        await self._key_on_storage(plugin)
+        assert await plugin.set_source_setting("storage", "enabled", False) is False
+        assert plugin.settings.settings["sources"]["storage"]["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_disabling_the_drive_category_holding_the_key_is_refused(self, plugin):
+        """The finer-grained half: the source stays on, but switching off the
+        USB category alone unloads the stick just as completely."""
+        await self._key_on_storage(plugin)
+        before = dict(plugin.settings.settings["sources"]["storage"]["drive_kinds"])
+        kinds = {**before, "usb": False}
+        assert await plugin.set_source_setting("storage", "drive_kinds", kinds) is False
+        assert plugin.settings.settings["sources"]["storage"]["drive_kinds"] == before
+
+    @pytest.mark.asyncio
+    async def test_the_device_is_still_unlocked_afterwards(self, plugin):
+        """The refusal is the point: nothing moved, so nothing locked."""
+        await self._key_on_storage(plugin)
+        await plugin.set_source_setting("storage", "enabled", False)
+        assert plugin.locked is False
+
+    @pytest.mark.asyncio
+    async def test_enabling_the_key_s_own_trigger_is_allowed(self, plugin):
+        """Only switching *off* is a door. Switching on cannot lock anything."""
+        await self._key_on_storage(plugin)
+        assert await plugin.set_source_setting("storage", "enabled", True) is True
+
+    @pytest.mark.asyncio
+    async def test_another_trigger_can_still_be_switched_off(self, plugin):
+        """The pin is on the trigger holding the key, not on the panel."""
+        await self._key_on_storage(plugin)
+        assert await plugin.set_source_setting("camera", "enabled", False) is True
+
+    @pytest.mark.asyncio
+    async def test_a_drive_category_not_holding_the_key_can_be_switched_off(self, plugin):
+        await self._key_on_storage(plugin)
+        kinds = {"floppy": False, "optical": False, "usb": True, "flash": False}
+        assert await plugin.set_source_setting("storage", "drive_kinds", kinds) is True
+
+    @pytest.mark.asyncio
+    async def test_the_trigger_is_released_once_the_key_is_deregistered(self, plugin):
+        from sources.base import SourceType
+        source = MagicMock()
+        source.source_id = "storage:udev"
+        source.source_type = SourceType.STORAGE
+        source.can_write.return_value = True
+        source.erase = AsyncMock(return_value=(True, None))
+        plugin.source_manager.replace(source)
+
+        await self._key_on_storage(plugin)
+        assert await plugin.disable_key() is True
+        assert await plugin.set_source_setting("storage", "enabled", False) is True
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_medium_pins_nothing(self, plugin):
+        """Only a key does this. A game disk in the same drive must not."""
+        await plugin._handle_media_load(self._storage_event("steam://rungameid/400"))
+        assert await plugin.set_source_setting("storage", "enabled", False) is True
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_key_pins_nothing(self, plugin):
+        """Someone else's key is an ordinary medium: it cannot unlock this
+        device, so leaving its trigger on protects nothing."""
+        _register(plugin)
+        other = restricted_key.mint_token()
+        await plugin._handle_media_load(self._storage_event(restricted_key.uri_for(other)))
+        # Still locked — which is what refuses this, and is worth asserting so
+        # the test cannot pass for the wrong reason if the lock ever moves.
+        assert plugin.locked is True
+        assert await plugin.set_source_setting("storage", "enabled", False) is False

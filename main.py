@@ -752,19 +752,16 @@ class Plugin:
 
     # ── Restricted mode ───────────────────────────────────────────────────────
     #
-    # Two locks, owned by two different pieces of software, and it matters
-    # which is which.
-    #
-    # This one is the plugin's: while locked, nothing may write a medium or
-    # change a setting. It is enforced at the RPC surface rather than by
-    # hiding buttons, because the panel is not the only way to reach these —
+    # The lock is the plugin's own, and it covers exactly two things: while
+    # locked, nothing may write a medium or change a setting, and only a game a
+    # medium vouches for may run. It is enforced at the RPC surface rather than
+    # by hiding buttons, because the panel is not the only way to reach these —
     # anything with access to the plugin's RPCs is.
     #
-    # The other is Steam's Family View, which owns the part this plugin has no
-    # business reimplementing: which games may run, and which system menus are
-    # reachable. The frontend drives it, because SteamClient exists only there.
-    # All the backend does is say when the state changed and hand over the PIN
-    # the user asked us to keep.
+    # It used to lean on Steam's Family View for the "which games may run"
+    # half. That is gone: Family View is a legacy per-account mode Steam will
+    # not let a current account switch on, so the half that depended on it
+    # restricted nothing at all on the machines this runs on.
 
     @property
     def key_registered(self) -> bool:
@@ -802,21 +799,56 @@ class Plugin:
             return True
         return False
 
+    def _switches_off_the_key(self, source_type: str, key: str, value) -> Optional[str]:
+        """Why this settings change would switch off the trigger holding the key.
+
+        A one-way door if it were allowed: switching off the trigger the key
+        sits on unloads the medium, so the key reads as absent, so the plugin
+        locks — and ``set_source_setting`` is one of the RPCs a locked plugin
+        refuses, so the trigger can never be switched back on. The key itself
+        cannot help, because the trigger that would read it is off. The only
+        way out was editing settings.json in Desktop Mode.
+
+        Refused here rather than made recoverable, because every recovery is a
+        hole in the lock: anything that lets a locked plugin re-enable a source
+        is something a locked plugin can be talked into doing. Deregistering
+        the key releases the trigger, which is the same order the user did it
+        in — register, then decide.
+
+        Only ever consulted while unlocked, which is also when the answer is
+        knowable: the key is present, so the registry says exactly which
+        trigger it is on, and nothing has to be stored alongside the hash.
+        """
+        if not self.key_registered:
+            return None
+        holders = [
+            medium for medium in self._registry.all()
+            if medium.get("key") and medium.get("authorized")
+            and medium.get("source_type") == source_type
+        ]
+        if not holders:
+            return None
+        if key == "enabled" and value is False:
+            return f"{source_type} holds the key"
+        if key == "drive_kinds" and isinstance(value, dict):
+            for medium in holders:
+                kind = medium.get("drive_kind")
+                if kind and value.get(kind) is False:
+                    return f"the {kind} trigger holds the key"
+        return None
+
     def _restricted_state(self) -> Dict[str, Any]:
         """What the panel is allowed to know about the lock.
 
-        Neither the token hash nor the PIN appears here. The panel needs to
-        know *that* a key and a PIN exist, to decide what to offer; it never
-        needs their values, and the unlock event is the one place a PIN is
-        handed over.
+        The token hash never appears here. The panel needs to know *that* a key
+        exists, to decide what to offer; it never needs its value.
         """
         if not self.settings:
-            return {"locked": False, "has_key": False, "label": "", "has_pin": False}
+            return {"locked": False, "has_key": False, "label": ""}
         return {
             "locked":   self.locked,
             "has_key":  self.key_registered,
             "label":    self.settings.get_restricted("key_label") or "",
-            "has_pin":  bool(self.settings.get_restricted("family_view_pin")),
         }
 
     async def _sync_lock(self, reason: str) -> None:
@@ -843,10 +875,6 @@ class Plugin:
 
         payload = dict(self._restricted_state())
         payload["reason"] = reason
-        # The PIN travels exactly once, at the moment it is needed: Family View
-        # is unlocked by the frontend, and only the frontend can call Steam.
-        if not locked:
-            payload["pin"] = self.settings.get_restricted("family_view_pin") or ""
         await decky.emit("restricted_lock", payload)
 
     def _medium_authorizes(self, appid) -> bool:
@@ -1636,27 +1664,6 @@ class Plugin:
             return True, None
         return False, "the key is not present"
 
-    async def set_family_view_pin(self, pin: str):
-        """Store (or clear, with "") Steam's Family View PIN.
-
-        Kept so that presenting the key can unlock Family View as well
-        as lock it. Locking never needs a secret; unlocking does, and this is
-        the trade the user opted into. It lives in the plugin's settings.json,
-        readable by root on the device it protects, and clearing it leaves
-        Steam's own PIN prompt as the way back in.
-        """
-        if self._refuse_when_locked("set_family_view_pin"):
-            return False
-        ok, reason = settings_schema.validate_restricted("family_view_pin", pin)
-        if not ok:
-            decky.logger.warning(f"Rejected Family View PIN: {reason}")
-            return False
-        if not self.settings.set_restricted("family_view_pin", pin):
-            return False
-        decky.logger.info(f"Family View PIN {'stored' if pin else 'cleared'}")
-        await self._emit_restricted_state()
-        return True
-
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
 
@@ -1723,6 +1730,11 @@ class Plugin:
             decky.logger.warning(f"set_source_setting: rejected {source_type}.{key} — {reason}")
             return False
         value = settings_schema.coerce(key, value, source_type=source_type)
+
+        conflict = self._switches_off_the_key(source_type, key, value)
+        if conflict:
+            decky.logger.warning(f"set_source_setting refused: {conflict}")
+            return False
 
         sources = self.settings.settings.setdefault("sources", {})
         sources.setdefault(source_type, {})[key] = value

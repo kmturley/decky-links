@@ -157,21 +157,9 @@ SOURCE_RULES: Dict[str, Dict[str, Rule]] = {
 # question the media registry already answers — and the two would disagree the
 # moment anything happened while the plugin was not running.
 
-_PIN_PATTERN = re.compile(r"^[0-9]{4,8}$")
-
-
 def _is_token_hash(value: str) -> bool:
     """A SHA-256 hex digest, or empty for "no key registered"."""
     return value == "" or bool(re.fullmatch(r"[0-9a-fA-F]{64}", value))
-
-
-def _is_family_view_pin(value: str) -> bool:
-    """Steam's Family View PIN, or empty for "not stored".
-
-    Digits only, because that is what Steam's own prompt accepts — storing
-    anything else guarantees an unlock that fails at the moment it is needed.
-    """
-    return value == "" or bool(_PIN_PATTERN.match(value))
 
 
 RESTRICTED_RULES: Dict[str, Rule] = {
@@ -179,7 +167,6 @@ RESTRICTED_RULES: Dict[str, Rule] = {
     "key_label": Rule(
         (str,), lambda v: len(v) <= 128, "at most 128 characters"
     ),
-    "family_view_pin": Rule((str,), _is_family_view_pin, "4-8 digits, or empty"),
 }
 
 RESTRICTED_SETTING_KEYS = frozenset(RESTRICTED_RULES)

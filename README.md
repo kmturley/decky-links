@@ -88,6 +88,10 @@ While locked:
 A game already running when the key comes out is left alone, so locking
 mid-session never costs anyone their progress.
 
+The trigger holding the key cannot be switched off while it holds it — that
+would unload the key, lock the Deck, and leave no way to switch the trigger
+back on. Deregister the key and the trigger is free again.
+
 Worth knowing for an NFC key: the tag has to stay on the reader to stay
 unlocked, because that is what "the key is in the lock" means. Lift it and the
 Deck locks. A disk or USB stick suits an admin session better — it sits in the
@@ -96,16 +100,14 @@ drive while you work and locks the Deck when you pull it out.
 ### What it does not do
 
 Steam's own menus stay reachable: the Store, Steam Settings and Desktop Mode are
-not blocked. Valve's only per-account restriction that can bind the account
-holding the library is **Family View**, its older PIN-protected mode — and Steam
-no longer offers to set that up on an account that never had it. Its replacement,
-Steam Families, applies its controls to *child* accounts, which is the opposite
-of what a shared Deck needs: the games are in the parent's library.
+not blocked, and Decky Links does not touch Steam's parental controls.
 
-If your account does still have Family View, Decky Links locks it alongside its
-own lock, and the panel shows a Manage row. Store its PIN there and the key
-unlocks Family View too; leave it empty and Steam's own prompt is the way back
-in.
+There is nothing there to use. Valve's only per-account restriction that can
+bind the account holding the library is **Family View**, its older
+PIN-protected mode, and Steam no longer offers to set that up on an account
+that never had it. Its replacement, Steam Families, applies its controls to
+*child* accounts — the opposite of what a shared Deck needs, since the games
+are in the parent's library. So the rule above is entirely the plugin's own.
 
 Losing the key means editing `settings.json` in Desktop Mode to clear
 `restricted.key_hash` — there is no PIN of our own, deliberately, since a second

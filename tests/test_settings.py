@@ -187,6 +187,31 @@ class TestRestrictedBlockPersists:
         mgr = SettingsManager(str(path))
         assert "locked" not in mgr.get_restricted()
 
+    def test_a_stored_family_view_pin_is_erased_from_disk(self, tmp_path):
+        """It was stored while restricted mode leaned on Steam's Family View.
+        Dropping the key from the schema stops it being read, but a secret
+        nobody reads is still a secret on disk — and this one is the PIN for
+        the account on the device the file sits on."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({
+            "restricted": {"key_hash": "a" * 64, "family_view_pin": "4321"},
+        }))
+        mgr = SettingsManager(str(path))
+        assert "family_view_pin" not in mgr.get_restricted()
+        assert "4321" not in path.read_text()
+        # The rest of the block survives the rewrite.
+        assert mgr.get_restricted("key_hash") == "a" * 64
+
+    def test_a_file_without_one_is_not_rewritten(self, tmp_path):
+        """Loading settings must not write to disk in the ordinary case: the
+        migration is the exception, and a save on every start is a chance to
+        truncate the file for no reason at all."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"restricted": {"key_hash": "a" * 64}}))
+        before = path.stat().st_mtime_ns
+        SettingsManager(str(path))
+        assert path.stat().st_mtime_ns == before
+
     def test_an_invalid_hash_is_refused(self, tmp_path):
         """A malformed hash that loaded would be a key nothing can match, on a
         device that still believes it can be locked."""

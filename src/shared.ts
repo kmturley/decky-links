@@ -66,17 +66,14 @@ export interface ActiveMedium {
 
 /** Restricted mode, as much of it as the panel is allowed to know.
  *
- *  Neither the key's hash nor the Family View PIN appears here — the panel
- *  needs to know *that* they exist to decide what to offer, never what they
- *  are. The PIN arrives exactly once, on the unlock event, because only the
- *  frontend can hand it to Steam. */
+ *  The key's hash never appears here — the panel needs to know *that* a key
+ *  exists to decide what to offer, never what it is. */
 export interface RestrictedState {
     locked: boolean;
     has_key: boolean;
     /** What the key is, in words: "USB drive", "NFC tag". The user has to find
      *  the object again, and a device node will not help them do that. */
     label: string;
-    has_pin: boolean;
 }
 
 export interface DriveKindStatus {
@@ -299,8 +296,6 @@ export const registerKey =
 /** Switch restricted mode off and wipe the key from its medium. Needs the key
  *  present, which being unlocked already guarantees. */
 export const disableKey = callable<[], boolean>("disable_key");
-/** Store, or clear with "", the Family View PIN used to unlock on a tap. */
-export const setFamilyViewPin = callable<[pin: string], boolean>("set_family_view_pin");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

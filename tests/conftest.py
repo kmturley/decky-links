@@ -102,7 +102,6 @@ def plugin(tmp_path):
         "restricted": {
             "key_hash": "",
             "key_label": "",
-            "family_view_pin": "",
         },
         # Mirrors SettingsManager's real shape. Only nfc was here before, so
         # get_source_settings raised for every other source and anything

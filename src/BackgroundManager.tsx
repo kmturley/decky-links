@@ -19,12 +19,6 @@ import {
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
-import {
-  familyViewStatus,
-  isAppBlocked,
-  lockFamilyView,
-  unlockFamilyView,
-} from "./lib/familyView";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -182,56 +176,6 @@ async function terminateSteamApp(appId: string, launchUri?: string): Promise<boo
 
   console.warn(`[ Decky Links ] App ${appId} did not terminate within 3000ms timeout`);
   return false;
-}
-
-/** Apply a lock change to Steam's Family View, and say what happened.
- *
- * Locking needs no secret, so it always works when Family View is set up at
- * all. Unlocking needs the PIN the user asked us to keep; without one this
- * deliberately does nothing and leaves them Steam's own prompt, which is the
- * fallback the whole design leans on.
- */
-async function applyFamilyView(locked: boolean, pin: string): Promise<void> {
-  const status = familyViewStatus();
-  if (!status.available) return;
-
-  if (!status.enabled) {
-    // The plugin's own write lock is still on; only Steam's half is missing.
-    // Worth saying, because "restricted mode" that does not restrict a single game is
-    // not what the user thinks they just switched on.
-    if (locked) {
-      toaster.toast({
-        title: "Locked",
-        body: "Set up Steam Family View to restrict games and menus.",
-      });
-    }
-    return;
-  }
-
-  if (locked) {
-    if (lockFamilyView()) {
-      toaster.toast({ title: "Restricted mode on", body: "Family View locked." });
-    }
-    return;
-  }
-
-  if (!pin) {
-    toaster.toast({
-      title: "Decky Links unlocked",
-      body: "Family View still locked — enter its PIN in Steam.",
-    });
-    return;
-  }
-
-  if (await unlockFamilyView(pin)) {
-    toaster.toast({ title: "Restricted mode off", body: "Family View unlocked." });
-  } else {
-    toaster.toast({
-      title: "Family View not unlocked",
-      body: "Steam refused the stored PIN. Enter it in Steam.",
-      critical: true,
-    });
-  }
 }
 
 export function startBackgroundManager(): () => void {
@@ -451,18 +395,11 @@ export function startBackgroundManager(): () => void {
       const currentSettings = settingsRef.current;
       const uriAppId = parseSteamAppIdFromUri(uri);
 
-      // Restricted mode: which games are allowed is Family View's answer, not ours.
-      // Asked before launching rather than left to Steam to refuse, so the
-      // user gets a sentence instead of a tap that appears to do nothing.
-      if (restrictedRef.current?.locked && isAppBlocked(uriAppId)) {
-        console.info(`[ Decky Links ] Restricted title ${uriAppId}; not launching.`);
-        toaster.toast({
-          title: "Restricted title",
-          body: "This game is not on the allowed list.",
-          critical: true,
-        });
-        return;
-      }
+      // No allowlist check while locked, deliberately. A URI arriving here came
+      // off a medium someone physically presented, and "a medium vouches for
+      // it" is the whole launch rule (SPEC §16.3) — the box of tags left out is
+      // the allowlist. This used to ask Steam's Family View whether the game
+      // was permitted, which refused games on a list the user never built.
 
       if (currentSettings?.auto_launch) {
         const currentAppId = activeAppIdRef.current;
@@ -512,25 +449,23 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  // The lock changed — by a key on a reader, or from the panel. The
-  // backend owns the state and has already persisted it; this half exists
-  // because SteamClient lives only here.
+  // The lock changed — the key was presented, or taken away. The backend owns
+  // the state and derives it from the key; this half only mirrors it into the
+  // panel, which is why locking no longer calls out to Steam at all.
   const restrictedLockListener = addEventListener<[data: {
-    locked: boolean, has_key: boolean, label: string, has_pin: boolean,
-    reason?: string, pin?: string,
+    locked: boolean, has_key: boolean, label: string, reason?: string,
   }]>("restricted_lock", (data) => {
     if (!data || typeof data.locked !== "boolean") return;
-    const { pin, reason, ...state } = data;
+    const { reason, ...state } = data;
     sharedState.restricted = state;
     restrictedRef.current = state;
     notifySubscribers();
     console.info(`[ Decky Links ] Restricted mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
-    void applyFamilyView(data.locked, pin ?? "");
   });
 
-  // Registration, replacement or PIN changes: state only, no Family View call.
+  // Registering or deregistering the key: state only, no lock change.
   const restrictedStateListener = addEventListener<[data: {
-    locked: boolean, has_key: boolean, label: string, has_pin: boolean,
+    locked: boolean, has_key: boolean, label: string,
   }]>("restricted_state", (data) => {
     if (!data || typeof data.locked !== "boolean") return;
     sharedState.restricted = data;
