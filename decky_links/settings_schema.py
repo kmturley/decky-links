@@ -22,6 +22,7 @@ table rather than an edit in three places that will drift again.
 """
 
 import os
+import re
 from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 
@@ -143,6 +144,42 @@ SOURCE_RULES: Dict[str, Dict[str, Rule]] = {
     },
 }
 
+# ── Kiosk settings ─────────────────────────────────────────────────────────
+#
+# Kept out of TOP_LEVEL_RULES on purpose. Those keys are writable through the
+# generic ``set_setting`` RPC, and the lock state must not be: a switch that
+# turns the lock off is not a setting, it is the thing the lock exists to
+# protect. These are reached only through the dedicated kiosk RPCs, which
+# refuse while locked.
+
+_PIN_PATTERN = re.compile(r"^[0-9]{4,8}$")
+
+
+def _is_token_hash(value: str) -> bool:
+    """A SHA-256 hex digest, or empty for "no key registered"."""
+    return value == "" or bool(re.fullmatch(r"[0-9a-fA-F]{64}", value))
+
+
+def _is_family_view_pin(value: str) -> bool:
+    """Steam's Family View PIN, or empty for "not stored".
+
+    Digits only, because that is what Steam's own prompt accepts — storing
+    anything else guarantees an unlock that fails at the moment it is needed.
+    """
+    return value == "" or bool(_PIN_PATTERN.match(value))
+
+
+KIOSK_RULES: Dict[str, Rule] = {
+    "locked": Rule((bool,), describe="true or false"),
+    "master_key_hash": Rule((str,), _is_token_hash, "a SHA-256 hex digest"),
+    "master_key_label": Rule(
+        (str,), lambda v: len(v) <= 128, "at most 128 characters"
+    ),
+    "family_view_pin": Rule((str,), _is_family_view_pin, "4-8 digits, or empty"),
+}
+
+KIOSK_SETTING_KEYS = frozenset(KIOSK_RULES)
+
 SOURCE_TYPES = frozenset(SOURCE_RULES)
 
 # Kept so callers can still ask "is this an NFC key?" without knowing the
@@ -178,7 +215,25 @@ def validate(key: str, value: Any, source_type: Optional[str] = None) -> Tuple[b
     if rule is None:
         where = f"{source_type}." if source_type else ""
         return False, f"unknown setting {where}{key}"
+    return _check(rule, key, value)
 
+
+def validate_kiosk(key: str, value: Any) -> Tuple[bool, str]:
+    """Check one kiosk setting. Same contract as :func:`validate`.
+
+    A separate entry point rather than a ``section`` argument to ``validate``:
+    these keys are addressed only by the kiosk RPCs, and letting them resolve
+    through the same lookup that ``set_setting`` uses is precisely the drift
+    this module exists to prevent.
+    """
+    rule = KIOSK_RULES.get(key)
+    if rule is None:
+        return False, f"unknown setting kiosk.{key}"
+    return _check(rule, key, value)
+
+
+def _check(rule: Rule, key: str, value: Any) -> Tuple[bool, str]:
+    """Apply one rule to one value."""
     # bool is a subclass of int, so an int-typed setting would otherwise
     # silently accept True. That matters for baudrate and broker_port.
     if bool not in rule.types and isinstance(value, bool):

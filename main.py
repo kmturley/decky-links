@@ -42,6 +42,7 @@ from decky_links import settings_schema
 from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
+from decky_links import master_key
 from decky_links import state
 from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
@@ -101,6 +102,11 @@ class Plugin:
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        # Set while a master-key registration is in flight, and consumed when
+        # the write succeeds. The token is only committed to settings once it
+        # is actually on the medium — recording it at the moment the button was
+        # pressed would leave a device locked by a key that was never written.
+        self._pending_master_token = None
         # What is presented where, and which medium started the running game.
         # See decky_links.media_registry for the invariants.
         self._registry = MediaRegistry()
@@ -458,6 +464,14 @@ class Plugin:
         uri = event.uri
         is_nfc = event.source_type == SourceType.NFC
 
+        # A master payload is a control message, not a link. Recognised here so
+        # that the token never reaches the registry, the panel or an event —
+        # everything downstream sees a medium with no URI and a master flag,
+        # which is all any of it needs to know.
+        master_token = master_key.parse_token(uri)
+        if master_token is not None:
+            uri = None
+
         # Collision check (Spec §6.2) — scoped to *this* source. Comparing
         # against a single global slot meant a floppy insert looked like an NFC
         # tag collision, and vice versa. Only one medium can occupy one source.
@@ -489,6 +503,9 @@ class Plugin:
             "uri":         uri,
             "drive_kind":  event.payload.get("drive_kind") or prior_kind,
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
+            # The panel labels the row "Master key" from this, and never has
+            # to be told which token it holds.
+            "master":      master_token is not None,
             # Carried on the registry entry too, not just the uri_detected
             # event: get_active_media is the 5s backstop the panel re-syncs
             # from, and without this a dropped event would leave the row
@@ -530,6 +547,14 @@ class Plugin:
                 "drive_kind": event.payload.get("drive_kind"),
             })
             await self._handle_pairing(uid_hex, source_id=event.source_id)
+            return
+
+        # A master key, presented. Checked after pairing so that *registering*
+        # one still writes — the write path sees an ordinary payload — and
+        # before every URI branch below, because a master medium carries no
+        # launchable URI and would otherwise be reported as a blank tag.
+        if master_token is not None:
+            await self._handle_master_key(event, uid_hex, master_token)
             return
 
         # Emit media_detected immediately — matches old _handle_scan behavior
@@ -713,6 +738,179 @@ class Plugin:
         ok, _reason = settings_schema.validate(key, value)
         return ok
 
+    # ── Kid mode ───────────────────────────────────────────────────────
+    #
+    # Two locks, owned by two different pieces of software, and it matters
+    # which is which.
+    #
+    # This one is the plugin's: while locked, nothing may write a medium or
+    # change a setting. It is enforced at the RPC surface rather than by
+    # hiding buttons, because the panel is not the only way to reach these —
+    # anything with access to the plugin's RPCs is.
+    #
+    # The other is Steam's Family View, which owns the part this plugin has no
+    # business reimplementing: which games may run, and which system menus are
+    # reachable. The frontend drives it, because SteamClient exists only there.
+    # All the backend does is say when the state changed and hand over the PIN
+    # the user asked us to keep.
+
+    @property
+    def locked(self) -> bool:
+        """Whether kid mode is on."""
+        return bool(self.settings and self.settings.get_kiosk("locked"))
+
+    def _refuse_when_locked(self, action: str) -> bool:
+        """True when ``action`` must not proceed, having logged why."""
+        if self.locked:
+            decky.logger.warning(f"{action} refused: kid mode is locked")
+            return True
+        return False
+
+    def _kiosk_state(self) -> Dict[str, Any]:
+        """What the panel is allowed to know about the lock.
+
+        Neither the token hash nor the PIN appears here. The panel needs to
+        know *that* a key and a PIN exist, to decide what to offer; it never
+        needs their values, and the unlock event is the one place a PIN is
+        handed over.
+        """
+        if not self.settings:
+            return {"locked": False, "has_master_key": False, "label": "", "has_pin": False}
+        return {
+            "locked":         bool(self.settings.get_kiosk("locked")),
+            "has_master_key": bool(self.settings.get_kiosk("master_key_hash")),
+            "label":          self.settings.get_kiosk("master_key_label") or "",
+            "has_pin":        bool(self.settings.get_kiosk("family_view_pin")),
+        }
+
+    async def _set_locked(self, locked: bool, reason: str) -> bool:
+        """Change the lock, persist it, and tell the frontend.
+
+        Refuses to lock with no key registered. A lock whose only key does not
+        exist is not a safety feature, it is a device the user has to
+        reinstall the plugin to get back into — and the panel offers no unlock
+        button by design, because one would defeat the lock.
+        """
+        if locked and not self.settings.get_kiosk("master_key_hash"):
+            decky.logger.warning("Refusing to lock: no master key is registered")
+            return False
+
+        if not self.settings.set_kiosk("locked", bool(locked)):
+            decky.logger.error("Lock state could not be written to disk")
+            return False
+
+        # A pairing armed before the lock came down would otherwise write the
+        # next medium presented, which is exactly what the lock is for.
+        if locked and self.is_pairing:
+            await self.cancel_pairing()
+
+        decky.logger.info(f"Kid mode {'locked' if locked else 'unlocked'} ({reason})")
+        self._play_sound("success.flac")
+
+        payload = dict(self._kiosk_state())
+        payload["reason"] = reason
+        # The PIN travels exactly once, at the moment it is needed: Family View
+        # is unlocked by the frontend, and only the frontend can call Steam.
+        if not locked:
+            payload["pin"] = self.settings.get_kiosk("family_view_pin") or ""
+        await decky.emit("kiosk_lock", payload)
+        return True
+
+    async def _handle_master_key(self, event: MediaEvent, uid_hex: str, token: str):
+        """A medium carrying a master payload was presented.
+
+        Toggling rather than two separate keys: the user has one physical
+        object and both directions have to be reachable from it, which is what
+        the issue asked for and what a single tag can express.
+        """
+        stored = self.settings.get_kiosk("master_key_hash") if self.settings else ""
+        recognised = master_key.matches(token, stored)
+
+        await decky.emit("media_detected", {
+            "uid": uid_hex,
+            "source_type": event.source_type.value,
+            "source_id": event.source_id,
+            "drive_kind": event.payload.get("drive_kind"),
+            "master": True,
+        })
+
+        if not recognised:
+            # Someone else's key, or ours after it was replaced. Says so rather
+            # than failing silently: a key that stopped working is otherwise
+            # indistinguishable from a reader that stopped reading.
+            decky.logger.warning(f"Unrecognised master key presented on {event.source_id}")
+            self._play_sound("error.flac")
+            await decky.emit("uri_detected", {
+                "uri": None, "uid": uid_hex, "master": True, "authorized": False,
+                "source_id": event.source_id,
+                "source_type": event.source_type.value,
+            })
+            self._set_state(state.after_unusable_media(
+                self.state, game_running=bool(self.running_game_id)
+            ))
+            return
+
+        await decky.emit("uri_detected", {
+            "uri": None, "uid": uid_hex, "master": True, "authorized": True,
+            "source_id": event.source_id,
+            "source_type": event.source_type.value,
+        })
+        await self._set_locked(not self.locked, "master_key")
+
+        # Never a launch, and never a reason to forget a running game.
+        self._set_state(state.after_unusable_media(
+            self.state, game_running=bool(self.running_game_id)
+        ))
+
+    # What a registered key is called in the panel. The medium is a physical
+    # object the user has to find again, so "USB drive" is worth more than a
+    # device node or a UID they have no way to read off it.
+    _MEDIUM_LABELS = {
+        "floppy":  "floppy disk",
+        "optical": "disc",
+        "usb":     "USB drive",
+        "flash":   "memory card",
+    }
+
+    def _medium_label(self, source, source_id: Optional[str]) -> str:
+        if source is None:
+            return "medium"
+        if source.source_type == SourceType.NFC:
+            return "NFC tag"
+        if source.source_type == SourceType.STORAGE:
+            entry = self._registry.get(source_id) if source_id else None
+            kind = (entry or {}).get("drive_kind")
+            return self._MEDIUM_LABELS.get(kind, "disk")
+        return source.source_type.value
+
+    async def _emit_kiosk_state(self):
+        await decky.emit("kiosk_state", self._kiosk_state())
+
+    async def _commit_master_key(self, token: str, source, source_id: Optional[str]):
+        """Record a token that is now physically on a medium."""
+        label = self._medium_label(source, source_id)
+        if not self.settings.set_kiosk("master_key_hash", master_key.hash_token(token)):
+            decky.logger.error("Master key could not be written to disk")
+            return
+        self.settings.set_kiosk("master_key_label", label)
+        decky.logger.info(f"Master key registered on {label} ({source_id})")
+
+        entry = self._registry.get(source_id) if source_id else None
+        if entry is not None:
+            # The medium holds a token, not a link. Leaving the registry
+            # showing the URI it was just written would put the token in
+            # get_active_media, which the panel polls every five seconds.
+            entry["uri"] = None
+            entry["master"] = True
+
+        await decky.emit("uri_detected", {
+            "uri": None, "uid": (entry or {}).get("media_id", ""),
+            "master": True, "authorized": True, "paired": True,
+            "source_id": source_id,
+            "source_type": (entry or {}).get("source_type"),
+        })
+        await self._emit_kiosk_state()
+
     # ── Pairing Handler ────────────────────────────────────────────────
 
     def _pairable_source(self, source_id: Optional[str]):
@@ -756,17 +954,24 @@ class Plugin:
         # new media from interfering with the write operation
         pairing_uri = self.pairing_uri
         pairing_title = getattr(self, "pairing_title", "")
+        pending_master = self._pending_master_token
         self.is_pairing = False
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        self._pending_master_token = None
 
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
             success, error_msg = await source.write_uri(media_id, pairing_uri, pairing_title)
             self._play_sound("success.flac" if success else "error.flac")
 
-            if success:
+            if success and pending_master:
+                # Committed only now. Recording the hash when the button was
+                # pressed would have locked the device to a key that the write
+                # then failed to put on any medium.
+                await self._commit_master_key(pending_master, source, source_id)
+            elif success:
                 # The medium now holds this URI, but nothing will re-read it
                 # while it stays put — poll() only reports media on arrival.
                 # Without this the panel shows "Url: Empty" until the user
@@ -939,6 +1144,8 @@ class Plugin:
         written — no permission, disk full — still reported success, so the
         panel showed the new value and the old one came back on restart.
         """
+        if self._refuse_when_locked(f"set_setting({key!r})"):
+            return False
         ok, reason = settings_schema.validate(key, value)
         if not ok:
             decky.logger.warning(f"Rejected setting update: {reason} (got {value!r})")
@@ -965,9 +1172,22 @@ class Plugin:
         on the medium means a disk says what it is without resolving an app id
         against Steam. Sources that cannot store it ignore it.
         """
+        if self._refuse_when_locked("start_pairing"):
+            return False
         if not self._validate_uri(uri):
             decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
             return False
+        return self._arm_pairing(uri, source_id, title)
+
+    def _arm_pairing(self, uri, source_id: Optional[str], title: str = "") -> bool:
+        """Arm the pairing state machine for ``uri``.
+
+        Shared with master-key registration, which writes a payload the
+        allowlist deliberately does not admit — a control token is not
+        something a tapped card may launch, so it cannot pass the same check
+        the launch path uses. The two callers differ only in what they check
+        before arming; everything after that is identical.
+        """
         if source_id and self._pairable_source(source_id) is None:
             decky.logger.warning(f"Pairing target {source_id!r} cannot be written to")
             return False
@@ -1029,6 +1249,11 @@ class Plugin:
                 "simulate_tag refused: set DECKY_LINKS_DEBUG to enable debug RPCs"
             )
             return False
+        # Even with debug RPCs on. This forges a media detection, so leaving it
+        # open while locked would make the lock togglable by anything that can
+        # call it — including with a forged master payload.
+        if self._refuse_when_locked("simulate_tag"):
+            return False
 
         uid_hex = uid.hex().upper()
         self.current_tag_uid = uid_hex
@@ -1057,6 +1282,8 @@ class Plugin:
         be swapped between the panel drawing the button and the user pressing
         it.
         """
+        if self._refuse_when_locked("format_media"):
+            return {"success": False, "error": "Decky Links is locked"}
         source = self.storage_source
         if source is None:
             return {"success": False, "error": "storage source not available"}
@@ -1125,6 +1352,8 @@ class Plugin:
     # decky_links.nfc_rpcs. The names here are the RPC surface.
 
     async def set_tag_key(self, uid: str, key_a: str, key_b: str):
+        if self._refuse_when_locked("set_tag_key"):
+            return False
         return await nfc_rpcs.set_tag_key(decky, self.key_manager, uid, key_a, key_b)
 
     async def get_tag_key(self, uid: str):
@@ -1140,6 +1369,8 @@ class Plugin:
         )
 
     async def lock_sector(self, uid: str, sector: int, key_a: str, key_b: str):
+        if self._refuse_when_locked("lock_sector"):
+            return False
         return await nfc_rpcs.lock_sector(
             decky, self.key_manager, self.nfc_source, uid, sector, key_a, key_b
         )
@@ -1204,6 +1435,83 @@ class Plugin:
     async def save_game_card(self, uri: str, title: str = "", appid: str = ""):
         return await card_rpcs.save_card(decky, PRINT_DPI, uri, title, appid)
 
+    # --- Kid mode ---
+
+    async def get_kiosk_state(self):
+        """The lock, as much of it as the panel is allowed to see."""
+        return self._kiosk_state()
+
+    async def register_master_key(self, source_id: Optional[str] = None):
+        """Arm pairing to write a freshly minted master token onto a medium.
+
+        Deliberately the ordinary pairing flow: the user presents the medium
+        they want to use, on the trigger they want to use it on, and the write
+        goes through the same source method a game pairing does. A key is
+        therefore anything this plugin can already write — tag, floppy, USB
+        stick — with no per-source support to add.
+
+        Registering replaces any previous key, but only once the new one is
+        physically written (see ``_commit_master_key``).
+        """
+        if self._refuse_when_locked("register_master_key"):
+            return False
+        token = master_key.mint_token()
+        if not self._arm_pairing(
+            master_key.uri_for(token), source_id, title="Decky Links master key"
+        ):
+            return False
+        self._pending_master_token = token
+        return True
+
+    async def clear_master_key(self):
+        """Forget the registered key. Refused while locked, for obvious reasons."""
+        if self._refuse_when_locked("clear_master_key"):
+            return False
+        self._pending_master_token = None
+        ok = self.settings.set_kiosk("master_key_hash", "")
+        self.settings.set_kiosk("master_key_label", "")
+        decky.logger.info("Master key cleared")
+        await self._emit_kiosk_state()
+        return ok
+
+    async def set_kiosk_locked(self, locked: bool):
+        """Lock kid mode from the panel.
+
+        Only ever used to lock. Unlocking is refused here — the guard in
+        ``_set_locked``'s callers is the whole point of the feature, and a
+        panel button that undid it would mean the master key protected
+        nothing.
+        """
+        if not isinstance(locked, bool):
+            return False
+        if not locked:
+            decky.logger.warning(
+                "Unlock refused: present the master key, or use Steam's PIN"
+            )
+            return False
+        return await self._set_locked(True, "panel")
+
+    async def set_family_view_pin(self, pin: str):
+        """Store (or clear, with "") Steam's Family View PIN.
+
+        Kept so that presenting the master key can unlock Family View as well
+        as lock it. Locking never needs a secret; unlocking does, and this is
+        the trade the user opted into. It lives in the plugin's settings.json,
+        readable by root on the device it protects, and clearing it leaves
+        Steam's own PIN prompt as the way back in.
+        """
+        if self._refuse_when_locked("set_family_view_pin"):
+            return False
+        ok, reason = settings_schema.validate_kiosk("family_view_pin", pin)
+        if not ok:
+            decky.logger.warning(f"Rejected Family View PIN: {reason}")
+            return False
+        if not self.settings.set_kiosk("family_view_pin", pin):
+            return False
+        decky.logger.info(f"Family View PIN {'stored' if pin else 'cleared'}")
+        await self._emit_kiosk_state()
+        return True
+
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
 
@@ -1259,6 +1567,8 @@ class Plugin:
         equivalent NFC setting was held to — and watch_dir accepted "/",
         pointing a root process's directory scanner at the filesystem root.
         """
+        if self._refuse_when_locked(f"set_source_setting({source_type}.{key})"):
+            return False
         if source_type not in settings_schema.SOURCE_TYPES:
             decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
             return False

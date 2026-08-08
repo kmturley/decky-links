@@ -96,6 +96,15 @@ def plugin(tmp_path):
     _settings = {
         "auto_launch": True,
         "auto_close": False,
+        # Kid mode, unlocked and with no key registered — the shipped state.
+        # Present rather than omitted because Plugin.locked reads it on every
+        # guarded RPC, and a MagicMock attribute would read as locked.
+        "kiosk": {
+            "locked": False,
+            "master_key_hash": "",
+            "master_key_label": "",
+            "family_view_pin": "",
+        },
         # Mirrors SettingsManager's real shape. Only nfc was here before, so
         # get_source_settings raised for every other source and anything
         # touching per-source settings had to work around it.
@@ -142,8 +151,18 @@ def plugin(tmp_path):
         else:
             _settings["sources"]["nfc"][key] = value
         return True
+    def _get_kiosk(key=None):
+        block = _settings["kiosk"]
+        return block if key is None else block.get(key)
+
+    def _set_kiosk(key, value):
+        _settings["kiosk"][key] = value
+        return True
+
     mock_settings.get = _get_setting
     mock_settings.set = _set_setting
+    mock_settings.get_kiosk = _get_kiosk
+    mock_settings.set_kiosk = _set_kiosk
     mock_settings.save = lambda: True
     mock_settings.get_source_settings = lambda source_type: _settings["sources"][source_type]
     mock_settings.settings = _settings
