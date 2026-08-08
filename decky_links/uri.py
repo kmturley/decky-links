@@ -87,7 +87,7 @@ def launch_appid(uri) -> Optional[str]:
     ``comparableAppIdFromUri`` in src/lib/steamIds.ts, which the frontend has
     always needed for the same reason.
 
-    Kid mode is what brought it to this side: deciding whether a running game
+    Restricted mode is what brought it to this side: deciding whether a running game
     matches a presented medium is the backend's call, since the backend is the
     only side that holds every medium and the launch attribution.
     """

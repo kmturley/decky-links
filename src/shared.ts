@@ -49,11 +49,11 @@ export interface ActiveMedium {
      *  for that whole time. Always replaced by a real state. */
     problem?: "blank" | "unreadable" | "blocked" | "loading" | null;
     error?: string;
-    /** This medium carries a master key rather than a link. The token itself
+    /** This medium carries a key rather than a link. The token itself
      *  never reaches the frontend — the backend recognises it and sends this
      *  flag in its place. */
-    master?: boolean;
-    /** Set on a master medium the backend did not recognise. */
+    key?: boolean;
+    /** Set on a key medium the backend did not recognise. */
     authorized?: boolean;
     /** Whether offering to format this medium would destroy anything.
      *
@@ -64,15 +64,15 @@ export interface ActiveMedium {
     formattable?: boolean;
 }
 
-/** Kid mode, as much of it as the panel is allowed to know.
+/** Restricted mode, as much of it as the panel is allowed to know.
  *
  *  Neither the key's hash nor the Family View PIN appears here — the panel
  *  needs to know *that* they exist to decide what to offer, never what they
  *  are. The PIN arrives exactly once, on the unlock event, because only the
  *  frontend can hand it to Steam. */
-export interface KioskState {
+export interface RestrictedState {
     locked: boolean;
-    has_master_key: boolean;
+    has_key: boolean;
     /** What the key is, in words: "USB drive", "NFC tag". The user has to find
      *  the object again, and a device node will not help them do that. */
     label: string;
@@ -170,9 +170,9 @@ export interface SharedState {
   viewedApp: ViewedApp | null;
   pairing: boolean;
   sourceStatuses: SourceStatus[];
-  /** Kid mode. Null until the first fetch completes, so the panel can avoid
+  /** Restricted mode. Null until the first fetch completes, so the panel can avoid
    *  flashing the unlocked view at someone who locked the device. */
-  kiosk: KioskState | null;
+  restricted: RestrictedState | null;
 }
 
 export type SettingKey =
@@ -191,11 +191,11 @@ export const sharedState: SharedState = {
   viewedApp: null,
   pairing: false,
   sourceStatuses: [],
-  kiosk: null,
+  restricted: null,
 };
 
 /** Read by asynchronous callbacks that must not close over a stale lock. */
-export const kioskRef = { current: null as KioskState | null };
+export const restrictedRef = { current: null as RestrictedState | null };
 
 // These refs are updated from BackgroundManager and read by various
 // asynchronous callbacks. They live outside of React so that closures keep a
@@ -281,20 +281,20 @@ export const saveGameCard = callable<
 >("save_game_card");
 export const setSourceSetting = callable<[source_type: string, key: string, value: any], boolean>("set_source_setting");
 
-// ── Kid mode ────────────────────────────────────────────────────────────────
+// ── Restricted mode ────────────────────────────────────────────────────────────────
 //
 // The backend refuses each of these while locked, so hiding the controls that
 // call them is presentation, not enforcement.
 
-export const getKioskState = callable<[], KioskState>("get_kiosk_state");
-/** Arm pairing to write a fresh master token onto the next medium presented.
+export const getKioskState = callable<[], RestrictedState>("get_restricted_state");
+/** Arm pairing to write a fresh key token onto the next medium presented.
  *  With a source_id, only that trigger may claim it. */
-export const registerMasterKey =
-    callable<[source_id?: string], boolean>("register_master_key");
-export const clearMasterKey = callable<[], boolean>("clear_master_key");
+export const registerKey =
+    callable<[source_id?: string], boolean>("register_key");
+export const disableKey = callable<[], boolean>("disable_key");
 /** Lock only. The backend refuses `false` — an unlock button in the panel
  *  would mean the key protected nothing. */
-export const setKioskLocked = callable<[locked: boolean], boolean>("set_kiosk_locked");
+export const setKioskLocked = callable<[locked: boolean], boolean>("set_restricted_locked");
 /** Store, or clear with "", the Family View PIN used to unlock on a tap. */
 export const setFamilyViewPin = callable<[pin: string], boolean>("set_family_view_pin");
 

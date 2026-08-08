@@ -8,7 +8,7 @@ import {
   setRunningGame,
   sharedState,
   settingsRef,
-  kioskRef,
+  restrictedRef,
   activeAppIdRef,
   notifySubscribers,
   addEventListener,
@@ -197,7 +197,7 @@ async function applyFamilyView(locked: boolean, pin: string): Promise<void> {
 
   if (!status.enabled) {
     // The plugin's own write lock is still on; only Steam's half is missing.
-    // Worth saying, because "kid mode" that does not restrict a single game is
+    // Worth saying, because "restricted mode" that does not restrict a single game is
     // not what the user thinks they just switched on.
     if (locked) {
       toaster.toast({
@@ -210,7 +210,7 @@ async function applyFamilyView(locked: boolean, pin: string): Promise<void> {
 
   if (locked) {
     if (lockFamilyView()) {
-      toaster.toast({ title: "Kid mode on", body: "Family View locked." });
+      toaster.toast({ title: "Restricted mode on", body: "Family View locked." });
     }
     return;
   }
@@ -224,7 +224,7 @@ async function applyFamilyView(locked: boolean, pin: string): Promise<void> {
   }
 
   if (await unlockFamilyView(pin)) {
-    toaster.toast({ title: "Kid mode off", body: "Family View unlocked." });
+    toaster.toast({ title: "Restricted mode off", body: "Family View unlocked." });
   } else {
     toaster.toast({
       title: "Family View not unlocked",
@@ -259,10 +259,10 @@ export function startBackgroundManager(): () => void {
 
     // Before the media seed below: a locked device must not draw the unlocked
     // panel, however briefly, and the launch path consults this.
-    const kiosk = await getKioskState();
+    const restricted = await getKioskState();
     if (active) {
-      sharedState.kiosk = kiosk;
-      kioskRef.current = kiosk;
+      sharedState.restricted = restricted;
+      restrictedRef.current = restricted;
     }
 
     // Seed the per-source view: media already presented before the panel was
@@ -363,7 +363,7 @@ export function startBackgroundManager(): () => void {
     uri: string | null, uid: string, paired?: boolean, source_id?: string,
     source_type?: SourceType,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
-    formattable?: boolean, master?: boolean, authorized?: boolean,
+    formattable?: boolean, key?: boolean, authorized?: boolean,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
 
@@ -384,10 +384,10 @@ export function startBackgroundManager(): () => void {
       : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
 
-    // A master key carries no URI by design, so every "no URI" branch below
+    // A key carries no URI by design, so every "no URI" branch below
     // would mislabel it — as a blank tag, and then as an error sound and a
     // Pair button offering to overwrite the key with a game.
-    if (data.master) {
+    if (data.key) {
       if (key && sharedState.activeMedia[key]) {
         sharedState.activeMedia = {
           ...sharedState.activeMedia,
@@ -396,7 +396,7 @@ export function startBackgroundManager(): () => void {
             media_id: normalizedUid,
             uri: null,
             problem: null,
-            master: true,
+            key: true,
             authorized: data.authorized !== false,
           },
         };
@@ -406,7 +406,7 @@ export function startBackgroundManager(): () => void {
         // Named rather than silent: a key that has stopped being recognised
         // looks exactly like a reader that has stopped reading.
         toaster.toast({
-          title: "Not the master key",
+          title: "Not the key",
           body: "This medium is not registered on this device.",
           critical: true,
         });
@@ -451,10 +451,10 @@ export function startBackgroundManager(): () => void {
       const currentSettings = settingsRef.current;
       const uriAppId = parseSteamAppIdFromUri(uri);
 
-      // Kid mode: which games are allowed is Family View's answer, not ours.
+      // Restricted mode: which games are allowed is Family View's answer, not ours.
       // Asked before launching rather than left to Steam to refuse, so the
       // user gets a sentence instead of a tap that appears to do nothing.
-      if (kioskRef.current?.locked && isAppBlocked(uriAppId)) {
+      if (restrictedRef.current?.locked && isAppBlocked(uriAppId)) {
         console.info(`[ Decky Links ] Restricted title ${uriAppId}; not launching.`);
         toaster.toast({
           title: "Restricted title",
@@ -512,29 +512,29 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  // The lock changed — by a master key on a reader, or from the panel. The
+  // The lock changed — by a key on a reader, or from the panel. The
   // backend owns the state and has already persisted it; this half exists
   // because SteamClient lives only here.
-  const kioskLockListener = addEventListener<[data: {
-    locked: boolean, has_master_key: boolean, label: string, has_pin: boolean,
+  const restrictedLockListener = addEventListener<[data: {
+    locked: boolean, has_key: boolean, label: string, has_pin: boolean,
     reason?: string, pin?: string,
-  }]>("kiosk_lock", (data) => {
+  }]>("restricted_lock", (data) => {
     if (!data || typeof data.locked !== "boolean") return;
     const { pin, reason, ...state } = data;
-    sharedState.kiosk = state;
-    kioskRef.current = state;
+    sharedState.restricted = state;
+    restrictedRef.current = state;
     notifySubscribers();
-    console.info(`[ Decky Links ] Kid mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
+    console.info(`[ Decky Links ] Restricted mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
     void applyFamilyView(data.locked, pin ?? "");
   });
 
   // Registration, replacement or PIN changes: state only, no Family View call.
-  const kioskStateListener = addEventListener<[data: {
-    locked: boolean, has_master_key: boolean, label: string, has_pin: boolean,
-  }]>("kiosk_state", (data) => {
+  const restrictedStateListener = addEventListener<[data: {
+    locked: boolean, has_key: boolean, label: string, has_pin: boolean,
+  }]>("restricted_state", (data) => {
     if (!data || typeof data.locked !== "boolean") return;
-    sharedState.kiosk = data;
-    kioskRef.current = data;
+    sharedState.restricted = data;
+    restrictedRef.current = data;
     notifySubscribers();
   });
 
@@ -552,7 +552,7 @@ export function startBackgroundManager(): () => void {
     }
   });
 
-  // Kid mode: a game started without a medium to vouch for it.
+  // Restricted mode: a game started without a medium to vouch for it.
   //
   // The backend decides — it holds every presented medium and the launch
   // attribution — and this end carries it out, because TerminateApp lives on
@@ -564,13 +564,13 @@ export function startBackgroundManager(): () => void {
     (data) => {
       if (!data || data.appid === undefined || data.appid === null) return;
       const appId = String(data.appid);
-      console.info(`[ Decky Links ] Kid mode: closing unauthorised game ${appId}.`);
+      console.info(`[ Decky Links ] Restricted mode: closing unauthorised game ${appId}.`);
       void (async () => {
         const closed = await terminateSteamApp(appId);
         toaster.toast({
           title: "Restricted title",
           body: closed
-            ? "In kid mode, present the tag or disk for a game to play it."
+            ? "In restricted mode, present the tag or disk for a game to play it."
             : "This game is not allowed, and Steam would not close it.",
           critical: true,
         });
@@ -704,8 +704,8 @@ export function startBackgroundManager(): () => void {
     removeEventListener("source_connection", statusListener);
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
-    removeEventListener("kiosk_lock", kioskLockListener);
-    removeEventListener("kiosk_state", kioskStateListener);
+    removeEventListener("restricted_lock", restrictedLockListener);
+    removeEventListener("restricted_state", restrictedStateListener);
     removeEventListener("restricted_game", restrictedListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
     removeEventListener("source_statuses", sourceStatusesListener);

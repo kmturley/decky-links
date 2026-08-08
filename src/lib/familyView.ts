@@ -1,6 +1,6 @@
 /** Steam's Family View, reached from the plugin.
  *
- * Kid mode splits in two. Decky Links owns the physical key and its own write
+ * Restricted mode splits in two. Decky Links owns the physical key and its own write
  * lock; *which games may run and which system menus are reachable* is Family
  * View's job, and Steam already does it properly — the allowlist is edited in
  * Steam's own UI, enforced by the client, and survives this plugin being
@@ -19,7 +19,7 @@ import { findModuleExport } from "@decky/ui";
 interface ParentalStore {
   /** Family View is configured on this account at all. */
   isEnabled: boolean;
-  /** Configured *and* currently locked — i.e. kid mode as Steam sees it. */
+  /** Configured *and* currently locked — i.e. restricted mode as Steam sees it. */
   isParentalLocked: boolean;
   /** A PIN has been set, so there is something to unlock with. */
   hasPassword: boolean;

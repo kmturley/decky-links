@@ -226,7 +226,7 @@ class TestLaunchAppId:
 
     Two URIs naming the same game do not compare as strings: `steam://run/400`
     and `steam://rungameid/400` are the same title, and a shortcut's rungameid
-    packs its app id into the high 32 bits. Kid mode asks "is the running game
+    packs its app id into the high 32 bits. Restricted mode asks "is the running game
     the one on this disk?", so getting this wrong either lets everything
     through or restricts everything.
     """
@@ -257,7 +257,7 @@ class TestLaunchAppId:
 
     @pytest.mark.parametrize("uri_str", [
         "https://example.com",
-        "decky-links://master/" + "a" * 32,
+        "decky-links://key/" + "a" * 32,
         "steam://open/games/details/400",
         "steam://run/abc",
         "steam://run/",

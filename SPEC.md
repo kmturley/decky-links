@@ -385,11 +385,11 @@ Since shipped, and no longer non-goals:
 
 ---
 
-## 16. Kid Mode
+## 16. Restricted Mode
 
-### 16.1 The master key
+### 16.1 The key
 
-A master key is a medium carrying `decky-links://master/<token>`, where the
+A key is a medium carrying `decky-links://key/<token>`, where the
 token is 128 random bits, written through the ordinary pairing path. The device
 stores only its SHA-256. Any medium the plugin can write can be a key.
 
@@ -402,12 +402,12 @@ emitted event.
 ### 16.2 States
 
 Presenting the registered key toggles `locked`, which is persisted. Presenting
-a master payload that is *not* the registered one changes nothing and is
+a key payload that is *not* the registered one changes nothing and is
 reported to the user; it remains an ordinary medium, and may be paired to a
 game like any other.
 
 While locked, the backend refuses: pairing, `set_setting`, `set_source_setting`,
-`format_media`, `set_tag_key`, `lock_sector`, `simulate_tag`, and every kiosk
+`format_media`, `set_tag_key`, `lock_sector`, `simulate_tag`, and every restricted
 RPC other than reading the state. Unlocking from the panel is refused by design.
 Locking with no key registered is refused, because the panel offers no way back.
 
@@ -445,12 +445,12 @@ stored the PIN.
 Steam's parental store is located by shape, never by webpack module id: ids
 change with every client build.
 
-### 16.5 Non-goals within kid mode
+### 16.5 Non-goals within restricted mode
 
 * Blocking Steam's own menus — the Store, Settings and Desktop Mode stay
-  reachable. Steam's internal kiosk mode could do it, but it is undocumented,
+  reachable. Steam's internal restricted mode could do it, but it is undocumented,
   frontend-only, resets on a client restart and carries a hardcoded escape PIN.
-* Replacing the Steam Home view with a kiosk overlay.
+* Replacing the Steam Home view with a restricted overlay.
 * Hiding other Decky Loader plugins — another plugin's UI is not this one's to
   hide, and Decky Loader has no lock of its own.
 * Intercepting the STEAM button inside a running game. Not exposed to plugins.

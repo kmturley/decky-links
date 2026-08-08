@@ -149,7 +149,7 @@ SOURCE_RULES: Dict[str, Dict[str, Rule]] = {
 # Kept out of TOP_LEVEL_RULES on purpose. Those keys are writable through the
 # generic ``set_setting`` RPC, and the lock state must not be: a switch that
 # turns the lock off is not a setting, it is the thing the lock exists to
-# protect. These are reached only through the dedicated kiosk RPCs, which
+# protect. These are reached only through the dedicated restricted RPCs, which
 # refuse while locked.
 
 _PIN_PATTERN = re.compile(r"^[0-9]{4,8}$")
@@ -169,16 +169,16 @@ def _is_family_view_pin(value: str) -> bool:
     return value == "" or bool(_PIN_PATTERN.match(value))
 
 
-KIOSK_RULES: Dict[str, Rule] = {
+RESTRICTED_RULES: Dict[str, Rule] = {
     "locked": Rule((bool,), describe="true or false"),
-    "master_key_hash": Rule((str,), _is_token_hash, "a SHA-256 hex digest"),
-    "master_key_label": Rule(
+    "key_hash": Rule((str,), _is_token_hash, "a SHA-256 hex digest"),
+    "key_label": Rule(
         (str,), lambda v: len(v) <= 128, "at most 128 characters"
     ),
     "family_view_pin": Rule((str,), _is_family_view_pin, "4-8 digits, or empty"),
 }
 
-KIOSK_SETTING_KEYS = frozenset(KIOSK_RULES)
+RESTRICTED_SETTING_KEYS = frozenset(RESTRICTED_RULES)
 
 SOURCE_TYPES = frozenset(SOURCE_RULES)
 
@@ -218,17 +218,17 @@ def validate(key: str, value: Any, source_type: Optional[str] = None) -> Tuple[b
     return _check(rule, key, value)
 
 
-def validate_kiosk(key: str, value: Any) -> Tuple[bool, str]:
-    """Check one kiosk setting. Same contract as :func:`validate`.
+def validate_restricted(key: str, value: Any) -> Tuple[bool, str]:
+    """Check one restricted setting. Same contract as :func:`validate`.
 
     A separate entry point rather than a ``section`` argument to ``validate``:
-    these keys are addressed only by the kiosk RPCs, and letting them resolve
+    these keys are addressed only by the restricted RPCs, and letting them resolve
     through the same lookup that ``set_setting`` uses is precisely the drift
     this module exists to prevent.
     """
-    rule = KIOSK_RULES.get(key)
+    rule = RESTRICTED_RULES.get(key)
     if rule is None:
-        return False, f"unknown setting kiosk.{key}"
+        return False, f"unknown setting restricted.{key}"
     return _check(rule, key, value)
 
 

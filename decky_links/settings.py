@@ -18,16 +18,16 @@ from typing import Any, Dict, Optional
 
 from decky_links import settings_schema
 from decky_links.settings_schema import (
-    KIOSK_SETTING_KEYS,
+    RESTRICTED_SETTING_KEYS,
     NFC_SETTING_KEYS,
     TOP_LEVEL_SETTING_KEYS,
 )
 
-# What ``get_kiosk`` falls back to for a key an older settings.json never had.
-_KIOSK_DEFAULTS = {
+# What ``get_restricted`` falls back to for a key an older settings.json never had.
+_RESTRICTED_DEFAULTS = {
     "locked": False,
-    "master_key_hash": "",
-    "master_key_label": "",
+    "key_hash": "",
+    "key_label": "",
     "family_view_pin": "",
 }
 
@@ -47,16 +47,16 @@ class SettingsManager:
         self.settings = {
             "auto_launch": True,
             "auto_close": False,
-            # Kid mode. Its own block rather than four more top-level keys,
+            # Restricted mode. Its own block rather than four more top-level keys,
             # because top-level keys are what the generic set_setting RPC is
             # allowed to write, and the lock must not be one of those.
-            "kiosk": {
+            "restricted": {
                 "locked": False,
-                # SHA-256 of the token carried by the master medium. Empty
+                # SHA-256 of the token carried by the key medium. Empty
                 # means no key has been registered, and locking is refused —
                 # a lock with no key is a device nobody can get back into.
-                "master_key_hash": "",
-                "master_key_label": "",
+                "key_hash": "",
+                "key_label": "",
                 # Optional. Locking Family View needs no secret; unlocking it
                 # does, and the user chose to trade the storage of a PIN for a
                 # key that works both ways.
@@ -191,31 +191,31 @@ class SettingsManager:
         ok, _reason = settings_schema.validate(key, value)
         return ok
 
-    def get_kiosk(self, key: Optional[str] = None):
-        """The kiosk block, or one value from it.
+    def get_restricted(self, key: Optional[str] = None):
+        """The restricted block, or one value from it.
 
         Defaults to the shipped value rather than None when a key is missing,
-        so a settings.json written by an older version — which has no kiosk
+        so a settings.json written by an older version — which has no restricted
         block at all — reads as "unlocked, no key" rather than as None, which
         would make ``locked`` falsy by accident rather than by decision.
         """
-        block = self.settings.setdefault("kiosk", {})
+        block = self.settings.setdefault("restricted", {})
         if key is None:
             return block
-        return block.get(key, _KIOSK_DEFAULTS.get(key))
+        return block.get(key, _RESTRICTED_DEFAULTS.get(key))
 
-    def set_kiosk(self, key: str, value: Any) -> bool:
-        """Store one kiosk setting and persist. Returns whether it was written.
+    def set_restricted(self, key: str, value: Any) -> bool:
+        """Store one restricted setting and persist. Returns whether it was written.
 
         Validated here as well as at the RPC: this is the only writer, and a
         caller that skipped the check would put a value on disk that
         ``load()`` then refuses, silently reverting the change on restart.
         """
-        ok, _reason = settings_schema.validate_kiosk(key, value)
+        ok, _reason = settings_schema.validate_restricted(key, value)
         if not ok:
-            self._log.warning(f"Refusing invalid kiosk setting: {key!r}={value!r}")
+            self._log.warning(f"Refusing invalid restricted setting: {key!r}={value!r}")
             return False
-        self.settings.setdefault("kiosk", {})[key] = value
+        self.settings.setdefault("restricted", {})[key] = value
         return self.save()
 
     def get_source_settings(self, source_type: str) -> Dict[str, Any]:
@@ -224,16 +224,16 @@ class SettingsManager:
         return source_settings
 
     def _merge_loaded_settings(self, loaded: Dict[str, Any]) -> None:
-        loaded_kiosk = loaded.get("kiosk")
-        if isinstance(loaded_kiosk, dict):
-            for key, value in loaded_kiosk.items():
-                if key not in KIOSK_SETTING_KEYS:
+        loaded_restricted = loaded.get("restricted")
+        if isinstance(loaded_restricted, dict):
+            for key, value in loaded_restricted.items():
+                if key not in RESTRICTED_SETTING_KEYS:
                     continue
-                ok, reason = settings_schema.validate_kiosk(key, value)
+                ok, reason = settings_schema.validate_restricted(key, value)
                 if ok:
-                    self.settings["kiosk"][key] = value
+                    self.settings["restricted"][key] = value
                 else:
-                    self._log.warning(f"Ignoring invalid kiosk setting from file: {reason}")
+                    self._log.warning(f"Ignoring invalid restricted setting from file: {reason}")
 
         for key in TOP_LEVEL_SETTING_KEYS:
             if key in loaded:

@@ -172,26 +172,26 @@ class TestKioskBlockPersists:
 
     def test_a_registered_key_survives_a_restart(self, tmp_path):
         path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"kiosk": {"locked": True, "master_key_hash": "a" * 64}}))
+        path.write_text(json.dumps({"restricted": {"locked": True, "key_hash": "a" * 64}}))
         mgr = SettingsManager(str(path))
-        assert mgr.get_kiosk("locked") is True
-        assert mgr.get_kiosk("master_key_hash") == "a" * 64
+        assert mgr.get_restricted("locked") is True
+        assert mgr.get_restricted("key_hash") == "a" * 64
 
     def test_an_invalid_hash_is_refused(self, tmp_path):
         """A malformed hash that loaded would be a key nothing can match, on a
         device that still believes it can be locked."""
         path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"kiosk": {"master_key_hash": "nonsense"}}))
+        path.write_text(json.dumps({"restricted": {"key_hash": "nonsense"}}))
         mgr = SettingsManager(str(path))
-        assert mgr.get_kiosk("master_key_hash") == ""
+        assert mgr.get_restricted("key_hash") == ""
 
     def test_settings_from_before_kid_mode_read_as_unlocked(self, tmp_path):
         """An upgrade must not lock anybody out of their own device."""
         path = tmp_path / "settings.json"
         path.write_text(json.dumps({"auto_launch": True}))
         mgr = SettingsManager(str(path))
-        assert mgr.get_kiosk("locked") is False
-        assert mgr.get_kiosk("master_key_hash") == ""
+        assert mgr.get_restricted("locked") is False
+        assert mgr.get_restricted("key_hash") == ""
 
 
 class TestSave:

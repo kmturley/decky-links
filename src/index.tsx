@@ -21,7 +21,7 @@ import {
   type SettingKey,
 } from "./shared";
 
-import { KioskPanel, LockedPanel } from "./KioskPanel";
+import { RestrictedPanel, LockedPanel } from "./RestrictedPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
@@ -85,10 +85,10 @@ const Content: FC = () => {
   // something the backend now refuses, so none of them is drawn. The lock is
   // enforced there, not here — this only stops the panel offering buttons that
   // would fail.
-  if (state.kiosk?.locked) {
+  if (state.restricted?.locked) {
     return (
       <PanelSection>
-        <LockedPanel kiosk={state.kiosk} />
+        <LockedPanel restricted={state.restricted} />
       </PanelSection>
     );
   }
@@ -132,7 +132,7 @@ const Content: FC = () => {
         </PanelSectionRow>
       </PanelSection>
 
-      {state.kiosk && <KioskPanel kiosk={state.kiosk} />}
+      {state.restricted && <RestrictedPanel restricted={state.restricted} />}
 
       {/* Keys and sectors are Mifare concepts; a floppy has neither, so this
           follows the NFC medium specifically rather than whatever was last

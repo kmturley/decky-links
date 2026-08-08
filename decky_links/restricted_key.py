@@ -1,7 +1,7 @@
-"""The master key: a medium that locks and unlocks the plugin.
+"""The key: a medium that locks and unlocks the plugin.
 
-A master key is not a new kind of medium. It is an ordinary payload of a
-reserved shape — ``decky-links://master/<token>`` — written by the ordinary
+A key is not a new kind of medium. It is an ordinary payload of a
+reserved shape — ``decky-links://key/<token>`` — written by the ordinary
 pairing path onto whatever the user wants to carry it: a tag, a floppy, a USB
 stick, a printed QR card. Everything downstream of a source already moves a URI
 string around, so the key travels on rails that exist.
@@ -23,12 +23,12 @@ import re
 import secrets
 from typing import Optional
 
-# Reserved scheme. Deliberately not in decky_links.uri's allowlist: a master
+# Reserved scheme. Deliberately not in decky_links.uri's allowlist: a key
 # payload is a control message, never something to launch or navigate to, and
 # the two must not be confusable. The plugin intercepts it before the allowlist
 # is ever consulted, so a copy of this URI reaching any other code path is
 # rejected as an unknown scheme, which is exactly right.
-MASTER_URI_PREFIX = "decky-links://master/"
+KEY_URI_PREFIX = "decky-links://key/"
 
 TOKEN_BYTES = 16
 _TOKEN_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -40,21 +40,21 @@ def mint_token() -> str:
 
 
 def uri_for(token: str) -> str:
-    """The payload written onto a medium to make it a master key."""
-    return f"{MASTER_URI_PREFIX}{token}"
+    """The payload written onto a medium to make it a key."""
+    return f"{KEY_URI_PREFIX}{token}"
 
 
 def parse_token(uri) -> Optional[str]:
-    """The token carried by ``uri``, or None when this is not a master payload.
+    """The token carried by ``uri``, or None when this is not a key payload.
 
     Shape is checked here rather than at the comparison, so a malformed token
-    never reaches the hash: "is this a master key at all" and "is it *the*
-    master key" are different questions and the caller needs to tell a
+    never reaches the hash: "is this a key at all" and "is it *the*
+    key" are different questions and the caller needs to tell a
     stranger's tag apart from a game tag.
     """
-    if not isinstance(uri, str) or not uri.startswith(MASTER_URI_PREFIX):
+    if not isinstance(uri, str) or not uri.startswith(KEY_URI_PREFIX):
         return None
-    token = uri[len(MASTER_URI_PREFIX):].strip().lower()
+    token = uri[len(KEY_URI_PREFIX):].strip().lower()
     return token if _TOKEN_PATTERN.match(token) else None
 
 

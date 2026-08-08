@@ -51,14 +51,14 @@ your own data, and mounting that uninvited is both a surprise and a delay.
   that launched a game may quit it, so ejecting an unrelated disk does nothing.
 - **Portable payloads.** `steam://run/…`, `steam://rungameid/…` (including
   non-Steam shortcuts) and `https://…`, validated against an allowlist backend-side.
-- **Kid mode with a physical key.** Register any medium as a master key and
+- **Restricted mode with a physical key.** Register any medium as a key and
   present it to lock the Deck down — see below.
 
-## Kid Mode
+## Restricted Mode
 
 For handing the Deck to a child or a guest. Register a medium — a tag, a disk, a
-USB stick — as a **master key** from the plugin panel, and presenting it toggles
-kid mode on and off. Nothing is stored about *which* object it is: the key is a
+USB stick — as a **key** from the plugin panel, and presenting it toggles
+restricted mode on and off. Nothing is stored about *which* object it is: the key is a
 random token written onto the medium, exactly like a game pairing, so it works
 on any Deck you register it with and there is no database to keep in step.
 
@@ -84,11 +84,11 @@ Steam Families, applies its controls to *child* accounts, which is the opposite
 of what a shared Deck needs: the games are in the parent's library.
 
 If your account does still have Family View, Decky Links locks it alongside its
-own lock, and the panel shows a Manage row. Store its PIN there and the master
+own lock, and the panel shows a Manage row. Store its PIN there and the key
 key unlocks Family View too; leave it empty and Steam's own prompt is the way
 back in.
 
-Kid mode is a guardrail for a shared living-room device, not a security boundary.
+Restricted mode is a guardrail for a shared living-room device, not a security boundary.
 A restricted game does visibly start before it is closed, and anyone who can read
 the medium can copy it.
 
