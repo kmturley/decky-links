@@ -19,7 +19,6 @@ import {
 } from "./shared";
 import {
   TRIGGER_ROWS,
-  cancelKeyRegistration,
   isRowConnected,
   isRowEnabled,
   mediaStateFor,
@@ -219,24 +218,27 @@ export const TriggersPanel: FC<{
   registeringKey: boolean;
 }> = ({ statuses, media, target, pairing, registeringKey }) => {
   return (
-    <PanelSection title={registeringKey ? "Choose the key" : "Triggers"}>
+    <PanelSection title="Triggers">
       {/* What the rows below are for, once. Putting it on every button instead
           would repeat a name long enough to wrap ("Vampire Survivors: Ode to
           Castlevania") on up to nine rows.
           While registering a key there is no game involved at all, so this says
           what the buttons will do instead — the list changing what it writes is
-          not something to leave the user to infer from the button captions. */}
+          not something to leave the user to infer from the button captions.
+          The section keeps its own name through both: retitling the whole list
+          "Choose the key" moved the one landmark the user navigates by, to say
+          something this row already says. */}
       <PanelSectionRow>
         <Field
           icon={registeringKey ? <FaKey /> : <FaGamepad />}
           label={
             registeringKey
-              ? "Which trigger holds the key?"
+              ? "Register a key"
               : target ? target.label : "No game selected"
           }
           description={
             registeringKey
-              ? "The key is written to the trigger you choose"
+              ? "Choose a trigger below. Its medium then locks and unlocks restricted mode."
               : target ? "Game to be paired" : "Open a game to pair"
           }
           bottomSeparator="thick"
@@ -245,13 +247,10 @@ export const TriggersPanel: FC<{
         />
       </PanelSectionRow>
 
-      {registeringKey && (
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => cancelKeyRegistration()}>
-            Cancel
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
+      {/* No Cancel here: the Restricted Mode section's button becomes one
+          while registering, and that is where the user pressed Register. Two
+          buttons for one action, one of them where the action did not start,
+          is a choice to have to read. */}
 
       {pairing && (
         <PanelSectionRow>

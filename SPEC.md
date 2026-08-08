@@ -396,8 +396,11 @@ its SHA-256. Any medium the plugin can write can be a key.
 Registering one is *targeted at a trigger*, for the same reason pairing a game
 is (§7): with a tag on the reader and a stick in a drive, an untargeted write
 goes to whichever source the backend reads first and the user cannot say which.
-The panel arms the Triggers list into a "choose the key" state, and the row
-pressed is the target — `register_key` takes that `source_id`. A medium that
+The panel arms the Triggers list into a key-registration state — its header
+becomes "Register a key", its rows offer Register, and the Restricted Mode
+button becomes Cancel — and the row pressed is the target: `register_key` takes
+that `source_id`. Cancelling is local, since nothing is armed on the backend
+until a trigger is chosen. A medium that
 already holds a game is confirmed with a second press, since registering over
 it destroys that pairing; the medium that is *already* the registered key
 offers no button at all, since writing a second token over the first changes

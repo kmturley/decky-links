@@ -8,7 +8,7 @@ import {
   PanelSectionRow,
   TextField,
 } from "@decky/ui";
-import { FaKey, FaLock } from "react-icons/fa";
+import { FaKey, FaLock, FaLockOpen } from "react-icons/fa";
 import {
   disableKey,
   notifySubscribers,
@@ -171,18 +171,26 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
 
   return (
     <PanelSection title="Restricted Mode">
-      {/* What the mode does, above the control that arms it.
-          This used to sit *below* the key row, so the button asking to be
-          pressed was explained by text you reached after pressing it. */}
+      {/* Whether the mode is on, and what it does — above the control that
+          arms it. This used to sit *below* the key row, so the button asking
+          to be pressed was explained by text you reached after pressing it.
+
+          The padlock answers a question the key row below cannot: "Key" tells
+          you a key exists, which is not the same as being told the mode is on.
+          It says on/off, never locked/unlocked — this panel only renders while
+          unlocked, so a padlock that flipped shut would never be seen doing
+          it. LockedPanel is the locked face of the feature. */}
       <PanelSectionRow>
         <Field
+          icon={restricted.has_key ? <FaLock /> : <FaLockOpen />}
+          label={restricted.has_key ? "On" : "Off"}
           description={
             restricted.has_key
               // The one sentence that explains the whole feature. There is no
               // lock button, and this is why: the key *is* the switch.
-              ? "Take the key away to lock these controls, and to allow only " +
-                "games started from a tag, disk or code. Steam's own menus stay open."
-              : "Register a key. Taking it away locks these controls, and allows " +
+              ? "Removing the key locks these controls, and allows only games " +
+                "started from a tag, disk or code. Steam's own menus stay open."
+              : "Register a key. Removing it locks these controls, and allows " +
                 "only games started from a tag, disk or code. Steam's own menus stay open."
           }
           focusable={false}
@@ -198,8 +206,11 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
           description={
             registering
               ? "Choose a trigger in the list above"
+              // Just the medium: "USB drive" under a row already labelled
+              // "Key" is the whole fact, and "On the USB drive" spends a line
+              // on grammar.
               : restricted.has_key && restricted.label
-                ? `On the ${restricted.label}`
+                ? restricted.label
                 : undefined
           }
           childrenContainerWidth="min"
