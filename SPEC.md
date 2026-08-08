@@ -389,9 +389,22 @@ Since shipped, and no longer non-goals:
 
 ### 16.1 The key
 
-A key is a medium carrying `decky-links://key/<token>`, where the
-token is 128 random bits, written through the ordinary pairing path. The device
-stores only its SHA-256. Any medium the plugin can write can be a key.
+A key is a medium carrying `decky-links://key/<token>`, where the token is 128
+random bits, written through the ordinary pairing path. The device stores only
+its SHA-256. Any medium the plugin can write can be a key.
+
+Registering one is *targeted at a trigger*, for the same reason pairing a game
+is (§7): with a tag on the reader and a stick in a drive, an untargeted write
+goes to whichever source the backend reads first and the user cannot say which.
+The panel arms the Triggers list into a "choose the key" state, and the row
+pressed is the target — `register_key` takes that `source_id`. A medium that
+already holds a game is confirmed with a second press, since registering over
+it destroys that pairing.
+
+The token is committed only once the write succeeds, and any pending token is
+dropped when a pairing is cancelled or re-armed — otherwise a cancelled
+registration would be committed by whichever pairing succeeded next, registering
+a key whose token is on no medium at all.
 
 The scheme is deliberately outside the §4 allowlist: a control payload is not
 something a tapped card may launch, so a copy reaching any other code path is

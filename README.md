@@ -62,7 +62,7 @@ in a lock:
 
 | | |
 | --- | --- |
-| **Register a key** | Restricted mode is on from now on |
+| **Register a key** | Pick the trigger from the list; restricted mode is on from then on |
 | **Key removed** | Locked |
 | **Key present** | Unlocked |
 | **Disable Key** | Restricted mode off, and the key is wiped from its medium |

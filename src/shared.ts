@@ -169,6 +169,10 @@ export interface SharedState {
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
   pairing: boolean;
+  /** The user has asked to register a key and is choosing which trigger to
+   *  write it to. Local to the panel: nothing is armed on the backend until a
+   *  trigger is picked, which is why cancelling it needs no RPC. */
+  registeringKey: boolean;
   sourceStatuses: SourceStatus[];
   /** Restricted mode. Null until the first fetch completes, so the panel can avoid
    *  flashing the unlocked view at someone who locked the device. */
@@ -190,6 +194,7 @@ export const sharedState: SharedState = {
   activeAppId: null,
   viewedApp: null,
   pairing: false,
+  registeringKey: false,
   sourceStatuses: [],
   restricted: null,
 };

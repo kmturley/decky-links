@@ -577,6 +577,62 @@ class TestRegistration:
         assert paired["uri"] == "steam://rungameid/400"
 
     @pytest.mark.asyncio
+    async def test_a_cancelled_registration_cannot_be_committed_later(self, plugin):
+        """The worst failure this feature has: a token left pending after a
+        cancel was committed by whichever pairing succeeded next, registering
+        a key whose token is on no medium at all — a locked device with a key
+        that cannot exist."""
+        source = _writable_nfc_source(plugin)
+        await plugin.register_key("nfc:/dev/ttyUSB0")
+        await plugin.cancel_pairing()
+
+        await plugin.start_pairing("steam://rungameid/400", "nfc:/dev/ttyUSB0")
+        await plugin._handle_media_load(_load_event(""))
+
+        source.write_uri.assert_awaited_once_with(
+            "04AABBCC", "steam://rungameid/400", ""
+        )
+        assert plugin.key_registered is False
+
+    @pytest.mark.asyncio
+    async def test_arming_a_game_pairing_drops_a_pending_key(self, plugin):
+        """Same failure by the other route: the user starts a registration,
+        changes their mind and pairs a game instead without cancelling."""
+        _writable_nfc_source(plugin)
+        await plugin.register_key("nfc:/dev/ttyUSB0")
+
+        await plugin.start_pairing("steam://rungameid/400", "nfc:/dev/ttyUSB0")
+        await plugin._handle_media_load(_load_event(""))
+
+        assert plugin.key_registered is False
+
+    @pytest.mark.asyncio
+    async def test_the_key_goes_to_the_trigger_it_was_asked_for(self, plugin):
+        """The panel targets the row the user pressed. Untargeted, the key went
+        to whichever source the backend read first — with a tag on the reader
+        and a stick in a drive, there was no way to say which."""
+        from sources.base import SourceType
+        chosen = MagicMock()
+        chosen.source_id = "storage:udev"
+        chosen.source_type = SourceType.STORAGE
+        chosen.can_write.return_value = True
+        chosen.write_uri = AsyncMock(return_value=(True, None))
+        plugin.source_manager.replace(chosen)
+        other = _writable_nfc_source(plugin)
+
+        await plugin.register_key("storage:udev")
+        await plugin._handle_media_load(
+            _load_event("", source_id="storage:udev", media_id="/dev/sda1")
+        )
+
+        chosen.write_uri.assert_awaited_once()
+        other.write_uri.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_trigger_that_cannot_be_written_is_refused(self, plugin):
+        assert await plugin.register_key("camera:/dev/video0") is False
+
+    @pytest.mark.asyncio
     async def test_registering_switches_restricted_mode_on(self, plugin):
         """The key is the switch. There is no separate "enable" step to forget
         — and none to be in a different state from the key."""

@@ -111,6 +111,7 @@ const Content: FC = () => {
         media={state.activeMedia}
         target={pairTarget}
         pairing={state.pairing}
+        registeringKey={state.registeringKey}
       />
 
       <PanelSection title="Settings">

@@ -1296,6 +1296,12 @@ class Plugin:
             f"UI requested pairing for URI: {uri}"
             + (f" on {source_id}" if source_id else " on any trigger")
         )
+        # Every arm starts clean. A key token left over from a registration that
+        # was cancelled or superseded would be committed by whichever pairing
+        # succeeded next — registering a key whose token is on no medium at all,
+        # which locks the device with a key that cannot exist. register_key sets
+        # it immediately after this returns.
+        self._pending_key_token = None
         self.is_pairing  = True
         self.pairing_uri = uri
         self.pairing_source_id = source_id
@@ -1315,6 +1321,9 @@ class Plugin:
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        # Including the pending key token, or a cancelled registration would be
+        # committed by the *next* pairing to succeed — see _arm_pairing.
+        self._pending_key_token = None
         return True
 
     async def get_reader_status(self):

@@ -12,7 +12,6 @@ import { FaKey, FaLock } from "react-icons/fa";
 import {
   disableKey,
   notifySubscribers,
-  registerKey,
   setFamilyViewPin,
   sharedState,
   toaster,
@@ -146,22 +145,21 @@ const PinRow: FC<{ hasPin: boolean }> = ({ hasPin }) => {
  * this panel disappearing is a courtesy rather than the enforcement.
  */
 export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricted }) => {
-  const [registering, setRegistering] = useState(false);
+  // Read straight from the shared state rather than subscribing: the panel's
+  // Content already re-renders this whole tree on notifySubscribers, so a
+  // second subscription here would only mean two renders for one change.
+  const registering = sharedState.registeringKey;
 
-  const register = async () => {
-    // Untargeted: the user chooses which trigger by presenting a medium on it,
-    // which is also how the game-page link button arms pairing.
-    const ok = await registerKey();
-    if (!ok) {
-      toaster.toast({
-        title: "Could not start",
-        body: "No trigger is able to write a key.",
-        critical: true,
-      });
-      return;
-    }
-    setRegistering(true);
-    sharedState.pairing = true;
+  // Hands over to the Triggers list rather than arming anything here.
+  //
+  // This used to call registerKey() with no trigger, which meant the key went
+  // to whichever source the backend read first — with a tag on the reader and
+  // a stick in a drive, the user had no way to say which. pairRow solved that
+  // for games by making the row the target, and this is the same fix: the list
+  // above enters a "choose the key" state, and the row you press is the one
+  // that gets written.
+  const register = () => {
+    sharedState.registeringKey = true;
     notifySubscribers();
   };
 
@@ -188,7 +186,7 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
           label={restricted.has_key ? `Key: ${restricted.label}` : "Off"}
           description={
             registering
-              ? "Present the medium to use as the key…"
+              ? "Choose a trigger in the list above"
               : restricted.has_key
                 // The one sentence that explains the whole feature. There is
                 // no lock button, and this is why: the key *is* the switch.
@@ -199,7 +197,7 @@ export const RestrictedPanel: FC<{ restricted: RestrictedState }> = ({ restricte
           bottomSeparator="standard"
         >
           <DialogButton
-            onClick={() => void register()}
+            onClick={register}
             style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
           >
             {restricted.has_key ? "Replace" : "Register"}

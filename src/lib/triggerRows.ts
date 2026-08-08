@@ -3,6 +3,7 @@ import {
   sharedState,
   notifySubscribers,
   toaster,
+  registerKey,
   startPairing,
   setSourceSetting,
   formatMedia,
@@ -241,6 +242,56 @@ export async function formatRow(medium: ActiveMedium): Promise<boolean> {
   return true;
 }
 
+/** What one trigger offers while a key is being registered.
+ *
+ * A separate reducer from `mediaStateFor` rather than another flag on it: the
+ * questions are different ones. Pairing asks "is there a game to write, and
+ * does this medium already hold it"; registering a key asks only "can this
+ * trigger be written to, and what would I be overwriting". Folding both into
+ * one function meant four arguments that each only mattered half the time.
+ *
+ * `writable` comes from the backend's `can_pair`, not from anything the panel
+ * knows: a camera reads codes it cannot write, and MQTT has no medium at all.
+ */
+export function keyStateFor(
+  row: TriggerRow,
+  connected: boolean,
+  writable: boolean,
+  medium: ActiveMedium | undefined,
+): MediaState {
+  if (!writable) return { text: "Cannot hold a key", action: null, dim: true };
+  if (!connected) return { text: "Not connected", action: null, dim: true };
+
+  if (medium?.problem === "loading") {
+    return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
+  }
+
+  // Offered with no medium too. The backend arms the source and waits, so
+  // "Register" on the Floppy row and then insert a disk is a legitimate order
+  // to do this in — and refusing until something is present would make the row
+  // look broken for the trigger you are holding the disk for.
+  if (!medium) {
+    return { text: `No ${row.noun} — insert one`, action: "Register", dim: false };
+  }
+
+  if (medium.key && medium.authorized) {
+    return { text: "Already the key", action: "Register", dim: false };
+  }
+
+  // Overwriting a game destroys that pairing, so the row says whose it is and
+  // asks first — the same two-press confirm Format uses, for the same reason.
+  if (medium.uri) {
+    return {
+      text: launchTargetName(medium.uri),
+      action: "Register",
+      dim: false,
+      destructive: true,
+    };
+  }
+
+  return { text: `Empty ${row.noun}`, action: "Register", dim: false };
+}
+
 /** Arm pairing for one trigger.
  *
  * Targeted: with a tag on the reader and a disk in the drive, an untargeted
@@ -266,4 +317,42 @@ export async function pairRow(
   sharedState.pairing = true;
   notifySubscribers();
   return true;
+}
+
+/** Arm key registration on one trigger.
+ *
+ * The counterpart to `pairRow`, and targeted for the same reason it is: with a
+ * tag on the reader and a stick in a drive, an untargeted register wrote the
+ * key to whichever the backend happened to read first, which is exactly the
+ * ambiguity `pairRow`'s comment above was written about.
+ */
+export async function registerKeyOn(
+  row: TriggerRow,
+  sourceId?: string,
+): Promise<boolean> {
+  const id = sourceId ?? mediumFor(row, sharedState.activeMedia)?.source_id;
+  const ok = await registerKey(id);
+  if (!ok) {
+    toaster.toast({
+      title: "Could not register",
+      body: `${row.label} cannot be written to.`,
+      critical: true,
+    });
+    return false;
+  }
+  sharedState.registeringKey = false;
+  sharedState.pairing = true;
+  notifySubscribers();
+  return true;
+}
+
+/** Leave key-registration mode without writing anything.
+ *
+ * Only the choosing half is local — nothing has been armed on the backend yet,
+ * which is why this needs no RPC. Once a trigger has been chosen the flow is an
+ * ordinary armed pairing and `cancelPairing` is what stops it.
+ */
+export function cancelKeyRegistration(): void {
+  sharedState.registeringKey = false;
+  notifySubscribers();
 }
