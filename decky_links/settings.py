@@ -245,17 +245,36 @@ class SettingsManager:
                         f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
                     )
 
+        # Every source, not just NFC.
+        #
+        # This used to read `loaded["sources"]["nfc"]` and nothing else, so
+        # every other source's settings were discarded on load and silently
+        # reverted to the shipped defaults on the next restart: switching USB
+        # storage on, the MQTT broker and its secret, the serial port, the
+        # watched directory. Each was written to disk correctly and then
+        # ignored when read back, which is the worst shape a settings bug can
+        # take — the panel showed the change, and only a restart undid it.
+        #
+        # `nfc` had a hand-written branch because it was the only source when
+        # this was written; the schema now describes them all, so the merge is
+        # a loop over it rather than a branch per source that will drift again.
         loaded_sources = loaded.get("sources")
         if isinstance(loaded_sources, dict):
-            loaded_nfc = loaded_sources.get("nfc", {})
-            if isinstance(loaded_nfc, dict):
-                for key, value in loaded_nfc.items():
-                    if key in NFC_SETTING_KEYS and self._validate_setting(key, value):
-                        self.settings["sources"]["nfc"][key] = value
-                    elif key in NFC_SETTING_KEYS:
-                        self._log.warning(
-                            f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+            for source_type, values in loaded_sources.items():
+                if source_type not in settings_schema.SOURCE_TYPES:
+                    self._log.warning(f"Ignoring unknown source in settings: {source_type!r}")
+                    continue
+                if not isinstance(values, dict):
+                    continue
+                target = self.settings["sources"].setdefault(source_type, {})
+                for key, value in values.items():
+                    ok, reason = settings_schema.validate(key, value, source_type=source_type)
+                    if ok:
+                        target[key] = settings_schema.coerce(
+                            key, value, source_type=source_type
                         )
+                    else:
+                        self._log.warning(f"Ignoring invalid setting from file: {reason}")
 
         for key in NFC_SETTING_KEYS:
             if key in loaded:

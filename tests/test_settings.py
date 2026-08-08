@@ -110,6 +110,90 @@ class TestLoadMerge:
         assert mgr.settings["auto_launch"] is False
 
 
+class TestEverySourceIsLoaded:
+    """Found on a Deck: switching USB storage on, restarting, and finding it
+    off again.
+
+    The merge read `sources.nfc` and nothing else, so every other source's
+    settings were written to disk correctly and then dropped when read back.
+    The panel showed the change and only a restart undid it, which is why it
+    survived: nothing in the session that made the change could see it.
+    """
+
+    def _reloaded(self, tmp_path, sources):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"sources": sources}))
+        return SettingsManager(str(path)).settings["sources"]
+
+    def test_storage_drive_kinds_survive_a_restart(self, tmp_path):
+        kinds = {"floppy": True, "optical": False, "usb": True, "flash": False}
+        loaded = self._reloaded(tmp_path, {"storage": {"drive_kinds": kinds}})
+        assert loaded["storage"]["drive_kinds"]["usb"] is True
+
+    def test_a_source_being_switched_on_survives(self, tmp_path):
+        loaded = self._reloaded(tmp_path, {"serial": {"enabled": True}})
+        assert loaded["serial"]["enabled"] is True
+
+    def test_the_mqtt_secret_survives(self, tmp_path):
+        """Minted once when MQTT is enabled. Lost on restart, every publisher
+        it was given to stops being able to launch anything."""
+        loaded = self._reloaded(tmp_path, {"mqtt": {"secret": "s3cret", "broker_port": 8883}})
+        assert loaded["mqtt"]["secret"] == "s3cret"
+        assert loaded["mqtt"]["broker_port"] == 8883
+
+    def test_the_watched_directory_survives(self, tmp_path):
+        loaded = self._reloaded(tmp_path, {"file_watch": {"watch_dir": "/home/deck/tags"}})
+        assert loaded["file_watch"]["watch_dir"] == "/home/deck/tags"
+
+    def test_nfc_still_loads(self, tmp_path):
+        """The case that always worked, kept so the loop cannot regress it."""
+        loaded = self._reloaded(tmp_path, {"nfc": {"baudrate": 9600}})
+        assert loaded["nfc"]["baudrate"] == 9600
+
+    def test_an_invalid_value_is_still_refused(self, tmp_path):
+        """Loading more sources must not mean loading them unchecked — this is
+        the same table set_source_setting is held to."""
+        loaded = self._reloaded(tmp_path, {"mqtt": {"broker_port": 70000}})
+        assert loaded["mqtt"]["broker_port"] == 1883
+
+    def test_an_unknown_source_is_ignored(self, tmp_path):
+        loaded = self._reloaded(tmp_path, {"telepathy": {"enabled": True}})
+        assert "telepathy" not in loaded
+
+    def test_an_int_is_coerced_like_the_rpc_does(self, tmp_path):
+        """Otherwise a JSON 2 and a JSON 2.0 behave differently downstream
+        depending on whether the value came from the panel or from disk."""
+        loaded = self._reloaded(tmp_path, {"file_watch": {"poll_interval": 3}})
+        assert loaded["file_watch"]["poll_interval"] == 3.0
+        assert isinstance(loaded["file_watch"]["poll_interval"], float)
+
+
+class TestKioskBlockPersists:
+
+    def test_a_registered_key_survives_a_restart(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"kiosk": {"locked": True, "master_key_hash": "a" * 64}}))
+        mgr = SettingsManager(str(path))
+        assert mgr.get_kiosk("locked") is True
+        assert mgr.get_kiosk("master_key_hash") == "a" * 64
+
+    def test_an_invalid_hash_is_refused(self, tmp_path):
+        """A malformed hash that loaded would be a key nothing can match, on a
+        device that still believes it can be locked."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"kiosk": {"master_key_hash": "nonsense"}}))
+        mgr = SettingsManager(str(path))
+        assert mgr.get_kiosk("master_key_hash") == ""
+
+    def test_settings_from_before_kid_mode_read_as_unlocked(self, tmp_path):
+        """An upgrade must not lock anybody out of their own device."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"auto_launch": True}))
+        mgr = SettingsManager(str(path))
+        assert mgr.get_kiosk("locked") is False
+        assert mgr.get_kiosk("master_key_hash") == ""
+
+
 class TestSave:
 
     def test_save_reports_success(self, tmp_path):
