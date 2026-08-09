@@ -25,7 +25,7 @@ import { RestrictedPanel, LockedPanel } from "./RestrictedPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
-import { SplashLayer } from "./SplashLayer";
+import { VisualsLayer } from "./VisualsLayer";
 import { resolveRungameidTarget } from "./lib/steamIds";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -134,10 +134,10 @@ const Content: FC = () => {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Launch Splash"
-            description="Full-screen animation while a game loads"
-            checked={!!state.settings.splash}
-            onChange={(v: boolean) => triggerUpdateSetting("splash", v)}
+            label="Custom Visuals"
+            description="Show your own home and loading screens instead of the Steam interface"
+            checked={!!state.settings.custom_visuals}
+            onChange={(v: boolean) => triggerUpdateSetting("custom_visuals", v)}
           />
         </PanelSectionRow>
       </PanelSection>
@@ -158,11 +158,11 @@ export default definePlugin(() => {
   const embeddedPatch = patchLibraryApp();
   const stopBackground = startBackgroundManager();
 
-  // Mounted once, for the life of the plugin, and rendering null nearly all of
-  // it. A global component rather than something inside the panel: the panel
-  // only exists while the Quick Access menu is open, and the whole point of
-  // the splash is to be on screen when it is not.
-  routerHook.addGlobalComponent("DeckyLinksSplash", SplashLayer);
+  // Mounted once, for the life of the plugin. A global component rather than
+  // anything inside the panel: the panel exists only while the Quick Access
+  // menu is open, and this layer's whole job is to be on screen when it is
+  // not. It renders nothing until the feature is switched on.
+  routerHook.addGlobalComponent("DeckyLinksVisuals", VisualsLayer);
 
   return {
     name: "Decky Links",
@@ -172,7 +172,7 @@ export default definePlugin(() => {
     icon: <FaLink />,
     onDismount() {
       stopBackground();
-      routerHook.removeGlobalComponent("DeckyLinksSplash");
+      routerHook.removeGlobalComponent("DeckyLinksVisuals");
       routerHook.removePatch('/library/app/:appid', embeddedPatch);
     },
   };

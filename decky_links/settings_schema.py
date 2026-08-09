@@ -79,11 +79,10 @@ def _is_safe_watch_dir(value: str) -> bool:
 TOP_LEVEL_RULES: Dict[str, Rule] = {
     "auto_launch": Rule((bool,), describe="true or false"),
     "auto_close": Rule((bool,), describe="true or false"),
-    # Off by default. It paints over the whole screen for a second or two on
-    # every launch, which is a bigger change to someone's Deck than a plugin
-    # should make uninvited — the same reason the storage triggers that read
-    # your own drives start off.
-    "splash": Rule((bool,), describe="true or false"),
+    # Off by default. It replaces Steam's Home and game pages outright for as
+    # long as it is on, which is a far bigger change to someone's Deck than a
+    # plugin should make uninvited.
+    "custom_visuals": Rule((bool,), describe="true or false"),
 }
 
 # ── Per-source settings ────────────────────────────────────────────────────

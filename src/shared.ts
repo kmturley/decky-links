@@ -8,10 +8,10 @@ import { useState, useEffect } from "react";
 export interface Settings {
     auto_launch: boolean;
     auto_close: boolean;
-    /** The launch splash (issue #8). Off by default: it paints over the whole
-     *  screen, which is a bigger change to someone's Deck than a plugin should
-     *  make uninvited. */
-    splash?: boolean;
+    /** Custom home and loading screens (issue #8), which replace Steam's own
+     *  interface while on. Off by default: a plugin should not take over the
+     *  whole device uninvited. */
+    custom_visuals?: boolean;
     /** Which theme paints it. Unknown ids fall back rather than fail. */
     theme?: string;
     sources: {
@@ -184,7 +184,7 @@ export interface SharedState {
 
 export type SettingKey =
   | "auto_launch"
-  | "splash"
+  | "custom_visuals"
   | "auto_close"
   | "device_path"
   | "baudrate"

@@ -23,6 +23,8 @@ import { playSound, preloadSounds } from "./lib/sounds";
 import { scenes } from "./lib/presentation";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
+/** How long a launch may take before the plugin stops believing in it. */
+const LAUNCH_ABANDONED_MS = 45_000;
 const STEAM_RUN_PREFIX = "steam://run/";
 const STEAM_RUNGAMEID_PREFIX = "steam://rungameid/";
 let cachedSteamUriLauncher: ((uri: string) => void) | null = null;
@@ -247,8 +249,22 @@ export function startBackgroundManager(): () => void {
       locked: !!restrictedRef.current?.locked,
     });
   };
+  let abandonTimer: number | undefined;
   const setLaunching = (value: boolean) => {
     launching = value;
+    window.clearTimeout(abandonTimer);
+    if (value) {
+      // A launch that never completes would otherwise leave the scene at
+      // LAUNCHING for good: Steam never paints, so nothing composites the
+      // layer away, and the Deck sits on a loading screen for a game that is
+      // not coming. Generous, because a cold shader cache on a big game is
+      // genuinely slow, but finite. Cleared here rather than in the layer so
+      // the *scene* stops being a lie, and every renderer benefits.
+      abandonTimer = window.setTimeout(() => {
+        console.warn("[ Decky Links ] Launch abandoned — no game appeared");
+        setLaunching(false);
+      }, LAUNCH_ABANDONED_MS);
+    }
     restate();
   };
 
@@ -718,6 +734,7 @@ export function startBackgroundManager(): () => void {
   stopBackgroundManagerFn = () => {
     active = false;
     clearInterval(sceneTicker);
+    clearTimeout(abandonTimer);
     gameActionEnd?.unregister?.();
     removeEventListener("play_sound", soundListener);
     removeEventListener("media_loading", loadingListener);

@@ -16,6 +16,9 @@ export interface SceneVisual {
    *  autoplay-with-sound is allowed here and a theme that did not expect it
    *  would double up with the event sound. */
   sound?: boolean;
+  /** Loop the video. Held scenes — home, ambient — want this; a loading
+   *  animation that loops would outlast what it is reporting. */
+  loop?: boolean;
   label?: string;
   style?: CSSProperties;
   background: string;
@@ -46,11 +49,32 @@ const centred: CSSProperties = {
  *  megabytes of animation would make every install pay for a feature that is
  *  off by default, and the point of the first theme is to prove the layer, not
  *  to be the one anybody keeps.
+ *
+ *  READY is the important one, and the reason the feature exists: it is what a
+ *  Deck shows while it waits, in place of Steam's Home. Everything else here
+ *  is a transition away from it and back.
  */
 export const DEFAULT_THEME: Theme = {
   id: "default",
   name: "Default",
   scenes: {
+    [Scene.READY]: {
+      scene: Scene.READY,
+      label: "Present a tag or disk",
+      background: "radial-gradient(circle at 50% 40%, #101c2c 0%, #05070c 75%)",
+      style: { ...centred, color: "#9ec8ea", fontSize: "1.9em" },
+      // Immediate, because any delay here is a window in which Steam's Home
+      // shows through — which is the one thing this feature exists to prevent.
+      immediate: true,
+    },
+    [Scene.AMBIENT]: {
+      scene: Scene.AMBIENT,
+      label: "Decky Links",
+      background: "radial-gradient(circle at 50% 45%, #0b1420 0%, #04060a 80%)",
+      style: { ...centred, color: "#4f6a85", fontSize: "1.5em" },
+      immediate: true,
+      fadeMs: 900,
+    },
     [Scene.LAUNCHING]: {
       scene: Scene.LAUNCHING,
       label: "Loading",

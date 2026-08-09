@@ -317,22 +317,23 @@ class TestLoggerInjection:
         assert log.warning.called
 
 
-class TestSplashSetting:
-    """The launch splash (issue #8), which paints over the whole screen."""
+class TestCustomVisualsSetting:
+    """Custom home and loading screens (issue #8), which replace Steam's own
+    interface for as long as they are on."""
 
     def test_off_by_default(self, tmp_path):
-        """It covers the display for a second or two on every launch, which is
-        a bigger change to someone's Deck than a plugin should make uninvited
-        — the same reason the storage triggers that read your own drives ship
-        switched off."""
-        assert _mgr(tmp_path).settings["splash"] is False
+        """It hides Steam's Home and game pages outright, which is a far
+        bigger change to someone's Deck than a plugin should make uninvited."""
+        assert _mgr(tmp_path).settings["custom_visuals"] is False
 
     def test_it_survives_a_restart(self, tmp_path):
         path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"splash": True}))
-        assert SettingsManager(str(path)).settings["splash"] is True
+        path.write_text(json.dumps({"custom_visuals": True}))
+        assert SettingsManager(str(path)).settings["custom_visuals"] is True
 
     def test_a_non_boolean_is_refused(self, tmp_path):
+        """A takeover of the whole screen must not be switchable on by a
+        malformed value in a file."""
         path = tmp_path / "settings.json"
-        path.write_text(json.dumps({"splash": "yes"}))
-        assert SettingsManager(str(path)).settings["splash"] is False
+        path.write_text(json.dumps({"custom_visuals": "yes"}))
+        assert SettingsManager(str(path)).settings["custom_visuals"] is False
