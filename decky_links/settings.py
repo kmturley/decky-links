@@ -17,7 +17,17 @@ import sys
 from typing import Any, Dict, Optional
 
 from decky_links import settings_schema
-from decky_links.settings_schema import NFC_SETTING_KEYS, TOP_LEVEL_SETTING_KEYS
+from decky_links.settings_schema import (
+    RESTRICTED_SETTING_KEYS,
+    NFC_SETTING_KEYS,
+    TOP_LEVEL_SETTING_KEYS,
+)
+
+# What ``get_restricted`` falls back to for a key an older settings.json never had.
+_RESTRICTED_DEFAULTS = {
+    "key_hash": "",
+    "key_label": "",
+}
 
 
 class _NullLogger:
@@ -35,6 +45,17 @@ class SettingsManager:
         self.settings = {
             "auto_launch": True,
             "auto_close": False,
+            # Restricted mode. Its own block rather than four more top-level keys,
+            # because top-level keys are what the generic set_setting RPC is
+            # allowed to write, and the lock must not be one of those.
+            "restricted": {
+                # SHA-256 of the token carried by the key medium, and the one
+                # thing that switches restricted mode on. Empty means no key,
+                # which means the feature is off. Whether the plugin is
+                # *locked* is not stored: it is whether that key is present.
+                "key_hash": "",
+                "key_label": "",
+            },
             "sources": {
                 "nfc": {
                     "enabled": True,
@@ -106,8 +127,25 @@ class SettingsManager:
                     if not isinstance(loaded, dict):
                         raise ValueError("Settings file must contain a JSON object.")
                     self._merge_loaded_settings(loaded)
+                    self._forget_family_view_pin(loaded)
         except Exception as e:
             self._log.error(f"Failed to load settings: {e}")
+
+    def _forget_family_view_pin(self, loaded: Dict[str, Any]) -> None:
+        """Erase a Family View PIN left by a version that stored one.
+
+        Dropping the key from the schema already stops it being read, but a
+        secret nobody reads is still a secret on disk — and this one is the PIN
+        protecting the account on the device the file sits on. It would survive
+        until something else happened to save, which for a user who never
+        changes a setting is never.
+        """
+        if not isinstance(loaded.get("restricted"), dict):
+            return
+        if "family_view_pin" not in loaded["restricted"]:
+            return
+        self._log.info("Discarding stored Family View PIN — no longer used")
+        self.save()
 
     def save(self) -> bool:
         """Persist the settings. Returns whether they actually reached disk.
@@ -164,12 +202,50 @@ class SettingsManager:
         ok, _reason = settings_schema.validate(key, value)
         return ok
 
+    def get_restricted(self, key: Optional[str] = None):
+        """The restricted block, or one value from it.
+
+        Defaults to the shipped value rather than None when a key is missing,
+        so a settings.json written by an older version — which has no restricted
+        block at all — reads as "unlocked, no key" rather than as None, which
+        would make ``locked`` falsy by accident rather than by decision.
+        """
+        block = self.settings.setdefault("restricted", {})
+        if key is None:
+            return block
+        return block.get(key, _RESTRICTED_DEFAULTS.get(key))
+
+    def set_restricted(self, key: str, value: Any) -> bool:
+        """Store one restricted setting and persist. Returns whether it was written.
+
+        Validated here as well as at the RPC: this is the only writer, and a
+        caller that skipped the check would put a value on disk that
+        ``load()`` then refuses, silently reverting the change on restart.
+        """
+        ok, _reason = settings_schema.validate_restricted(key, value)
+        if not ok:
+            self._log.warning(f"Refusing invalid restricted setting: {key!r}={value!r}")
+            return False
+        self.settings.setdefault("restricted", {})[key] = value
+        return self.save()
+
     def get_source_settings(self, source_type: str) -> Dict[str, Any]:
         sources = self.settings.setdefault("sources", {})
         source_settings = sources.setdefault(source_type, {})
         return source_settings
 
     def _merge_loaded_settings(self, loaded: Dict[str, Any]) -> None:
+        loaded_restricted = loaded.get("restricted")
+        if isinstance(loaded_restricted, dict):
+            for key, value in loaded_restricted.items():
+                if key not in RESTRICTED_SETTING_KEYS:
+                    continue
+                ok, reason = settings_schema.validate_restricted(key, value)
+                if ok:
+                    self.settings["restricted"][key] = value
+                else:
+                    self._log.warning(f"Ignoring invalid restricted setting from file: {reason}")
+
         for key in TOP_LEVEL_SETTING_KEYS:
             if key in loaded:
                 value = loaded[key]
@@ -180,17 +256,36 @@ class SettingsManager:
                         f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
                     )
 
+        # Every source, not just NFC.
+        #
+        # This used to read `loaded["sources"]["nfc"]` and nothing else, so
+        # every other source's settings were discarded on load and silently
+        # reverted to the shipped defaults on the next restart: switching USB
+        # storage on, the MQTT broker and its secret, the serial port, the
+        # watched directory. Each was written to disk correctly and then
+        # ignored when read back, which is the worst shape a settings bug can
+        # take — the panel showed the change, and only a restart undid it.
+        #
+        # `nfc` had a hand-written branch because it was the only source when
+        # this was written; the schema now describes them all, so the merge is
+        # a loop over it rather than a branch per source that will drift again.
         loaded_sources = loaded.get("sources")
         if isinstance(loaded_sources, dict):
-            loaded_nfc = loaded_sources.get("nfc", {})
-            if isinstance(loaded_nfc, dict):
-                for key, value in loaded_nfc.items():
-                    if key in NFC_SETTING_KEYS and self._validate_setting(key, value):
-                        self.settings["sources"]["nfc"][key] = value
-                    elif key in NFC_SETTING_KEYS:
-                        self._log.warning(
-                            f"Ignoring invalid setting from file: key={key!r}, value={value!r}"
+            for source_type, values in loaded_sources.items():
+                if source_type not in settings_schema.SOURCE_TYPES:
+                    self._log.warning(f"Ignoring unknown source in settings: {source_type!r}")
+                    continue
+                if not isinstance(values, dict):
+                    continue
+                target = self.settings["sources"].setdefault(source_type, {})
+                for key, value in values.items():
+                    ok, reason = settings_schema.validate(key, value, source_type=source_type)
+                    if ok:
+                        target[key] = settings_schema.coerce(
+                            key, value, source_type=source_type
                         )
+                    else:
+                        self._log.warning(f"Ignoring invalid setting from file: {reason}")
 
         for key in NFC_SETTING_KEYS:
             if key in loaded:

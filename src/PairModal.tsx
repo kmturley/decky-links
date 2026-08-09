@@ -50,7 +50,12 @@ const TriggerLine: FC<{
   // the modal is where you tap a tag you have not presented yet, so waiting
   // for a medium is the normal flow rather than an error. Generated triggers
   // are the exception — there is nothing to write to a camera.
-  const canPair = connected && !armed && !state.busy && !row.generated;
+  //
+  // And the key: writing a game over it would destroy the only thing that can
+  // unlock the device, so the backend refuses it. Offering the button anyway
+  // made a press that could only ever fail.
+  const holdsKey = !!(medium?.key && medium.authorized !== false);
+  const canPair = connected && !armed && !state.busy && !row.generated && !holdsKey;
 
   return (
     <div style={{
@@ -62,7 +67,7 @@ const TriggerLine: FC<{
       opacity: connected ? 1 : 0.45,
     }}>
       <span style={{ fontSize: "1.2em", width: "1.4em", textAlign: "center" }}>
-        {state.busy ? <Spinner style={{ width: "1em", height: "1em" }} /> : row.icon}
+        {state.busy ? <Spinner style={{ width: "1em", height: "1em" }} /> : state.icon ?? row.icon}
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: "0.9em" }}>{row.label}</div>

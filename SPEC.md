@@ -339,11 +339,16 @@ The detection method must:
 
 Audio feedback should be provided for:
 
-* Card detected
-* Pairing success
+* Card detected — `scan.flac`
+* Pairing success — `success.flac`, failure `error.flac`
+* Restricted mode locking and unlocking — `lock.flac` / `unlock.flac` (§16.2.2)
 * Optional: Launch initiated
 
 Audio must be lightweight and non-intrusive.
+
+`_play_sound` takes a filename from a fixed allowlist, never a path, and a
+missing file is a logged no-op rather than an error — so a name added here
+without its audio is a silent event, not a crash.
 
 ---
 
@@ -371,7 +376,6 @@ If NDEF URI parsing fails:
 
 * Desktop Mode support
 * Cross-platform support
-* Parental restrictions
 * Custom UI overlays for quitting
 * Tag locking
 
@@ -379,6 +383,165 @@ Since shipped, and no longer non-goals:
 
 * **Multiple simultaneous media** — one per source, tracked independently.
 * **Metadata storage** — storage payloads carry optional `title` and `icon`.
+* **Parental restrictions** — see §16. Listed here as a non-goal in v1 on the
+  grounds that a launcher should not also be a parental control. What shipped
+  is narrower than that: a physical key, and one rule about which games may
+  run. It is not integrated with Steam's parental controls and does not try to
+  be one — see §16.4.
+
+---
+
+## 16. Restricted Mode
+
+### 16.1 The key
+
+A key is a medium carrying `decky-links://key/<token>`, where the token is 128
+random bits, written through the ordinary pairing path. The device stores only
+its SHA-256. Any medium the plugin can write can be a key.
+
+Registering one is *targeted at a trigger*, for the same reason pairing a game
+is (§7): with a tag on the reader and a stick in a drive, an untargeted write
+goes to whichever source the backend reads first and the user cannot say which.
+The panel arms the Triggers list into a key-registration state — its header
+becomes "Register a key", its rows offer Register, and the Restricted Mode
+button becomes Cancel — and the row pressed is the target: `register_key` takes
+that `source_id`. Cancelling is local, since nothing is armed on the backend
+until a trigger is chosen. A medium that
+already holds a game is confirmed with a second press, since registering over
+it destroys that pairing; the medium that is *already* the registered key
+offers no button at all, since writing a second token over the first changes
+nothing. A key wears a key glyph in the list rather than its medium's, because
+it is otherwise indistinguishable from an ordinary disk or tag.
+
+The token is committed only once the write succeeds, and any pending token is
+dropped when a pairing is cancelled or re-armed — otherwise a cancelled
+registration would be committed by whichever pairing succeeded next, registering
+a key whose token is on no medium at all.
+
+The scheme is deliberately outside the §4 allowlist: a control payload is not
+something a tapped card may launch, so a copy reaching any other code path is
+rejected as an unknown scheme. It is recognised before the allowlist is
+consulted, and its token never reaches the frontend, the media registry, or any
+emitted event.
+
+### 16.2 States
+
+Two facts, and only one of them is stored:
+
+* **Restricted mode is on** when a key is registered (`restricted.key_hash` is
+  non-empty). Registering a key switches it on; "Deregister" switches it off.
+  Those are the only two moves, and they are one button: a "replace" that keeps
+  restricted mode on across the swap is deregistering and registering again,
+  with an intermediate state neither the user nor the backend has a use for.
+* **The plugin is locked** when restricted mode is on and the key is *not*
+  presented on any source. This is derived from the media registry on every
+  read and never persisted.
+
+Deriving the lock is the design. A stored `locked` flag is a second answer to a
+question the registry already answers, and the two disagree the moment anything
+changes while the plugin is not running — which is exactly how a user ends up
+with a key that says one thing and a panel that says another. A Deck that boots
+with the key out is locked because the key is out.
+
+There is therefore no RPC that locks or unlocks, and no lock control in the
+panel.
+
+Presenting a key payload that is *not* the registered one changes nothing and is
+reported to the user; it remains an ordinary medium, and may be paired to a
+game like any other.
+
+While locked, the backend refuses: pairing, `set_setting`, `set_source_setting`,
+`format_media`, `set_tag_key`, `lock_sector`, `simulate_tag`, and every restricted
+RPC other than reading the state.
+
+### 16.2.1 Disabling the key
+
+`disable_key` clears the stored hash *and* erases the payload from the medium —
+`MediaSource.erase`, which storage implements by deleting `decky-links.json` and
+the default implements by writing an empty URI. Both halves or neither: a medium
+still carrying a token the device has forgotten reads as an unknown key forever,
+and a registered hash with no medium is a lock with no key. If the erase fails
+the hash is kept, so the user is told rather than left with the two out of step.
+
+It requires the key to be present, which being unlocked already guarantees.
+
+### 16.2.2 The trigger holding the key
+
+While a key is registered and present, `set_source_setting` refuses any change
+that would switch off the trigger it is on — the source's `enabled`, or its
+`drive_kind` for storage. The panel disables that toggle to match.
+
+Otherwise it is a one-way door: the medium unloads, the key reads as absent,
+the plugin locks, and `set_source_setting` is one of the RPCs a locked plugin
+refuses — so the trigger can never be switched back on, and the key cannot help
+because the trigger that would read it is off. Recovery meant editing
+settings.json in Desktop Mode.
+
+Refused rather than made recoverable, because every recovery is a hole in the
+lock: anything that lets a locked plugin re-enable a source is something a
+locked plugin can be talked into doing. Deregistering releases the trigger.
+
+Nothing extra is stored to know which trigger that is. The check only runs
+while unlocked, which is exactly when the key is present and the registry can
+say.
+
+The key's own row carries a Deregister button as well as the Restricted Mode
+section, since that row is where the user is looking when they decide the key
+is in the wrong place — and it is the row whose toggle is pinned.
+
+Locking and unlocking play `lock.flac` and `unlock.flac`, not the `success.flac`
+a pairing and a launch play. The key usually comes out while the Deck is being
+handed over and nobody is watching the screen, so the sound is the whole
+notification and has to say which way it went.
+
+### 16.3 The launch rule
+
+While locked, a game may run only if a medium vouches for it:
+
+1. a medium launched it (`MediaRegistry.launch_origin` is set), or
+2. a medium naming it is presented right now.
+
+The second clause is not redundant: with `auto_launch` disabled the plugin only
+opens the game's page and the user presses Play, producing a launch with no
+attribution. Comparison goes through `uri.launch_appid`, because a medium
+carries a gameID64 for a non-Steam shortcut while Steam reports the app id.
+
+Anything else is reported as `restricted_game` and terminated by the frontend,
+which owns the mechanism. Evaluated only when a game *starts*: locking
+mid-session never terminates the game being played.
+
+This is a deterrent, not a boundary — the game visibly starts before it closes.
+
+### 16.4 Why Steam's parental controls are not used
+
+Recorded so it is not re-derived. Restricted mode once drove **Family View**,
+Steam's older per-account PIN mode and the only Valve control that restricts
+the account holding the library: locking called
+`SteamClient.Parental.LockParentalLock`, unlocking called
+`UnlockParentalLock(pin)` with a PIN stored in `settings.json`, and Family
+View's allowlist decided which games could run.
+
+All of it is gone. The client offers Family View setup only to accounts where
+`wasEverEnabled` is true, so on any account that never had it — which is any
+account made since — the integration restricted precisely nothing while
+presenting a panel row that said otherwise. Its replacement, Steam Families,
+binds *child* accounts, and a shared Deck is signed into the parent's.
+
+What went with it: the `set_family_view_pin` RPC, the `family_view_pin`
+setting (erased from disk on load, since a PIN nobody reads is still a PIN on
+disk), `has_pin` in the restricted state, the `pin` field on the unlock event,
+and the frontend's `familyView` module. §16.3 is the whole of "which games may
+run", and no secret leaves the backend at all.
+
+### 16.5 Non-goals within restricted mode
+
+* Blocking Steam's own menus — the Store, Settings and Desktop Mode stay
+  reachable. Steam's internal restricted mode could do it, but it is undocumented,
+  frontend-only, resets on a client restart and carries a hardcoded escape PIN.
+* Replacing the Steam Home view with a restricted overlay.
+* Hiding other Decky Loader plugins — another plugin's UI is not this one's to
+  hide, and Decky Loader has no lock of its own.
+* Intercepting the STEAM button inside a running game. Not exposed to plugins.
 
 ---
 

@@ -8,7 +8,7 @@ import {
   Spinner,
   ToggleField,
 } from "@decky/ui";
-import { FaEraser, FaGamepad, FaLink } from "react-icons/fa";
+import { FaEraser, FaGamepad, FaKey, FaLink } from "react-icons/fa";
 import {
   sharedState,
   notifySubscribers,
@@ -19,12 +19,15 @@ import {
 } from "./shared";
 import {
   TRIGGER_ROWS,
+  deregisterKey,
   isRowConnected,
   isRowEnabled,
   mediaStateFor,
   mediumFor,
   formatRow,
+  keyStateFor,
   pairRow,
+  registerKeyOn,
   statusFor,
   toggleRow,
   type TriggerRow,
@@ -58,9 +61,16 @@ const MediaRow: FC<{
   row: TriggerRow;
   medium?: ActiveMedium;
   connected: boolean;
+  writable: boolean;
   target: { uri: string; label: string } | null;
-}> = ({ row, medium, connected, target }) => {
-  const state = mediaStateFor(row, connected, medium, target);
+  /** Registering a key: the row's button targets *this* trigger instead of
+   *  pairing a game to it. */
+  registeringKey: boolean;
+  sourceId?: string;
+}> = ({ row, medium, connected, writable, target, registeringKey, sourceId }) => {
+  const state = registeringKey
+    ? keyStateFor(row, connected, writable, medium)
+    : mediaStateFor(row, connected, medium, target);
   const [confirming, setConfirming] = useState(false);
 
   // Drop a pending confirm if the disk changes underneath it — ejected,
@@ -74,9 +84,11 @@ const MediaRow: FC<{
   // While reading, a spinner takes its place: the disk is in the drive but
   // there is nothing to say about it yet, and a static icon next to
   // "Reading disk…" reads as stalled.
+  // A state may override the glyph — a key wears a key rather than the disk it
+  // happens to be written on.
   const icon: ReactNode = state.busy
     ? <Spinner style={{ width: "1.1em", height: "1.1em" }} />
-    : <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{row.icon}</span>;
+    : <span style={{ fontSize: "1.1em", opacity: medium ? 1 : 0.35 }}>{state.icon ?? row.icon}</span>;
 
   if (!state.action) {
     return (
@@ -102,6 +114,26 @@ const MediaRow: FC<{
   // safe is the backend's — it refuses any disk that has a filesystem — and a
   // modal would imply the button is the thing standing between the user and
   // data loss, which would be the wrong thing to believe.
+  //
+  // Registering a key over a medium that holds a game destroys that pairing,
+  // which is the same kind of loss by the same kind of press, so it asks in
+  // the same way rather than inventing a second idiom for it.
+  const act = () => {
+    if (registeringKey) {
+      void registerKeyOn(row, sourceId);
+      return;
+    }
+    if (state.action === "Deregister") {
+      void deregisterKey();
+      return;
+    }
+    if (state.destructive) {
+      void formatRow(medium!);
+      return;
+    }
+    void pairRow(row, target!);
+  };
+
   const onPress = state.destructive
     ? () => {
         if (!confirming) {
@@ -109,15 +141,19 @@ const MediaRow: FC<{
           return;
         }
         setConfirming(false);
-        void formatRow(medium!);
+        act();
       }
-    : () => void pairRow(row, target!);
+    : act;
+
+  const confirmLabel = registeringKey
+    ? `Replace ${state.text} with a key?`
+    : `Erase this ${row.noun}?`;
 
   return (
     <PanelSectionRow>
       <Field
         icon={icon}
-        label={confirming ? `Erase this ${row.noun}?` : state.text}
+        label={confirming ? confirmLabel : state.text}
         childrenContainerWidth="min"
         bottomSeparator="standard"
       >
@@ -132,7 +168,9 @@ const MediaRow: FC<{
             gap: 6,
           }}
         >
-          {state.destructive ? <FaEraser size={12} /> : <FaLink size={12} />}
+          {registeringKey || state.action === "Deregister"
+            ? <FaKey size={12} />
+            : state.destructive ? <FaEraser size={12} /> : <FaLink size={12} />}
           {confirming ? "Confirm" : state.action}
         </DialogButton>
       </Field>
@@ -182,22 +220,42 @@ export const TriggersPanel: FC<{
   media: Record<string, ActiveMedium>;
   target: { uri: string; label: string } | null;
   pairing: boolean;
-}> = ({ statuses, media, target, pairing }) => {
+  registeringKey: boolean;
+}> = ({ statuses, media, target, pairing, registeringKey }) => {
   return (
     <PanelSection title="Triggers">
-      {/* The pairing target, once. Putting it on every Pair button instead
+      {/* What the rows below are for, once. Putting it on every button instead
           would repeat a name long enough to wrap ("Vampire Survivors: Ode to
-          Castlevania") on up to nine rows. */}
+          Castlevania") on up to nine rows.
+          While registering a key there is no game involved at all, so this says
+          what the buttons will do instead — the list changing what it writes is
+          not something to leave the user to infer from the button captions.
+          The section keeps its own name through both: retitling the whole list
+          "Choose the key" moved the one landmark the user navigates by, to say
+          something this row already says. */}
       <PanelSectionRow>
         <Field
-          icon={<FaGamepad />}
-          label={target ? target.label : "No game selected"}
-          description={target ? "Game to be paired" : "Open a game to pair"}
+          icon={registeringKey ? <FaKey /> : <FaGamepad />}
+          label={
+            registeringKey
+              ? "Register a key"
+              : target ? target.label : "No game selected"
+          }
+          description={
+            registeringKey
+              ? "Choose a trigger below. Its medium then locks and unlocks restricted mode."
+              : target ? "Game to be paired" : "Open a game to pair"
+          }
           bottomSeparator="thick"
           focusable={false}
           highlightOnFocus={false}
         />
       </PanelSectionRow>
+
+      {/* No Cancel here: the Restricted Mode section's button becomes one
+          while registering, and that is where the user pressed Register. Two
+          buttons for one action, one of them where the action did not start,
+          is a choice to have to read. */}
 
       {pairing && (
         <PanelSectionRow>
@@ -219,11 +277,18 @@ export const TriggersPanel: FC<{
         const status = statusFor(row, statuses);
         const enabled = isRowEnabled(row, status);
         const connected = isRowConnected(row, status);
+        const medium = mediumFor(row, media);
+        // Switching off the trigger the key sits on would lock the plugin with
+        // no way to switch it back on — the backend refuses it outright, and
+        // this stops the panel offering a switch that cannot move.
+        const holdsKey = !!(medium?.key && medium.authorized);
         const rows = [
           <PanelSectionRow key={row.key}>
             <ToggleField
               label={row.label}
               checked={enabled}
+              disabled={holdsKey}
+              description={holdsKey ? "Deregister the key to disable this trigger" : undefined}
               bottomSeparator={enabled ? "none" : "standard"}
               onChange={(v: boolean) => void toggleRow(row, v, status)}
             />
@@ -234,9 +299,15 @@ export const TriggersPanel: FC<{
             <MediaRow
               key={`${row.key}-media`}
               row={row}
-              medium={mediumFor(row, media)}
+              medium={medium}
               connected={connected}
+              // The backend's own answer to "can this be written to", rather
+              // than the panel guessing from the row: a camera reads codes it
+              // cannot write, and MQTT has no medium to write to at all.
+              writable={!!status?.can_pair}
               target={target}
+              registeringKey={registeringKey}
+              sourceId={status?.source_id}
             />,
           );
           const secret = row.key === "mqtt"

@@ -42,6 +42,7 @@ from decky_links import settings_schema
 from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
+from decky_links import restricted_key
 from decky_links import state
 from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
@@ -101,6 +102,18 @@ class Plugin:
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        # Set while a key-key registration is in flight, and consumed when
+        # the write succeeds. The token is only committed to settings once it
+        # is actually on the medium — recording it at the moment the button was
+        # pressed would leave a device locked by a key that was never written.
+        self._pending_key_token = None
+        # The lock state last announced to the frontend. The lock itself is
+        # derived from key presence and never stored; this exists only so a
+        # change can be told from a no-op. None means "nothing announced yet",
+        # so the first sync always speaks — registering a key moves the derived
+        # state without going through _sync_lock, and starting this at False
+        # would swallow the announcement that follows.
+        self._announced_lock = None
         # What is presented where, and which medium started the running game.
         # See decky_links.media_registry for the invariants.
         self._registry = MediaRegistry()
@@ -458,6 +471,14 @@ class Plugin:
         uri = event.uri
         is_nfc = event.source_type == SourceType.NFC
 
+        # A key payload is a control message, not a link. Recognised here so
+        # that the token never reaches the registry, the panel or an event —
+        # everything downstream sees a medium with no URI and a key flag,
+        # which is all any of it needs to know.
+        key_token = restricted_key.parse_token(uri)
+        if key_token is not None:
+            uri = None
+
         # Collision check (Spec §6.2) — scoped to *this* source. Comparing
         # against a single global slot meant a floppy insert looked like an NFC
         # tag collision, and vice versa. Only one medium can occupy one source.
@@ -489,6 +510,9 @@ class Plugin:
             "uri":         uri,
             "drive_kind":  event.payload.get("drive_kind") or prior_kind,
             "meta":        event.payload.get("tag_meta") if is_nfc else None,
+            # The panel labels the row "Key" from this, and never has
+            # to be told which token it holds.
+            "key":      key_token is not None,
             # Carried on the registry entry too, not just the uri_detected
             # event: get_active_media is the 5s backstop the panel re-syncs
             # from, and without this a dropped event would leave the row
@@ -530,6 +554,14 @@ class Plugin:
                 "drive_kind": event.payload.get("drive_kind"),
             })
             await self._handle_pairing(uid_hex, source_id=event.source_id)
+            return
+
+        # A key, presented. Checked after pairing so that *registering*
+        # one still writes — the write path sees an ordinary payload — and
+        # before every URI branch below, because a key medium carries no
+        # launchable URI and would otherwise be reported as a blank tag.
+        if key_token is not None:
+            await self._handle_key_medium(event, uid_hex, key_token)
             return
 
         # Emit media_detected immediately — matches old _handle_scan behavior
@@ -689,6 +721,11 @@ class Plugin:
             self.state, any_media_present=self._registry.any_present()
         ))
 
+        # Taking the key away locks the plugin. The registry entry went with
+        # the removal above, so the derived lock has already changed by the
+        # time this runs — all that is left is to say so.
+        await self._sync_lock("key removed")
+
     # ── URI Validation ─────────────────────────────────────────────────
 
     def _validate_uri(self, uri: str) -> bool:
@@ -712,6 +749,274 @@ class Plugin:
         """
         ok, _reason = settings_schema.validate(key, value)
         return ok
+
+    # ── Restricted mode ───────────────────────────────────────────────────────
+    #
+    # The lock is the plugin's own, and it covers exactly two things: while
+    # locked, nothing may write a medium or change a setting, and only a game a
+    # medium vouches for may run. It is enforced at the RPC surface rather than
+    # by hiding buttons, because the panel is not the only way to reach these —
+    # anything with access to the plugin's RPCs is.
+    #
+    # It used to lean on Steam's Family View for the "which games may run"
+    # half. That is gone: Family View is a legacy per-account mode Steam will
+    # not let a current account switch on, so the half that depended on it
+    # restricted nothing at all on the machines this runs on.
+
+    @property
+    def key_registered(self) -> bool:
+        """Whether restricted mode is switched on at all.
+
+        Registering a key arms the feature; disabling the key switches it off.
+        Nothing else does, which is what keeps the two from disagreeing.
+        """
+        return bool(self.settings and self.settings.get_restricted("key_hash"))
+
+    def _key_present(self) -> bool:
+        """Whether the registered key is on a reader or in a drive right now."""
+        return any(
+            medium.get("key") and medium.get("authorized")
+            for medium in self._registry.all()
+        )
+
+    @property
+    def locked(self) -> bool:
+        """Whether the plugin is locked, derived rather than remembered.
+
+        The key behaves like a key left in a lock: present means unlocked,
+        absent means locked. Deriving it is the point — a stored ``locked``
+        flag is a second answer to a question the media registry already
+        answers, and the two drift the moment anything changes while the
+        plugin is not running. A Deck that boots with the key out is locked
+        because the key is out, not because a flag on disk says so.
+        """
+        return self.key_registered and not self._key_present()
+
+    def _refuse_when_locked(self, action: str) -> bool:
+        """True when ``action`` must not proceed, having logged why."""
+        if self.locked:
+            decky.logger.warning(f"{action} refused: locked — present the key")
+            return True
+        return False
+
+    def _switches_off_the_key(self, source_type: str, key: str, value) -> Optional[str]:
+        """Why this settings change would switch off the trigger holding the key.
+
+        A one-way door if it were allowed: switching off the trigger the key
+        sits on unloads the medium, so the key reads as absent, so the plugin
+        locks — and ``set_source_setting`` is one of the RPCs a locked plugin
+        refuses, so the trigger can never be switched back on. The key itself
+        cannot help, because the trigger that would read it is off. The only
+        way out was editing settings.json in Desktop Mode.
+
+        Refused here rather than made recoverable, because every recovery is a
+        hole in the lock: anything that lets a locked plugin re-enable a source
+        is something a locked plugin can be talked into doing. Deregistering
+        the key releases the trigger, which is the same order the user did it
+        in — register, then decide.
+
+        Only ever consulted while unlocked, which is also when the answer is
+        knowable: the key is present, so the registry says exactly which
+        trigger it is on, and nothing has to be stored alongside the hash.
+        """
+        if not self.key_registered:
+            return None
+        holders = [
+            medium for medium in self._registry.all()
+            if medium.get("key") and medium.get("authorized")
+            and medium.get("source_type") == source_type
+        ]
+        if not holders:
+            return None
+        if key == "enabled" and value is False:
+            return f"{source_type} holds the key"
+        if key == "drive_kinds" and isinstance(value, dict):
+            for medium in holders:
+                kind = medium.get("drive_kind")
+                if kind and value.get(kind) is False:
+                    return f"the {kind} trigger holds the key"
+        return None
+
+    def _restricted_state(self) -> Dict[str, Any]:
+        """What the panel is allowed to know about the lock.
+
+        The token hash never appears here. The panel needs to know *that* a key
+        exists, to decide what to offer; it never needs its value.
+        """
+        if not self.settings:
+            return {"locked": False, "has_key": False, "label": ""}
+        return {
+            "locked":   self.locked,
+            "has_key":  self.key_registered,
+            "label":    self.settings.get_restricted("key_label") or "",
+        }
+
+    async def _sync_lock(self, reason: str) -> None:
+        """Announce the lock if presenting or removing something changed it.
+
+        Called wherever the derived state could have moved: a medium loading
+        or unloading, a key being registered or disabled. It compares against
+        what was last announced rather than against a stored lock, so a
+        redundant call is free and a missed one is the only way to get out of
+        step.
+        """
+        locked = self.locked
+        if locked == self._announced_lock:
+            return
+        self._announced_lock = locked
+
+        # A pairing armed before the lock came down would otherwise write the
+        # next medium presented, which is exactly what the lock is for.
+        if locked and self.is_pairing:
+            await self.cancel_pairing()
+
+        decky.logger.info(f"Restricted mode {'locked' if locked else 'unlocked'} ({reason})")
+        # Its own pair of sounds, and not success.flac, which is what a pairing
+        # and a launch already say. The lock is the one event with no screen to
+        # look at — the key comes out while the Deck is being handed over — so
+        # the sound is the whole notification, and it has to say *which way* it
+        # went. A bolt going over falls; a latch springing open rises.
+        self._play_sound("lock.flac" if locked else "unlock.flac")
+
+        payload = dict(self._restricted_state())
+        payload["reason"] = reason
+        await decky.emit("restricted_lock", payload)
+
+    def _medium_authorizes(self, appid) -> bool:
+        """Whether a presented medium vouches for this running game.
+
+        The kid-mode launch rule, and the reason it needs no allowlist: the
+        Deck plays what you hand it. A game qualifies if a medium started it,
+        or if a medium naming it is presented right now — the second clause is
+        not redundant, because with auto-launch switched off the plugin only
+        opens the game's page and the user presses Play themselves, which
+        produces a launch with no attribution at all.
+
+        Non-Steam shortcuts compare through ``uri.launch_appid``: the medium
+        carries a gameID64 and Steam reports the running app by its app id.
+        """
+        if self._registry.launch_origin is not None:
+            return True
+        if appid is None:
+            return False
+        target = str(appid)
+        return any(
+            uri_rules.launch_appid(medium.get("uri")) == target
+            for medium in self._registry.all()
+        )
+
+    async def _handle_key_medium(self, event: MediaEvent, uid_hex: str, token: str):
+        """A medium carrying a key payload was presented.
+
+        Presence, not a toggle. Presenting the key unlocks; taking it away
+        locks, which is ``_handle_media_unload``'s half. A toggle could be
+        knocked out of step with the thing it was toggling — a missed removal,
+        a restart, a second reader — and then the panel and the device
+        disagreed about whether the Deck was locked. Presence cannot: the
+        answer is recomputed from what is physically here.
+        """
+        stored = self.settings.get_restricted("key_hash") if self.settings else ""
+        recognised = restricted_key.matches(token, stored)
+
+        # Recorded on the medium's registry entry, because two later decisions
+        # turn on it: the panel labels the row, and pairing refuses to write a
+        # game over the key — but only over the one this device actually knows.
+        entry = self._registry.get(event.source_id)
+        if entry is not None:
+            entry["authorized"] = recognised
+
+        await decky.emit("media_detected", {
+            "uid": uid_hex,
+            "source_type": event.source_type.value,
+            "source_id": event.source_id,
+            "drive_kind": event.payload.get("drive_kind"),
+            "key": True,
+        })
+
+        if not recognised:
+            # Someone else's key, or ours after it was replaced. Says so rather
+            # than failing silently: a key that stopped working is otherwise
+            # indistinguishable from a reader that stopped reading.
+            decky.logger.warning(f"Unrecognised key presented on {event.source_id}")
+            self._play_sound("error.flac")
+            await decky.emit("uri_detected", {
+                "uri": None, "uid": uid_hex, "key": True, "authorized": False,
+                "source_id": event.source_id,
+                "source_type": event.source_type.value,
+            })
+            self._set_state(state.after_unusable_media(
+                self.state, game_running=bool(self.running_game_id)
+            ))
+            return
+
+        await decky.emit("uri_detected", {
+            "uri": None, "uid": uid_hex, "key": True, "authorized": True,
+            "source_id": event.source_id,
+            "source_type": event.source_type.value,
+        })
+        await self._sync_lock("key presented")
+
+        # Never a launch, and never a reason to forget a running game.
+        self._set_state(state.after_unusable_media(
+            self.state, game_running=bool(self.running_game_id)
+        ))
+
+    # What a registered key is called in the panel. The medium is a physical
+    # object the user has to find again, so "USB drive" is worth more than a
+    # device node or a UID they have no way to read off it.
+    _MEDIUM_LABELS = {
+        "floppy":  "floppy disk",
+        "optical": "disc",
+        "usb":     "USB drive",
+        "flash":   "memory card",
+    }
+
+    def _medium_label(self, source, source_id: Optional[str]) -> str:
+        if source is None:
+            return "medium"
+        if source.source_type == SourceType.NFC:
+            return "NFC tag"
+        if source.source_type == SourceType.STORAGE:
+            entry = self._registry.get(source_id) if source_id else None
+            kind = (entry or {}).get("drive_kind")
+            return self._MEDIUM_LABELS.get(kind, "disk")
+        return source.source_type.value
+
+    async def _emit_restricted_state(self):
+        await decky.emit("restricted_state", self._restricted_state())
+
+    async def _commit_key(self, token: str, source, source_id: Optional[str]):
+        """Record a token that is now physically on a medium.
+
+        This is what switches restricted mode on: registering a key arms the
+        feature, and from here on the lock follows the key. The device is not
+        locked yet — the key is sitting right there, having just been written
+        — so the user stays in admin mode until they take it away.
+        """
+        label = self._medium_label(source, source_id)
+        if not self.settings.set_restricted("key_hash", restricted_key.hash_token(token)):
+            decky.logger.error("Key could not be written to disk")
+            return
+        self.settings.set_restricted("key_label", label)
+        decky.logger.info(f"Key registered on {label} ({source_id})")
+
+        entry = self._registry.get(source_id) if source_id else None
+        if entry is not None:
+            # The medium holds a token, not a link. Leaving the registry
+            # showing the URI it was just written would put the token in
+            # get_active_media, which the panel polls every five seconds.
+            entry["uri"] = None
+            entry["key"] = True
+            entry["authorized"] = True
+
+        await decky.emit("uri_detected", {
+            "uri": None, "uid": (entry or {}).get("media_id", ""),
+            "key": True, "authorized": True, "paired": True,
+            "source_id": source_id,
+            "source_type": (entry or {}).get("source_type"),
+        })
+        await self._sync_lock("key registered")
+        await self._emit_restricted_state()
 
     # ── Pairing Handler ────────────────────────────────────────────────
 
@@ -737,6 +1042,28 @@ class Plugin:
             self.pairing_source_id = None
             return
 
+        # Never write a game over the key. The medium would keep
+        # working as a game tag while the registered hash stayed behind,
+        # leaving a device that can be locked by a key that no longer exists.
+        #
+        # Only the *recognised* key, though. A medium carrying a key payload
+        # this device does not know — someone else's key, or ours after it was
+        # replaced — is just a medium with a stale payload on it, and refusing
+        # to pair that left it permanently unusable with no way back.
+        entry = self._registry.get(source_id) if source_id else None
+        is_our_key = (entry or {}).get("key") and (entry or {}).get("authorized")
+        if self._pending_key_token is None and is_our_key:
+            decky.logger.warning(f"Refusing to pair over the key on {source_id}")
+            self.is_pairing = False
+            self.pairing_uri = None
+            self.pairing_source_id = None
+            await decky.emit("pairing_result", {
+                "success": False,
+                "uid":     media_id,
+                "error":   "This is the key — use another medium",
+            })
+            return
+
         source = self._pairable_source(source_id)
         if source is None:
             decky.logger.warning(
@@ -756,17 +1083,24 @@ class Plugin:
         # new media from interfering with the write operation
         pairing_uri = self.pairing_uri
         pairing_title = getattr(self, "pairing_title", "")
+        pending_key = self._pending_key_token
         self.is_pairing = False
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        self._pending_key_token = None
 
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
             success, error_msg = await source.write_uri(media_id, pairing_uri, pairing_title)
             self._play_sound("success.flac" if success else "error.flac")
 
-            if success:
+            if success and pending_key:
+                # Committed only now. Recording the hash when the button was
+                # pressed would have locked the device to a key that the write
+                # then failed to put on any medium.
+                await self._commit_key(pending_key, source, source_id)
+            elif success:
                 # The medium now holds this URI, but nothing will re-read it
                 # while it stays put — poll() only reports media on arrival.
                 # Without this the panel shows "Url: Empty" until the user
@@ -805,6 +1139,11 @@ class Plugin:
             entry = self._registry.first_of_type("nfc")
         if entry is not None:
             entry["uri"] = uri
+            # It holds a game now. Leaving the flags behind kept the row
+            # reading "Key" over a medium that had just been paired to
+            # something else, until it was removed and presented again.
+            entry["key"] = False
+            entry["authorized"] = False
 
         # current_tag_* is the NFC-only view the write path reads back from
         # (write_tag needs the UID of the tag on the reader); pairing a floppy
@@ -871,7 +1210,9 @@ class Plugin:
         Only whitelisted sound files are allowed to prevent path traversal attacks.
         """
         # Whitelist allowed sounds
-        ALLOWED_SOUNDS = {"scan.flac", "success.flac", "error.flac"}
+        ALLOWED_SOUNDS = {
+            "scan.flac", "success.flac", "error.flac", "lock.flac", "unlock.flac",
+        }
         
         if filename not in ALLOWED_SOUNDS:
             decky.logger.warning(f"Attempted to play unauthorized sound: {filename}")
@@ -939,6 +1280,8 @@ class Plugin:
         written — no permission, disk full — still reported success, so the
         panel showed the new value and the old one came back on restart.
         """
+        if self._refuse_when_locked(f"set_setting({key!r})"):
+            return False
         ok, reason = settings_schema.validate(key, value)
         if not ok:
             decky.logger.warning(f"Rejected setting update: {reason} (got {value!r})")
@@ -965,9 +1308,22 @@ class Plugin:
         on the medium means a disk says what it is without resolving an app id
         against Steam. Sources that cannot store it ignore it.
         """
+        if self._refuse_when_locked("start_pairing"):
+            return False
         if not self._validate_uri(uri):
             decky.logger.warning(f"Pairing URI rejected by allowlist: {uri}")
             return False
+        return self._arm_pairing(uri, source_id, title)
+
+    def _arm_pairing(self, uri, source_id: Optional[str], title: str = "") -> bool:
+        """Arm the pairing state machine for ``uri``.
+
+        Shared with key-key registration, which writes a payload the
+        allowlist deliberately does not admit — a control token is not
+        something a tapped card may launch, so it cannot pass the same check
+        the launch path uses. The two callers differ only in what they check
+        before arming; everything after that is identical.
+        """
         if source_id and self._pairable_source(source_id) is None:
             decky.logger.warning(f"Pairing target {source_id!r} cannot be written to")
             return False
@@ -975,6 +1331,12 @@ class Plugin:
             f"UI requested pairing for URI: {uri}"
             + (f" on {source_id}" if source_id else " on any trigger")
         )
+        # Every arm starts clean. A key token left over from a registration that
+        # was cancelled or superseded would be committed by whichever pairing
+        # succeeded next — registering a key whose token is on no medium at all,
+        # which locks the device with a key that cannot exist. register_key sets
+        # it immediately after this returns.
+        self._pending_key_token = None
         self.is_pairing  = True
         self.pairing_uri = uri
         self.pairing_source_id = source_id
@@ -994,6 +1356,9 @@ class Plugin:
         self.pairing_uri = None
         self.pairing_source_id = None
         self.pairing_title = ""
+        # Including the pending key token, or a cancelled registration would be
+        # committed by the *next* pairing to succeed — see _arm_pairing.
+        self._pending_key_token = None
         return True
 
     async def get_reader_status(self):
@@ -1029,6 +1394,11 @@ class Plugin:
                 "simulate_tag refused: set DECKY_LINKS_DEBUG to enable debug RPCs"
             )
             return False
+        # Even with debug RPCs on. This forges a media detection, so leaving it
+        # open while locked would make the lock togglable by anything that can
+        # call it — including with a forged key payload.
+        if self._refuse_when_locked("simulate_tag"):
+            return False
 
         uid_hex = uid.hex().upper()
         self.current_tag_uid = uid_hex
@@ -1057,6 +1427,8 @@ class Plugin:
         be swapped between the panel drawing the button and the user pressing
         it.
         """
+        if self._refuse_when_locked("format_media"):
+            return {"success": False, "error": "Decky Links is locked"}
         source = self.storage_source
         if source is None:
             return {"success": False, "error": "storage source not available"}
@@ -1125,6 +1497,8 @@ class Plugin:
     # decky_links.nfc_rpcs. The names here are the RPC surface.
 
     async def set_tag_key(self, uid: str, key_a: str, key_b: str):
+        if self._refuse_when_locked("set_tag_key"):
+            return False
         return await nfc_rpcs.set_tag_key(decky, self.key_manager, uid, key_a, key_b)
 
     async def get_tag_key(self, uid: str):
@@ -1140,6 +1514,8 @@ class Plugin:
         )
 
     async def lock_sector(self, uid: str, sector: int, key_a: str, key_b: str):
+        if self._refuse_when_locked("lock_sector"):
+            return False
         return await nfc_rpcs.lock_sector(
             decky, self.key_manager, self.nfc_source, uid, sector, key_a, key_b
         )
@@ -1177,6 +1553,16 @@ class Plugin:
                     f"Game {appid} attributed to {self._registry.launch_origin}"
                 )
             self._set_state(PluginState.GAME_RUNNING)
+
+            # Restricted mode's launch rule. Checked here rather than in the frontend
+            # because this is where attribution is settled — and only on a
+            # game *starting*, so locking the plugin mid-session never kills
+            # the game already being played.
+            if self.locked and prev != appid and not self._medium_authorizes(appid):
+                decky.logger.info(
+                    f"Restricted mode: game {appid} started without a medium — restricted."
+                )
+                await decky.emit("restricted_game", {"appid": appid})
         else:
             self._registry.clear_launch()
             self._set_state(state.after_game_exited(
@@ -1203,6 +1589,87 @@ class Plugin:
 
     async def save_game_card(self, uri: str, title: str = "", appid: str = ""):
         return await card_rpcs.save_card(decky, PRINT_DPI, uri, title, appid)
+
+    # --- Restricted mode ---
+
+    async def get_restricted_state(self):
+        """The lock, as much of it as the panel is allowed to see."""
+        return self._restricted_state()
+
+    async def register_key(self, source_id: Optional[str] = None):
+        """Arm pairing to write a freshly minted key token onto a medium.
+
+        Deliberately the ordinary pairing flow: the user presents the medium
+        they want to use, on the trigger they want to use it on, and the write
+        goes through the same source method a game pairing does. A key is
+        therefore anything this plugin can already write — tag, floppy, USB
+        stick — with no per-source support to add.
+
+        Registering replaces any previous key, but only once the new one is
+        physically written (see ``_commit_key``).
+        """
+        if self._refuse_when_locked("register_key"):
+            return False
+        token = restricted_key.mint_token()
+        if not self._arm_pairing(
+            restricted_key.uri_for(token), source_id, title="Decky Links key"
+        ):
+            return False
+        self._pending_key_token = token
+        return True
+
+    async def disable_key(self):
+        """Switch restricted mode off, and wipe the key from its medium.
+
+        Both halves, because either alone leaves something misleading behind:
+        a medium still carrying a token this device has forgotten reads as
+        "Unknown key" forever, and a registered hash with no medium is a lock
+        with no key. Erasing needs the medium present — which it is, since
+        being unlocked is what having it present *means*.
+
+        Refused while locked, so the way to switch the feature off runs
+        through the key rather than around it.
+        """
+        if self._refuse_when_locked("disable_key"):
+            return False
+        self._pending_key_token = None
+
+        # Wipe the medium first. If it fails the key stays registered, so the
+        # user is told rather than left with a disabled feature and a stick
+        # that still looks like a key.
+        erased, error = await self._erase_key_medium()
+        if not erased:
+            decky.logger.warning(f"Key not disabled: could not erase the medium — {error}")
+            return False
+
+        ok = self.settings.set_restricted("key_hash", "")
+        self.settings.set_restricted("key_label", "")
+        decky.logger.info("Key disabled and erased; restricted mode off")
+        await self._sync_lock("key disabled")
+        await self._emit_restricted_state()
+        return ok
+
+    async def _erase_key_medium(self):
+        """Remove the key payload from whichever medium is carrying it."""
+        for medium in self._registry.all():
+            if not (medium.get("key") and medium.get("authorized")):
+                continue
+            source = self._pairable_source(medium.get("source_id"))
+            if source is None:
+                return False, "the trigger holding the key cannot be written to"
+            success, error = await source.erase(medium["media_id"])
+            if not success:
+                return False, error
+            medium["key"] = False
+            medium["authorized"] = False
+            medium["uri"] = None
+            await decky.emit("uri_detected", {
+                "uri": None, "uid": medium["media_id"], "blank": True,
+                "source_id": medium.get("source_id"),
+                "source_type": medium.get("source_type"),
+            })
+            return True, None
+        return False, "the key is not present"
 
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.
@@ -1259,6 +1726,8 @@ class Plugin:
         equivalent NFC setting was held to — and watch_dir accepted "/",
         pointing a root process's directory scanner at the filesystem root.
         """
+        if self._refuse_when_locked(f"set_source_setting({source_type}.{key})"):
+            return False
         if source_type not in settings_schema.SOURCE_TYPES:
             decky.logger.warning(f"set_source_setting: unknown source_type {source_type!r}")
             return False
@@ -1268,6 +1737,11 @@ class Plugin:
             decky.logger.warning(f"set_source_setting: rejected {source_type}.{key} — {reason}")
             return False
         value = settings_schema.coerce(key, value, source_type=source_type)
+
+        conflict = self._switches_off_the_key(source_type, key, value)
+        if conflict:
+            decky.logger.warning(f"set_source_setting refused: {conflict}")
+            return False
 
         sources = self.settings.settings.setdefault("sources", {})
         sources.setdefault(source_type, {})[key] = value

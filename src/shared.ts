@@ -49,6 +49,12 @@ export interface ActiveMedium {
      *  for that whole time. Always replaced by a real state. */
     problem?: "blank" | "unreadable" | "blocked" | "loading" | null;
     error?: string;
+    /** This medium carries a key rather than a link. The token itself
+     *  never reaches the frontend — the backend recognises it and sends this
+     *  flag in its place. */
+    key?: boolean;
+    /** Set on a key medium the backend did not recognise. */
+    authorized?: boolean;
     /** Whether offering to format this medium would destroy anything.
      *
      *  Set by the backend only when blkid found no filesystem at all. A disk
@@ -56,6 +62,18 @@ export interface ActiveMedium {
      *  "unreadable" but has data on it, so the Format button must key off this
      *  flag rather than off `problem === "unreadable"`. */
     formattable?: boolean;
+}
+
+/** Restricted mode, as much of it as the panel is allowed to know.
+ *
+ *  The key's hash never appears here — the panel needs to know *that* a key
+ *  exists to decide what to offer, never what it is. */
+export interface RestrictedState {
+    locked: boolean;
+    has_key: boolean;
+    /** What the key is, in words: "USB drive", "NFC tag". The user has to find
+     *  the object again, and a device node will not help them do that. */
+    label: string;
 }
 
 export interface DriveKindStatus {
@@ -148,7 +166,14 @@ export interface SharedState {
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
   pairing: boolean;
+  /** The user has asked to register a key and is choosing which trigger to
+   *  write it to. Local to the panel: nothing is armed on the backend until a
+   *  trigger is picked, which is why cancelling it needs no RPC. */
+  registeringKey: boolean;
   sourceStatuses: SourceStatus[];
+  /** Restricted mode. Null until the first fetch completes, so the panel can avoid
+   *  flashing the unlocked view at someone who locked the device. */
+  restricted: RestrictedState | null;
 }
 
 export type SettingKey =
@@ -166,8 +191,13 @@ export const sharedState: SharedState = {
   activeAppId: null,
   viewedApp: null,
   pairing: false,
+  registeringKey: false,
   sourceStatuses: [],
+  restricted: null,
 };
+
+/** Read by asynchronous callbacks that must not close over a stale lock. */
+export const restrictedRef = { current: null as RestrictedState | null };
 
 // These refs are updated from BackgroundManager and read by various
 // asynchronous callbacks. They live outside of React so that closures keep a
@@ -252,6 +282,20 @@ export const saveGameCard = callable<
   { ok: boolean; dir?: string; paths?: Record<string, string>; error?: string }
 >("save_game_card");
 export const setSourceSetting = callable<[source_type: string, key: string, value: any], boolean>("set_source_setting");
+
+// ── Restricted mode ────────────────────────────────────────────────────────────────
+//
+// The backend refuses each of these while locked, so hiding the controls that
+// call them is presentation, not enforcement.
+
+export const getKioskState = callable<[], RestrictedState>("get_restricted_state");
+/** Arm pairing to write a fresh key token onto the next medium presented.
+ *  With a source_id, only that trigger may claim it. */
+export const registerKey =
+    callable<[source_id?: string], boolean>("register_key");
+/** Switch restricted mode off and wipe the key from its medium. Needs the key
+ *  present, which being unlocked already guarantees. */
+export const disableKey = callable<[], boolean>("disable_key");
 
 // Pairing listener may want to suppress the toast when our custom modal is
 // showing the result itself.

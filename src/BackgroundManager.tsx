@@ -4,9 +4,11 @@ import {
   getReaderStatus,
   getSourceStatuses,
   getActiveMedia,
+  getKioskState,
   setRunningGame,
   sharedState,
   settingsRef,
+  restrictedRef,
   activeAppIdRef,
   notifySubscribers,
   addEventListener,
@@ -199,6 +201,14 @@ export function startBackgroundManager(): () => void {
       sharedState.sourceStatuses = statuses;
     }
 
+    // Before the media seed below: a locked device must not draw the unlocked
+    // panel, however briefly, and the launch path consults this.
+    const restricted = await getKioskState();
+    if (active) {
+      sharedState.restricted = restricted;
+      restrictedRef.current = restricted;
+    }
+
     // Seed the per-source view: media already presented before the panel was
     // ever opened would otherwise be invisible until it is removed and
     // re-presented.
@@ -297,7 +307,7 @@ export function startBackgroundManager(): () => void {
     uri: string | null, uid: string, paired?: boolean, source_id?: string,
     source_type?: SourceType,
     blank?: boolean, unreadable?: boolean, blocked?: boolean, error?: string,
-    formattable?: boolean,
+    formattable?: boolean, key?: boolean, authorized?: boolean,
   }]>("uri_detected", (data) => {
     if (!data || typeof data.uid !== "string") return;
 
@@ -317,6 +327,36 @@ export function startBackgroundManager(): () => void {
       ? data.uid
       : data.uid.toUpperCase();
     const uri = typeof data.uri === "string" ? data.uri : null;
+
+    // A key carries no URI by design, so every "no URI" branch below
+    // would mislabel it — as a blank tag, and then as an error sound and a
+    // Pair button offering to overwrite the key with a game.
+    if (data.key) {
+      if (key && sharedState.activeMedia[key]) {
+        sharedState.activeMedia = {
+          ...sharedState.activeMedia,
+          [key]: {
+            ...sharedState.activeMedia[key],
+            media_id: normalizedUid,
+            uri: null,
+            problem: null,
+            key: true,
+            authorized: data.authorized !== false,
+          },
+        };
+      }
+      notifySubscribers();
+      if (data.authorized === false) {
+        // Named rather than silent: a key that has stopped being recognised
+        // looks exactly like a reader that has stopped reading.
+        toaster.toast({
+          title: "Not the key",
+          body: "This medium is not registered on this device.",
+          critical: true,
+        });
+      }
+      return;
+    }
 
     const problem = uri
       ? null
@@ -354,6 +394,12 @@ export function startBackgroundManager(): () => void {
     if (uri) {
       const currentSettings = settingsRef.current;
       const uriAppId = parseSteamAppIdFromUri(uri);
+
+      // No allowlist check while locked, deliberately. A URI arriving here came
+      // off a medium someone physically presented, and "a medium vouches for
+      // it" is the whole launch rule (SPEC §16.3) — the box of tags left out is
+      // the allowlist. This used to ask Steam's Family View whether the game
+      // was permitted, which refused games on a list the user never built.
 
       if (currentSettings?.auto_launch) {
         const currentAppId = activeAppIdRef.current;
@@ -403,6 +449,30 @@ export function startBackgroundManager(): () => void {
     }
   });
 
+  // The lock changed — the key was presented, or taken away. The backend owns
+  // the state and derives it from the key; this half only mirrors it into the
+  // panel, which is why locking no longer calls out to Steam at all.
+  const restrictedLockListener = addEventListener<[data: {
+    locked: boolean, has_key: boolean, label: string, reason?: string,
+  }]>("restricted_lock", (data) => {
+    if (!data || typeof data.locked !== "boolean") return;
+    const { reason, ...state } = data;
+    sharedState.restricted = state;
+    restrictedRef.current = state;
+    notifySubscribers();
+    console.info(`[ Decky Links ] Restricted mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
+  });
+
+  // Registering or deregistering the key: state only, no lock change.
+  const restrictedStateListener = addEventListener<[data: {
+    locked: boolean, has_key: boolean, label: string,
+  }]>("restricted_state", (data) => {
+    if (!data || typeof data.locked !== "boolean") return;
+    sharedState.restricted = data;
+    restrictedRef.current = data;
+    notifySubscribers();
+  });
+
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
     if (!data || typeof data.success !== "boolean") return;
     sharedState.pairing = false;
@@ -416,6 +486,32 @@ export function startBackgroundManager(): () => void {
       });
     }
   });
+
+  // Restricted mode: a game started without a medium to vouch for it.
+  //
+  // The backend decides — it holds every presented medium and the launch
+  // attribution — and this end carries it out, because TerminateApp lives on
+  // SteamClient. The game does visibly start before it closes; that is the
+  // honest cost of enforcing this without Valve's cooperation, and it is a
+  // deterrent rather than a boundary, which is what the README says.
+  const restrictedListener = addEventListener<[data: { appid: number }]>(
+    "restricted_game",
+    (data) => {
+      if (!data || data.appid === undefined || data.appid === null) return;
+      const appId = String(data.appid);
+      console.info(`[ Decky Links ] Restricted mode: closing unauthorised game ${appId}.`);
+      void (async () => {
+        const closed = await terminateSteamApp(appId);
+        toaster.toast({
+          title: "Restricted title",
+          body: closed
+            ? "In restricted mode, present the tag or disk for a game to play it."
+            : "This game is not allowed, and Steam would not close it.",
+          critical: true,
+        });
+      })();
+    },
+  );
 
   const gameRemovalListener = addEventListener<[data: {
     appid: number, uid: string, uri: string, action?: "close" | "pause",
@@ -543,6 +639,9 @@ export function startBackgroundManager(): () => void {
     removeEventListener("source_connection", statusListener);
     removeEventListener("uri_detected", uriListener);
     removeEventListener("pairing_result", pairingListener);
+    removeEventListener("restricted_lock", restrictedLockListener);
+    removeEventListener("restricted_state", restrictedStateListener);
+    removeEventListener("restricted_game", restrictedListener);
     removeEventListener("card_removed_during_game", gameRemovalListener);
     removeEventListener("source_statuses", sourceStatusesListener);
     stopBackgroundManagerFn = null;

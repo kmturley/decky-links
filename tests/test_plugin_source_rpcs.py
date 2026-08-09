@@ -23,6 +23,10 @@ def _make_plugin_with_sources(tmp_path):
     _settings = {
         "auto_launch": True,
         "auto_close": False,
+        # Unlocked, no key — the shipped state. Plugin.locked reads this on
+        # every guarded RPC, and a bare MagicMock attribute reads as locked.
+        "restricted": {"key_hash": "",
+                  "key_label": ""},
         "sources": {
             "nfc":  {"device_path": "/dev/ttyUSB0", "baudrate": 115200,
                      "polling_interval": 0.5, "reader_type": "pn532_uart"},
@@ -39,6 +43,9 @@ def _make_plugin_with_sources(tmp_path):
     )
     mock_settings.settings = _settings
     mock_settings.get_source_settings = lambda src: _settings["sources"].get(src, {})
+    mock_settings.get_restricted = lambda key=None: (
+        _settings["restricted"] if key is None else _settings["restricted"].get(key)
+    )
     mock_settings.save = MagicMock()
 
     p.settings = mock_settings

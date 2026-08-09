@@ -3,6 +3,8 @@ import {
   sharedState,
   notifySubscribers,
   toaster,
+  disableKey,
+  registerKey,
   startPairing,
   setSourceSetting,
   formatMedia,
@@ -42,15 +44,33 @@ export interface TriggerRow {
   generated?: boolean;
 }
 
+/** Ordered by how many people will actually use each one, not by how the
+ *  sources happen to be grouped in the backend — the list is nine rows long,
+ *  and it was previously grouped by source type, which put the three storage
+ *  categories nobody owns a drive for above the camera everyone can point at a
+ *  printed card.
+ *
+ *  The ranking, roughly: what needs no extra hardware, then what needs
+ *  hardware people already have, then what needs hardware bought for this, then
+ *  the three that need a broker, a wiring loom or a script.
+ *
+ *  Deliberately not sorted by "enabled", which would reshuffle the list under
+ *  the user's thumb as they switch things on. */
 export const TRIGGER_ROWS: TriggerRow[] = [
+  // The one the plugin is built around: cheap tags, works on any Deck, on by default.
   { key: "nfc",     label: "NFC",         sourceType: SourceType.NFC,        icon: "🏷️", noun: "tag" },
+  // A stick everybody already owns, in a port every Deck already has.
+  { key: "usb",     label: "USB Storage", sourceType: SourceType.STORAGE,    icon: "🔌", noun: "drive",   driveKind: "usb" },
+  // No medium to buy at all — the plugin prints the cards.
+  { key: "camera",  label: "Camera",      sourceType: SourceType.CAMERA,     icon: "📷", noun: "code", generated: true },
+  // The Deck has the slot, but it usually holds the games library.
+  { key: "flash",   label: "Memory Card", sourceType: SourceType.STORAGE,    icon: "💳", noun: "card",    driveKind: "flash" },
+  // The reason several people install this, and a drive to buy for it.
   { key: "floppy",  label: "Floppy",      sourceType: SourceType.STORAGE,    icon: "💾", noun: "disk",    driveKind: "floppy" },
   { key: "optical", label: "Optical",     sourceType: SourceType.STORAGE,    icon: "💿", noun: "disc",    driveKind: "optical" },
-  { key: "flash",   label: "Memory Card", sourceType: SourceType.STORAGE,    icon: "💳", noun: "card",    driveKind: "flash" },
-  { key: "usb",     label: "USB Storage", sourceType: SourceType.STORAGE,    icon: "🔌", noun: "drive",   driveKind: "usb" },
+  // The three that need something built or configured before they do anything.
   { key: "mqtt",    label: "IoT",         sourceType: SourceType.MQTT,       icon: "📡", noun: "message" },
   { key: "serial",  label: "Serial",      sourceType: SourceType.SERIAL,     icon: "📟", noun: "code" },
-  { key: "camera",  label: "Camera",      sourceType: SourceType.CAMERA,     icon: "📷", noun: "code", generated: true },
   { key: "file",    label: "File",        sourceType: SourceType.FILE_WATCH, icon: "📁", noun: "file" },
 ];
 
@@ -115,6 +135,14 @@ export async function toggleRow(row: TriggerRow, value: boolean, status?: Source
   notifySubscribers();
 }
 
+/** Shown in place of the trigger's own glyph when the medium is the key.
+ *
+ * The row's icon otherwise says which *kind* of medium is present, which is
+ * already on the toggle above it — while a key looks exactly like every other
+ * disk or tag until you read the label. Swapping the glyph is what makes "this
+ * one is not a game" legible at a glance. */
+const KEY_ICON = "🔑";
+
 export interface MediaState {
   /** Left-hand text: what is on this trigger right now. */
   text: string;
@@ -122,6 +150,8 @@ export interface MediaState {
   action: string | null;
   /** Dim the row — no hardware, so nothing here is actionable. */
   dim: boolean;
+  /** Overrides the trigger's glyph for this state. */
+  icon?: string;
   /** Work is in progress; show a spinner in place of the medium icon. */
   busy?: boolean;
   /** The action erases the medium, so the row asks before doing it. Only ever
@@ -156,6 +186,29 @@ export function mediaStateFor(
 
   if (medium.problem === "loading") {
     return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
+  }
+  // The key is not a link and must never be offered a Pair button:
+  // writing a game onto it would destroy the only thing that can unlock the
+  // device. The backend refuses it too — this stops the user asking.
+  //
+  // A key payload this device does *not* recognise is a different thing: a
+  // stale key, or someone else's. That is an ordinary medium with something
+  // unusable on it, so it keeps its Pair button — without one it could never
+  // be reused for anything.
+  // Deregistering from here as well as from the Restricted Mode section, which
+  // is up to nine trigger rows further down: this row is where you are already
+  // looking when you decide the key is in the wrong place, and it is the row
+  // whose toggle is pinned on until you do.
+  if (medium.key && medium.authorized !== false) {
+    return { text: "Key", action: "Deregister", dim: false, icon: KEY_ICON };
+  }
+  if (medium.key) {
+    return {
+      text: "Unknown key",
+      action: target ? "Pair" : null,
+      dim: false,
+      icon: KEY_ICON,
+    };
   }
   if (medium.problem === "unreadable") {
     // Format is offered only when the backend found no filesystem at all — a
@@ -223,6 +276,61 @@ export async function formatRow(medium: ActiveMedium): Promise<boolean> {
   return true;
 }
 
+/** What one trigger offers while a key is being registered.
+ *
+ * A separate reducer from `mediaStateFor` rather than another flag on it: the
+ * questions are different ones. Pairing asks "is there a game to write, and
+ * does this medium already hold it"; registering a key asks only "can this
+ * trigger be written to, and what would I be overwriting". Folding both into
+ * one function meant four arguments that each only mattered half the time.
+ *
+ * `writable` comes from the backend's `can_pair`, not from anything the panel
+ * knows: a camera reads codes it cannot write, and MQTT has no medium at all.
+ */
+export function keyStateFor(
+  row: TriggerRow,
+  connected: boolean,
+  writable: boolean,
+  medium: ActiveMedium | undefined,
+): MediaState {
+  if (!writable) return { text: "Cannot hold a key", action: null, dim: true };
+  if (!connected) return { text: "Not connected", action: null, dim: true };
+
+  if (medium?.problem === "loading") {
+    return { text: `Reading ${row.noun}…`, action: null, dim: false, busy: true };
+  }
+
+  // Offered with no medium too. The backend arms the source and waits, so
+  // "Register" on the Floppy row and then insert a disk is a legitimate order
+  // to do this in — and refusing until something is present would make the row
+  // look broken for the trigger you are holding the disk for.
+  if (!medium) {
+    return { text: `No ${row.noun} — insert one`, action: "Register", dim: false };
+  }
+
+  // No button: this medium is already the answer to the question the list is
+  // asking, and pressing Register on it would write a *second* token over the
+  // first — a key that still unlocks, having pointlessly rewritten itself.
+  // Choosing a different trigger, or deregistering, are the only two moves
+  // from here, and both live elsewhere.
+  if (medium.key && medium.authorized) {
+    return { text: "Already the key", action: null, dim: false, icon: KEY_ICON };
+  }
+
+  // Overwriting a game destroys that pairing, so the row says whose it is and
+  // asks first — the same two-press confirm Format uses, for the same reason.
+  if (medium.uri) {
+    return {
+      text: launchTargetName(medium.uri),
+      action: "Register",
+      dim: false,
+      destructive: true,
+    };
+  }
+
+  return { text: `Empty ${row.noun}`, action: "Register", dim: false };
+}
+
 /** Arm pairing for one trigger.
  *
  * Targeted: with a tag on the reader and a disk in the drive, an untargeted
@@ -248,4 +356,65 @@ export async function pairRow(
   sharedState.pairing = true;
   notifySubscribers();
   return true;
+}
+
+/** Arm key registration on one trigger.
+ *
+ * The counterpart to `pairRow`, and targeted for the same reason it is: with a
+ * tag on the reader and a stick in a drive, an untargeted register wrote the
+ * key to whichever the backend happened to read first, which is exactly the
+ * ambiguity `pairRow`'s comment above was written about.
+ */
+export async function registerKeyOn(
+  row: TriggerRow,
+  sourceId?: string,
+): Promise<boolean> {
+  const id = sourceId ?? mediumFor(row, sharedState.activeMedia)?.source_id;
+  const ok = await registerKey(id);
+  if (!ok) {
+    toaster.toast({
+      title: "Could not register",
+      body: `${row.label} cannot be written to.`,
+      critical: true,
+    });
+    return false;
+  }
+  sharedState.registeringKey = false;
+  sharedState.pairing = true;
+  notifySubscribers();
+  return true;
+}
+
+/** Switch restricted mode off and wipe the key from its medium.
+ *
+ * Shared by the Restricted Mode section and the key's own trigger row, so the
+ * two cannot come to say different things about what the button did. No
+ * confirm: it is only reachable while unlocked — the key is right there — and
+ * registering again is one press.
+ */
+export async function deregisterKey(): Promise<boolean> {
+  if (await disableKey()) {
+    toaster.toast({
+      title: "Key deregistered",
+      body: "Restricted mode is off and the medium has been wiped.",
+    });
+    return true;
+  }
+  toaster.toast({
+    title: "Could not deregister",
+    body: "The key must be present, and writable, to be wiped.",
+    critical: true,
+  });
+  return false;
+}
+
+/** Leave key-registration mode without writing anything.
+ *
+ * Only the choosing half is local — nothing has been armed on the backend yet,
+ * which is why this needs no RPC. Once a trigger has been chosen the flow is an
+ * ordinary armed pairing and `cancelPairing` is what stops it.
+ */
+export function cancelKeyRegistration(): void {
+  sharedState.registeringKey = false;
+  notifySubscribers();
 }

@@ -21,6 +21,7 @@ import {
   type SettingKey,
 } from "./shared";
 
+import { RestrictedPanel, LockedPanel } from "./RestrictedPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
@@ -80,6 +81,18 @@ const Content: FC = () => {
 
   if (!state.settings) return null;
 
+  // Locked: the triggers list, the settings and the Mifare tools all write
+  // something the backend now refuses, so none of them is drawn. The lock is
+  // enforced there, not here — this only stops the panel offering buttons that
+  // would fail.
+  if (state.restricted?.locked) {
+    return (
+      <PanelSection>
+        <LockedPanel restricted={state.restricted} />
+      </PanelSection>
+    );
+  }
+
   // Recomputed each render: sharedState.viewedApp changes trigger a re-render
   // via notifySubscribers(), so this stays in step with what's on screen.
   const pairTarget = resolvePairTarget();
@@ -98,6 +111,7 @@ const Content: FC = () => {
         media={state.activeMedia}
         target={pairTarget}
         pairing={state.pairing}
+        registeringKey={state.registeringKey}
       />
 
       <PanelSection title="Settings">
@@ -118,6 +132,8 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
       </PanelSection>
+
+      {state.restricted && <RestrictedPanel restricted={state.restricted} />}
 
       {/* Keys and sectors are Mifare concepts; a floppy has neither, so this
           follows the NFC medium specifically rather than whatever was last

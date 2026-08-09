@@ -265,12 +265,20 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
     </div>
   );
 
-  const modal = modalVisible ? (
+  const modal = modalVisible && !sharedState.restricted?.locked ? (
     <PairModal target={target} statusMessage={statusMessage} onClose={closeModal} />
   ) : null;
 
+  // Locked: the link icon leads to a modal whose every button arms a pairing
+  // the backend refuses. Read from sharedState directly rather than through a
+  // subscription — the panel re-renders this tree on a lock change, and the
+  // icon lives on a game page that is rebuilt on navigation anyway.
+  const locked = !!sharedState.restricted?.locked;
+
   let iconNode: React.ReactNode = null;
-  if (show && embedded) {
+  if (locked) {
+    iconNode = null;
+  } else if (show && embedded) {
     iconNode = icon;
   } else if (show && anchor) {
     iconNode = createPortal(icon, anchor);

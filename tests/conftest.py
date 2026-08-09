@@ -96,6 +96,13 @@ def plugin(tmp_path):
     _settings = {
         "auto_launch": True,
         "auto_close": False,
+        # Restricted mode, unlocked and with no key registered — the shipped state.
+        # Present rather than omitted because Plugin.locked reads it on every
+        # guarded RPC, and a MagicMock attribute would read as locked.
+        "restricted": {
+            "key_hash": "",
+            "key_label": "",
+        },
         # Mirrors SettingsManager's real shape. Only nfc was here before, so
         # get_source_settings raised for every other source and anything
         # touching per-source settings had to work around it.
@@ -142,8 +149,19 @@ def plugin(tmp_path):
         else:
             _settings["sources"]["nfc"][key] = value
         return True
+
+    def _get_restricted(key=None):
+        block = _settings["restricted"]
+        return block if key is None else block.get(key)
+
+    def _set_restricted(key, value):
+        _settings["restricted"][key] = value
+        return True
+
     mock_settings.get = _get_setting
     mock_settings.set = _set_setting
+    mock_settings.get_restricted = _get_restricted
+    mock_settings.set_restricted = _set_restricted
     mock_settings.save = lambda: True
     mock_settings.get_source_settings = lambda source_type: _settings["sources"][source_type]
     mock_settings.settings = _settings
