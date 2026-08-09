@@ -8,6 +8,12 @@ import { useState, useEffect } from "react";
 export interface Settings {
     auto_launch: boolean;
     auto_close: boolean;
+    /** The launch splash (issue #8). Off by default: it paints over the whole
+     *  screen, which is a bigger change to someone's Deck than a plugin should
+     *  make uninvited. */
+    splash?: boolean;
+    /** Which theme paints it. Unknown ids fall back rather than fail. */
+    theme?: string;
     sources: {
         nfc: {
             device_path: string;
@@ -178,6 +184,7 @@ export interface SharedState {
 
 export type SettingKey =
   | "auto_launch"
+  | "splash"
   | "auto_close"
   | "device_path"
   | "baudrate"
@@ -225,6 +232,16 @@ type Listener = () => void;
 const subscribers = new Set<Listener>();
 export function notifySubscribers() {
   subscribers.forEach(fn => fn());
+}
+
+/** Subscribe outside React.
+ *
+ * The splash layer is a global component that lives longer than any panel and
+ * needs the settings the panel writes — chiefly whether it is switched on at
+ * all, since the switch is behind the layer it switches off. */
+export function subscribeToState(listener: Listener): () => void {
+  subscribers.add(listener);
+  return () => { subscribers.delete(listener); };
 }
 
 export function useSharedState(): SharedState {

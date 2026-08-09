@@ -20,6 +20,7 @@ import {
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
 import { playSound, preloadSounds } from "./lib/sounds";
+import { scenes } from "./lib/presentation";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -227,6 +228,52 @@ export function startBackgroundManager(): () => void {
   };
   init();
 
+  // The scene, recomputed from what the plugin already knows.
+  //
+  // Derived rather than assigned: every caller pushes the same snapshot
+  // through the same reducer, so a scene the facts do not support cannot be
+  // reached by some path forgetting to reset a flag. `launching` is the one
+  // fact with no backend equivalent — it is the window between accepting a URI
+  // and the game painting, which only this side can see.
+  let launching = false;
+  const restate = (touch = true) => {
+    if (touch) scenes.touch();
+    const media = Object.values(sharedState.activeMedia);
+    scenes.apply({
+      reading: media.some((m) => m.problem === "loading"),
+      launching,
+      inGame: !!activeAppIdRef.current,
+      failed: media.some((m) => m.problem === "unreadable" || m.problem === "blocked"),
+      locked: !!restrictedRef.current?.locked,
+    });
+  };
+  const setLaunching = (value: boolean) => {
+    launching = value;
+    restate();
+  };
+
+  // What ends a launch, measured rather than assumed.
+  //
+  // The obvious signal — Router.MainRunningApp becoming non-null — fires 501ms
+  // after RunGame on this device, while Steam's own launch flow runs for
+  // another six seconds behind its "Starting launch…" card. Ending the splash
+  // there cut it off almost immediately, which is exactly the bug this
+  // instrumentation was written to find:
+  //
+  //   115ms  task CheckShaderDepotManifest
+  //   501ms  MainRunningApp set        <- not the end of anything
+  //   6835ms task WaitingGameWindow
+  //   6841ms task Completed
+  //   6918ms GameActionEnd             <- the end
+  //
+  // Deliberately not held until the game paints, even though the compositor
+  // would remove the layer for us. The scene has to *stop* being LAUNCHING
+  // sometime, and if it did not, pressing STEAM mid-game would bring the
+  // splash back over a running game.
+  const gameActionEnd = (window as any).SteamClient?.Apps?.RegisterForGameActionEnd?.(
+    () => setLaunching(false),
+  );
+
   // Sounds, played here rather than in the backend.
   //
   // The backend still decides which sound belongs to which event — it owns the
@@ -262,6 +309,7 @@ export function startBackgroundManager(): () => void {
       },
     };
     notifySubscribers();
+    restate();
   });
 
   // event listeners
@@ -290,6 +338,9 @@ export function startBackgroundManager(): () => void {
   });
 
   const removeListener = addEventListener<[data?: { source_id?: string }]>("media_removed", (data) => {
+    // Removing the medium ends whatever it was doing, including a launch that
+    // was still in flight.
+    launching = false;
     // Only the source that reported the removal loses its row. Clearing the
     // whole map when source_id was absent meant one trigger losing its medium
     // blanked every other trigger's row too — a floppy ejecting would erase
@@ -438,6 +489,12 @@ export function startBackgroundManager(): () => void {
               });
           }
           // Now launch the game after backend is ready
+          //
+          // The splash goes up here rather than on uri_detected: a URI that
+          // turns out to be blocked, or a game already running, never reaches
+          // this line, and a splash for a launch that was never attempted is
+          // the flicker MIN_VISIBLE_MS exists to prevent.
+          setLaunching(true);
           launchSteamUri(uri);
           return;
         }
@@ -475,6 +532,7 @@ export function startBackgroundManager(): () => void {
     sharedState.restricted = state;
     restrictedRef.current = state;
     notifySubscribers();
+    restate();
     console.info(`[ Decky Links ] Restricted mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
   });
 
@@ -486,6 +544,7 @@ export function startBackgroundManager(): () => void {
     sharedState.restricted = data;
     restrictedRef.current = data;
     notifySubscribers();
+    restate();
   });
 
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
@@ -593,6 +652,10 @@ export function startBackgroundManager(): () => void {
           activeAppIdRef.current = currentId;
           sharedState.activeAppId = currentId;
           notifySubscribers();
+          // Not the end of the launch — see RegisterForGameActionEnd above.
+          // A game *disappearing*, though, ends anything in flight.
+          if (!currentId) launching = false;
+          restate();
           await setRunningGame(currentId ? parseInt(currentId) : null);
         }
 
@@ -646,8 +709,16 @@ export function startBackgroundManager(): () => void {
   };
   pollLoop();
 
+  // AMBIENT is reached by nothing happening, which no event can announce. One
+  // slow tick, deliberately far slower than the poll loop: it only has to
+  // notice a 90-second threshold, and this is the one timer that runs while
+  // the Deck is idle.
+  const sceneTicker = window.setInterval(() => restate(false), 10_000);
+
   stopBackgroundManagerFn = () => {
     active = false;
+    clearInterval(sceneTicker);
+    gameActionEnd?.unregister?.();
     removeEventListener("play_sound", soundListener);
     removeEventListener("media_loading", loadingListener);
     removeEventListener("media_detected", tagListener);

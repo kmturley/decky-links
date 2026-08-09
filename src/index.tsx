@@ -25,6 +25,7 @@ import { RestrictedPanel, LockedPanel } from "./RestrictedPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
+import { SplashLayer } from "./SplashLayer";
 import { resolveRungameidTarget } from "./lib/steamIds";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -131,6 +132,14 @@ const Content: FC = () => {
             onChange={(v: boolean) => triggerUpdateSetting("auto_close", v)}
           />
         </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Launch Splash"
+            description="Full-screen animation while a game loads"
+            checked={!!state.settings.splash}
+            onChange={(v: boolean) => triggerUpdateSetting("splash", v)}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       {state.restricted && <RestrictedPanel restricted={state.restricted} />}
@@ -149,6 +158,12 @@ export default definePlugin(() => {
   const embeddedPatch = patchLibraryApp();
   const stopBackground = startBackgroundManager();
 
+  // Mounted once, for the life of the plugin, and rendering null nearly all of
+  // it. A global component rather than something inside the panel: the panel
+  // only exists while the Quick Access menu is open, and the whole point of
+  // the splash is to be on screen when it is not.
+  routerHook.addGlobalComponent("DeckyLinksSplash", SplashLayer);
+
   return {
     name: "Decky Links",
     titleView: <div className={staticClasses.Title}>Decky Links</div>,
@@ -157,6 +172,7 @@ export default definePlugin(() => {
     icon: <FaLink />,
     onDismount() {
       stopBackground();
+      routerHook.removeGlobalComponent("DeckyLinksSplash");
       routerHook.removePatch('/library/app/:appid', embeddedPatch);
     },
   };

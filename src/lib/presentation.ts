@@ -152,6 +152,9 @@ class SceneStore {
   set(next: Scene): Scene {
     if (next === this.current) return next;
     const change: SceneChange = { from: this.current, to: next, at: Date.now() };
+    // Logged because a scene is derived from five facts across two processes,
+    // and "the splash did not appear" has to be answerable without a debugger.
+    console.info(`[ Decky Links ] Scene: ${this.current ?? "-"} -> ${next}`);
     this.current = next;
     for (const listener of this.listeners) {
       try {

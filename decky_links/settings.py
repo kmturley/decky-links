@@ -45,6 +45,8 @@ class SettingsManager:
         self.settings = {
             "auto_launch": True,
             "auto_close": False,
+            # The launch splash (issue #8). Opt-in: see TOP_LEVEL_RULES.
+            "splash": False,
             # Restricted mode. Its own block rather than four more top-level keys,
             # because top-level keys are what the generic set_setting RPC is
             # allowed to write, and the lock must not be one of those.
