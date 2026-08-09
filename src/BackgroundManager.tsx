@@ -19,6 +19,7 @@ import {
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
+import { playSound, preloadSounds } from "./lib/sounds";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
 const STEAM_RUN_PREFIX = "steam://run/";
@@ -225,6 +226,20 @@ export function startBackgroundManager(): () => void {
     notifySubscribers();
   };
   init();
+
+  // Sounds, played here rather than in the backend.
+  //
+  // The backend still decides which sound belongs to which event — it owns the
+  // state machine — and sends the name. Only the speaker moved, because
+  // `paplay` costs ~512ms of fixed overhead on a Deck and the feedback has to
+  // land within 200ms of the tag touching the reader. See src/lib/sounds.ts.
+  preloadSounds();
+  const soundListener = addEventListener<[data: { sound?: string }]>(
+    "play_sound",
+    (data) => {
+      if (data?.sound) playSound(data.sound);
+    },
+  );
 
   // A medium is present but not yet readable. Recorded as a normal entry with
   // problem: "loading" so it occupies its row the same way a real medium does
@@ -633,6 +648,7 @@ export function startBackgroundManager(): () => void {
 
   stopBackgroundManagerFn = () => {
     active = false;
+    removeEventListener("play_sound", soundListener);
     removeEventListener("media_loading", loadingListener);
     removeEventListener("media_detected", tagListener);
     removeEventListener("media_removed", removeListener);
