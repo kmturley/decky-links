@@ -44,15 +44,33 @@ export interface TriggerRow {
   generated?: boolean;
 }
 
+/** Ordered by how many people will actually use each one, not by how the
+ *  sources happen to be grouped in the backend — the list is nine rows long,
+ *  and it was previously grouped by source type, which put the three storage
+ *  categories nobody owns a drive for above the camera everyone can point at a
+ *  printed card.
+ *
+ *  The ranking, roughly: what needs no extra hardware, then what needs
+ *  hardware people already have, then what needs hardware bought for this, then
+ *  the three that need a broker, a wiring loom or a script.
+ *
+ *  Deliberately not sorted by "enabled", which would reshuffle the list under
+ *  the user's thumb as they switch things on. */
 export const TRIGGER_ROWS: TriggerRow[] = [
+  // The one the plugin is built around: cheap tags, works on any Deck, on by default.
   { key: "nfc",     label: "NFC",         sourceType: SourceType.NFC,        icon: "🏷️", noun: "tag" },
+  // A stick everybody already owns, in a port every Deck already has.
+  { key: "usb",     label: "USB Storage", sourceType: SourceType.STORAGE,    icon: "🔌", noun: "drive",   driveKind: "usb" },
+  // No medium to buy at all — the plugin prints the cards.
+  { key: "camera",  label: "Camera",      sourceType: SourceType.CAMERA,     icon: "📷", noun: "code", generated: true },
+  // The Deck has the slot, but it usually holds the games library.
+  { key: "flash",   label: "Memory Card", sourceType: SourceType.STORAGE,    icon: "💳", noun: "card",    driveKind: "flash" },
+  // The reason several people install this, and a drive to buy for it.
   { key: "floppy",  label: "Floppy",      sourceType: SourceType.STORAGE,    icon: "💾", noun: "disk",    driveKind: "floppy" },
   { key: "optical", label: "Optical",     sourceType: SourceType.STORAGE,    icon: "💿", noun: "disc",    driveKind: "optical" },
-  { key: "flash",   label: "Memory Card", sourceType: SourceType.STORAGE,    icon: "💳", noun: "card",    driveKind: "flash" },
-  { key: "usb",     label: "USB Storage", sourceType: SourceType.STORAGE,    icon: "🔌", noun: "drive",   driveKind: "usb" },
+  // The three that need something built or configured before they do anything.
   { key: "mqtt",    label: "IoT",         sourceType: SourceType.MQTT,       icon: "📡", noun: "message" },
   { key: "serial",  label: "Serial",      sourceType: SourceType.SERIAL,     icon: "📟", noun: "code" },
-  { key: "camera",  label: "Camera",      sourceType: SourceType.CAMERA,     icon: "📷", noun: "code", generated: true },
   { key: "file",    label: "File",        sourceType: SourceType.FILE_WATCH, icon: "📁", noun: "file" },
 ];
 
