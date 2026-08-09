@@ -274,6 +274,19 @@ or a leaked mount makes every later result meaningless.
 | Reader not detected | Auto-detection only matches known USB-serial vendor IDs; set the device path in settings |
 | Drive letter drifts `sda`→`sdb` | A leaked mount is pinning the node — `grep decky-links /proc/mounts` |
 
+## Media coverage
+
+- [Pocket Tactics — Floppy disks and the Steam Deck aren't the combo I was expecting in 2026](https://www.pockettactics.com/steam-deck/floppy-disks)
+- [XDA — Someone made a system that loads their Steam games using floppy disks, and it's pretty genius](https://www.xda-developers.com/someone-made-a-system-that-loads-their-steam-games-using-floppy-disks-and-its-pretty-genius/)
+- [Notebookcheck — Games going digital-only? Steam Deck user launches them with floppy disks](https://www.notebookcheck.net/Games-going-digital-only-Steam-Deck-user-launches-them-with-floppy-disks.1361271.0.html)
+- [VideoCardz — Steam Deck user brings physical games back with floppy disks, sort of](https://videocardz.com/newz/steam-deck-user-brings-physical-games-back-with-floppy-disks-sort-of)
+- [Club386 — This retro Steam Deck mod triggers game startup using floppy disks](https://www.club386.com/this-retro-steam-deck-mod-triggers-game-startup-using-floppy-disks/)
+- [ARY News — Steam Deck user brings back floppy disks to launch digital games](https://arynews.tv/steam-deck-user-brings-back-floppy-disks-to-launch-digital-games.amp)
+- [Mango Developer — Steam Deck hacker loads games from floppy disks because physical media refuses to die](https://mangodeveloper.com/articles/steam-deck-hacker-loads-games-from-floppy-disks-because-physical-media-refuses-t)
+- [Lowyat.NET — Steam Deck owner brought floppy disk gaming back to life, sort of](https://www.lowyat.net/2026/400826/steam-deck-owner-brought-floppy-disk-gaming-back-to-life-sort-of/)
+- [Generation Amiga — This Steam Deck mod turns floppy disks into game launchers](https://www.generationamiga.com/2026/08/07/this-steam-deck-mod-turns-floppy-disks-into-game-launchers/)
+- [WindowsForum — Steam Deck Decky Links uses floppies as game launch keys](https://windowsforum.com/windows-news.4/steam-deck-decky-links-uses-floppies-as-game-launch-keys.441819/)
+
 ## License
 
 GNU General Public License v3.0 — see [LICENSE](./LICENSE).
