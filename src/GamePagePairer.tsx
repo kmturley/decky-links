@@ -1,6 +1,7 @@
 import React, { FC, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { FaLink } from "react-icons/fa";
+import { LAYER_PAIR_ICON } from "./lib/layers";
 import {
   cancelPairing,
   addEventListener,
@@ -249,7 +250,7 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
               display: "flex",
               alignItems: "center",
               cursor: "pointer",
-              zIndex: 10000,
+              zIndex: LAYER_PAIR_ICON,
             }
           : {
               display: "flex",

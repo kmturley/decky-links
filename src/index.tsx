@@ -64,6 +64,26 @@ function resolvePairTarget(): { uri: string; label: string } | null {
  *
  * Per-source settings do not come through here — the Triggers panel writes
  * those with setSourceSetting, which the backend validates per source. */
+/** The dropdown value that means "leave Steam's own interface alone". */
+const NO_THEME = "none";
+
+/** Apply a theme choice, which is two settings behind one control.
+ *
+ * Order matters on the way on: the theme is stored *before* the feature is
+ * switched on, so the layer's first paint is already the chosen theme rather
+ * than the previous one for a frame. Switching off leaves the theme stored, so
+ * turning it back on returns to the theme you last used rather than to the
+ * default.
+ */
+async function chooseTheme(id: string) {
+  if (id === NO_THEME) {
+    await triggerUpdateSetting("custom_visuals", false);
+    return;
+  }
+  await triggerUpdateSetting("theme", id);
+  await triggerUpdateSetting("custom_visuals", true);
+}
+
 async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
@@ -135,27 +155,28 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
         <PanelSectionRow>
-          <ToggleField
+          {/* One control, not a switch plus a picker.
+              Those were two ways to say the same thing — "off" and "which
+              one" — and with a single theme installed the picker had exactly
+              one option, so opening it could only ever re-select what was
+              already selected. None *is* off, which also makes the switch
+              discoverable: you find out themes exist by looking at the thing
+              that turns them on.
+              layout="below" because the inline form gives the control what is
+              left after the label, which was enough for "MS-D...". */}
+          <DropdownItem
             label="Custom Visuals"
-            description="Show your own home and loading screens instead of the Steam interface"
-            checked={!!state.settings.custom_visuals}
-            onChange={(v: boolean) => triggerUpdateSetting("custom_visuals", v)}
+            layout="below"
+            rgOptions={[
+              { data: NO_THEME, label: "None (use Steam)" },
+              ...allThemes().map((t) => ({ data: t.id, label: t.name })),
+            ]}
+            selectedOption={
+              state.settings.custom_visuals ? themeFor(state.settings.theme).id : NO_THEME
+            }
+            onChange={(o: { data: string }) => void chooseTheme(o.data)}
           />
         </PanelSectionRow>
-        {/* Only once there is something for it to change. A theme picker above
-            a switched-off feature invites the user to pick one and wonder why
-            nothing happened. */}
-        {state.settings.custom_visuals && (
-          <PanelSectionRow>
-            <DropdownItem
-              label="Theme"
-              description={themeFor(state.settings.theme).blurb}
-              rgOptions={allThemes().map((t) => ({ data: t.id, label: t.name }))}
-              selectedOption={themeFor(state.settings.theme).id}
-              onChange={(o: { data: string }) => triggerUpdateSetting("theme", o.data)}
-            />
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       {state.restricted && <RestrictedPanel restricted={state.restricted} />}

@@ -150,7 +150,7 @@ const Line: FC<{ color?: string; children: React.ReactNode }> = ({ color, childr
 const Ready: FC<SceneProps> = () => (
   <div style={screen}>
     <Crt />
-    <Line color={CGA.white}>Decky Links Disk Operating System</Line>
+    <Line color={CGA.white}>Decky Links Operating System</Line>
     <Line color={CGA.darkGrey}>Version 1.00 (C) 2026</Line>
     <br />
     <Line>Volume in drive A has no label</Line>

@@ -2,6 +2,7 @@ import { FC, useEffect, useState } from "react";
 import { scenes, Scene, MIN_VISIBLE_MS, type SceneChange } from "./lib/presentation";
 import { sharedState, subscribeToState } from "./shared";
 import { themeFor, visualFor, type SceneVisual } from "./lib/themes";
+import { LAYER_VISUALS } from "./lib/layers";
 import { playThemeSound, startLoop, stopLoop } from "./lib/sounds";
 import { launchTargetName } from "./lib/appNames";
 
@@ -131,7 +132,7 @@ export const VisualsLayer: FC = () => {
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 7000,
+        zIndex: LAYER_VISUALS,
         // Never swallows input, however long it is up. Steam keeps receiving
         // everything underneath, so a layer that somehow failed to clear
         // leaves a Deck that looks wrong rather than one that cannot be used.
