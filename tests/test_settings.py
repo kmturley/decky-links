@@ -323,8 +323,18 @@ class TestCustomVisualsSetting:
 
     def test_off_by_default(self, tmp_path):
         """It hides Steam's Home and game pages outright, which is a far
-        bigger change to someone's Deck than a plugin should make uninvited."""
+        bigger change to someone's Deck than a plugin should make uninvited.
+
+        This is what puts the panel's theme picker on None for a fresh
+        install: the control reads the feature's own switch, so "off" and
+        "no theme" cannot disagree."""
         assert _mgr(tmp_path).settings["custom_visuals"] is False
+
+    def test_a_fresh_install_has_no_settings_file_and_still_reads_off(self, tmp_path):
+        """The case an existing settings.json cannot cover: nothing on disk at
+        all, which is every first run."""
+        mgr = SettingsManager(str(tmp_path / "never-written.json"))
+        assert mgr.settings["custom_visuals"] is False
 
     def test_it_survives_a_restart(self, tmp_path):
         path = tmp_path / "settings.json"

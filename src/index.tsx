@@ -64,7 +64,13 @@ function resolvePairTarget(): { uri: string; label: string } | null {
  *
  * Per-source settings do not come through here — the Triggers panel writes
  * those with setSourceSetting, which the backend validates per source. */
-/** The dropdown value that means "leave Steam's own interface alone". */
+/** The dropdown value that means "leave Steam's own interface alone", and what
+ *  a fresh install sits on: `custom_visuals` ships false, so the control reads
+ *  None until someone picks otherwise. A plugin should not take over the whole
+ *  device on the strength of having been installed.
+ *
+ *  The list also carries a Cancel entry. That one is Steam's, appended to
+ *  every dropdown it renders, and is not ours to remove. */
 const NO_THEME = "none";
 
 /** Apply a theme choice, which is two settings behind one control.
@@ -168,7 +174,7 @@ const Content: FC = () => {
             label="Custom Visuals"
             layout="below"
             rgOptions={[
-              { data: NO_THEME, label: "None (use Steam)" },
+              { data: NO_THEME, label: "None" },
               ...allThemes().map((t) => ({ data: t.id, label: t.name })),
             ]}
             selectedOption={
