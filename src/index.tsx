@@ -1,4 +1,5 @@
 import {
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   Router,
@@ -26,6 +27,7 @@ import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { VisualsLayer } from "./VisualsLayer";
+import { allThemes, themeFor } from "./lib/themes";
 import { resolveRungameidTarget } from "./lib/steamIds";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -140,6 +142,20 @@ const Content: FC = () => {
             onChange={(v: boolean) => triggerUpdateSetting("custom_visuals", v)}
           />
         </PanelSectionRow>
+        {/* Only once there is something for it to change. A theme picker above
+            a switched-off feature invites the user to pick one and wonder why
+            nothing happened. */}
+        {state.settings.custom_visuals && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Theme"
+              description={themeFor(state.settings.theme).blurb}
+              rgOptions={allThemes().map((t) => ({ data: t.id, label: t.name }))}
+              selectedOption={themeFor(state.settings.theme).id}
+              onChange={(o: { data: string }) => triggerUpdateSetting("theme", o.data)}
+            />
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       {state.restricted && <RestrictedPanel restricted={state.restricted} />}

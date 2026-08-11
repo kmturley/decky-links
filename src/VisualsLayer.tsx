@@ -1,7 +1,9 @@
 import { FC, useEffect, useState } from "react";
 import { scenes, Scene, MIN_VISIBLE_MS, type SceneChange } from "./lib/presentation";
 import { sharedState, subscribeToState } from "./shared";
-import { themeFor, type SceneVisual } from "./lib/themes";
+import { themeFor, visualFor, type SceneVisual } from "./lib/themes";
+import { playThemeSound, startLoop, stopLoop } from "./lib/sounds";
+import { launchTargetName } from "./lib/appNames";
 
 /** The layer that replaces Steam's interface while custom visuals are on.
  *
@@ -26,6 +28,28 @@ import { themeFor, type SceneVisual } from "./lib/themes";
 /** Never rendered, whatever a theme provides — see above. */
 const NEVER_VISIBLE = new Set<Scene>([Scene.IN_GAME]);
 
+/** What a theme is told about the medium in play.
+ *
+ * Read at paint time from the registry the panel already uses, rather than
+ * threaded through the scene: a scene is a state, and states with payloads
+ * attached are how state machines rot. A theme that shows the game's name is
+ * making a presentation decision from presentation-time facts.
+ */
+function presentedMedium() {
+  return Object.values(sharedState.activeMedia).find((m) => m.uri) ??
+    Object.values(sharedState.activeMedia)[0];
+}
+
+function mediumTitle(): string | undefined {
+  const uri = presentedMedium()?.uri;
+  return uri ? launchTargetName(uri) : undefined;
+}
+
+function mediumTrigger(): string | undefined {
+  const medium = presentedMedium();
+  return medium?.drive_kind ?? medium?.source_type;
+}
+
 export const VisualsLayer: FC = () => {
   // One piece of state, deliberately. An earlier version also kept an
   // `enabled` flag seeded from the settings at mount — but this layer mounts
@@ -42,14 +66,30 @@ export const VisualsLayer: FC = () => {
     const paint = (scene: Scene | null) => {
       window.clearTimeout(timer);
 
-      if (!sharedState.settings?.custom_visuals) return setVisual(null);
-      if (!scene || NEVER_VISIBLE.has(scene)) return setVisual(null);
+      if (!sharedState.settings?.custom_visuals) {
+        stopLoop();
+        return setVisual(null);
+      }
+      if (!scene || NEVER_VISIBLE.has(scene)) {
+        // Includes IN_GAME: a drive seeking under someone's game would be the
+        // single most annoying bug this feature could ship.
+        stopLoop();
+        return setVisual(null);
+      }
 
-      const next = themeFor(sharedState.settings?.theme).scenes[scene];
+      const themeId = themeFor(sharedState.settings?.theme).id;
+      const next = visualFor(sharedState.settings?.theme, scene);
       if (!next) {
         console.debug("[ Decky Links ] Theme has no visual for", scene);
         return setVisual(null);
       }
+
+      // Sound follows the scene, not the paint: an edge sound belongs to the
+      // moment the scene changed, and waiting out MIN_VISIBLE_MS for it would
+      // put the latch click after the disk was already read.
+      if (next.enterSound) playThemeSound(themeId, next.enterSound);
+      if (next.loopSound) startLoop(themeId, next.loopSound);
+      else stopLoop();
 
       // Scenes that pass through in a blink never paint. A tag reads in well
       // under 200ms, so a READING visual on a fast tag would appear and be
@@ -77,6 +117,7 @@ export const VisualsLayer: FC = () => {
 
     return () => {
       window.clearTimeout(timer);
+      stopLoop();
       unsubscribeScene();
       unsubscribeState();
     };
@@ -105,7 +146,9 @@ export const VisualsLayer: FC = () => {
       {/* Scoped to the layer rather than injected into the tab, so nothing of
           ours is left in Steam's stylesheet when the plugin unmounts. */}
       <style>{"@keyframes dl-visual-in { from { opacity: 0 } to { opacity: 1 } }"}</style>
-      {visual.video ? (
+      {visual.render ? (
+        <visual.render scene={visual.scene} title={mediumTitle()} trigger={mediumTrigger()} />
+      ) : visual.video ? (
         <video
           src={visual.video}
           autoPlay

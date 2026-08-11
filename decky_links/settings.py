@@ -48,6 +48,7 @@ class SettingsManager:
             # Custom home and loading screens (issue #8). Opt-in: it hides
             # Steam's own interface while it is on. See TOP_LEVEL_RULES.
             "custom_visuals": False,
+            "theme": "default",
             # Restricted mode. Its own block rather than four more top-level keys,
             # because top-level keys are what the generic set_setting RPC is
             # allowed to write, and the lock must not be one of those.

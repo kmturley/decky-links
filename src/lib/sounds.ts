@@ -13,6 +13,8 @@
  * exposes over HTTP (verified: `dist/index.js` 200, `main.py` 403,
  * `assets/logo.png` 404). The build copies assets/sounds there.
  */
+import { sharedState } from "../shared";
+import { themeAssetUrl, themeFor } from "./themes";
 
 /** The logical names the backend may ask for. Matching ALLOWED_SOUNDS in
  *  main.py: an unknown name is dropped rather than fetched, so a typo cannot
@@ -24,16 +26,32 @@ export type SoundName = (typeof KNOWN)[number];
  *  all — hence the encode. */
 const BASE = `http://localhost:1337/plugins/${encodeURIComponent("Decky Links")}/dist/sounds`;
 
-const cache = new Map<SoundName, HTMLAudioElement>();
+const cache = new Map<string, HTMLAudioElement>();
 
-function element(name: SoundName): HTMLAudioElement {
-  let audio = cache.get(name);
+function element(url: string): HTMLAudioElement {
+  let audio = cache.get(url);
   if (!audio) {
-    audio = new Audio(`${BASE}/${name}.flac`);
+    audio = new Audio(url);
     audio.preload = "auto";
-    cache.set(name, audio);
+    cache.set(url, audio);
   }
   return audio;
+}
+
+/** Where a logical sound comes from right now.
+ *
+ * A theme may replace any of them — the DOS theme's `error` is a PC speaker,
+ * not the plugin's chime — but only while it is actually on screen. Sounds
+ * from a theme whose visuals are switched off would be a period soundtrack
+ * over Steam's own interface, which is nobody's intention.
+ */
+function urlFor(name: SoundName): string {
+  if (sharedState.settings?.custom_visuals) {
+    const theme = themeFor(sharedState.settings?.theme);
+    const file = theme.sounds?.[name];
+    if (file) return themeAssetUrl(theme.id, `sounds/${file}`);
+  }
+  return `${BASE}/${name}.flac`;
 }
 
 /** Pull every sound into the decoder up front.
@@ -45,11 +63,55 @@ function element(name: SoundName): HTMLAudioElement {
 export function preloadSounds(): void {
   for (const name of KNOWN) {
     try {
-      element(name).load();
+      element(urlFor(name)).load();
     } catch (e) {
       console.warn(`[ Decky Links ] Could not preload ${name}:`, e);
     }
   }
+}
+
+/** A theme's own file, for the scene sounds a theme declares itself.
+ *
+ * Separate from the logical names above because these are the theme's
+ * vocabulary rather than the plugin's: nothing in the backend knows what
+ * "seek.flac" is, and nothing should have to.
+ */
+export function playThemeSound(themeId: string, file: string): void {
+  try {
+    const voice = new Audio(themeAssetUrl(themeId, `sounds/${file}`));
+    void voice.play().catch(() => undefined);
+  } catch (e) {
+    console.warn(`[ Decky Links ] Theme sound ${file} failed:`, e);
+  }
+}
+
+let loop: HTMLAudioElement | null = null;
+
+/** Start a looping scene sound, replacing whatever was looping before.
+ *
+ * One voice, deliberately: two loops running at once is what happens when a
+ * scene change is missed, and the failure mode of a stuck drive-seek noise is
+ * far worse than a missed one. Restarting the same file is a no-op, so a
+ * repeated scene does not stutter.
+ */
+export function startLoop(themeId: string, file: string): void {
+  const url = themeAssetUrl(themeId, `sounds/${file}`);
+  if (loop && loop.src === url && !loop.paused) return;
+  stopLoop();
+  try {
+    loop = new Audio(url);
+    loop.loop = true;
+    void loop.play().catch(() => undefined);
+  } catch (e) {
+    console.warn(`[ Decky Links ] Loop ${file} failed:`, e);
+    loop = null;
+  }
+}
+
+export function stopLoop(): void {
+  if (!loop) return;
+  loop.pause();
+  loop = null;
 }
 
 /** Play a sound, if we know it.
@@ -66,7 +128,7 @@ export function playSound(name: string): void {
     return;
   }
   try {
-    const source = element(name as SoundName);
+    const source = element(urlFor(name as SoundName));
     const voice = new Audio(source.src);
     voice.volume = 1;
     void voice.play().catch((e) => {

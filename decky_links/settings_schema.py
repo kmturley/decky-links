@@ -76,6 +76,8 @@ def _is_safe_watch_dir(value: str) -> bool:
 
 # ── Top-level settings ─────────────────────────────────────────────────────
 
+_THEME_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
 TOP_LEVEL_RULES: Dict[str, Rule] = {
     "auto_launch": Rule((bool,), describe="true or false"),
     "auto_close": Rule((bool,), describe="true or false"),
@@ -83,6 +85,10 @@ TOP_LEVEL_RULES: Dict[str, Rule] = {
     # long as it is on, which is a far bigger change to someone's Deck than a
     # plugin should make uninvited.
     "custom_visuals": Rule((bool,), describe="true or false"),
+    # A theme id, not a path. The frontend resolves it against themes it ships
+    # and falls back to the default for anything it does not recognise, so the
+    # only job here is to keep a settings file from smuggling in a URL.
+    "theme": Rule((str,), lambda v: bool(_THEME_ID.fullmatch(v)), "a short name"),
 }
 
 # ── Per-source settings ────────────────────────────────────────────────────

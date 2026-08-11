@@ -10,12 +10,15 @@
  */
 import { cp, mkdir, readdir } from "node:fs/promises";
 
-const from = "assets/sounds";
-const to = "dist/sounds";
-
-await mkdir(to, { recursive: true });
-const names = (await readdir(from)).filter((n) => n.endsWith(".flac"));
+await mkdir("dist/sounds", { recursive: true });
+const names = (await readdir("assets/sounds")).filter((n) => n.endsWith(".flac"));
 for (const name of names) {
-  await cp(`${from}/${name}`, `${to}/${name}`);
+  await cp(`assets/sounds/${name}`, `dist/sounds/${name}`);
 }
-console.log(`copied ${names.length} sounds into ${to}`);
+
+// Theme assets go the same way and for the same reason: a theme's sounds are
+// fetched by URL at runtime, so they have to be somewhere Decky will serve.
+await cp("assets/themes", "dist/themes", { recursive: true });
+const themes = await readdir("assets/themes");
+
+console.log(`copied ${names.length} sounds and ${themes.length} theme(s) into dist/`);

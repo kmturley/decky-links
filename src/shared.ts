@@ -185,6 +185,7 @@ export interface SharedState {
 export type SettingKey =
   | "auto_launch"
   | "custom_visuals"
+  | "theme"
   | "auto_close"
   | "device_path"
   | "baudrate"

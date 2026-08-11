@@ -337,3 +337,31 @@ class TestCustomVisualsSetting:
         path = tmp_path / "settings.json"
         path.write_text(json.dumps({"custom_visuals": "yes"}))
         assert SettingsManager(str(path)).settings["custom_visuals"] is False
+
+
+class TestThemeSetting:
+    """Which theme paints the custom visuals."""
+
+    def test_defaults_to_the_plain_one(self, tmp_path):
+        assert _mgr(tmp_path).settings["theme"] == "default"
+
+    def test_a_known_id_survives_a_restart(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "dos"}))
+        assert SettingsManager(str(path)).settings["theme"] == "dos"
+
+    def test_a_path_is_refused(self, tmp_path):
+        """It is an id, not a location. The frontend turns it into a URL under
+        the plugin's own dist/, so a settings file must not be able to point
+        that anywhere else."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "../../etc/passwd"}))
+        assert SettingsManager(str(path)).settings["theme"] == "default"
+
+    def test_an_unknown_but_wellformed_id_is_kept(self, tmp_path):
+        """The frontend falls back to the default for a theme it does not
+        have, so refusing it here would break a settings file merely because a
+        theme was uninstalled."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "commodore"}))
+        assert SettingsManager(str(path)).settings["theme"] == "commodore"

@@ -1,0 +1,152 @@
+"""Synthesise the DOS theme's sound set into assets/themes/dos/sounds/.
+
+Every one of these is a mechanism or a square wave, which is exactly what
+synthesis is good at — and why the theme ships no recordings. A 3.5" drive
+seeking is a stepper motor: a train of identical clicks at a fixed step rate,
+each one a damped resonance of the head assembly plus the case around it. A PC
+speaker is a square wave through a paper cone and nothing else.
+
+Pure stdlib, 44.1k/24-bit stereo, matching the plugin's other sounds.
+
+    python3 scripts/make-theme-sounds.py
+    for f in *.wav; do ffmpeg -y -i "$f" -c:a flac -sample_fmt s32 \\
+        -bits_per_raw_sample 24 "assets/themes/dos/sounds/${f%.wav}.flac"; done
+
+The loops (seek) are built to a whole number of steps so the join is silent.
+"""
+
+import math
+import os
+import random
+import struct
+
+SR = 44100
+random.seed(1985)   # reproducible: regenerating must not change the sound
+
+
+def render(events, dur, normalise=0.89):
+    n = int(SR * dur)
+    buf = [0.0] * n
+
+    for ev in events:
+        start = int(ev["at"] * SR)
+        span = int(ev["tau"] * 6 * SR)
+        if ev["kind"] == "noise":
+            a, prev = ev["a"], 0.0
+            for i in range(span):
+                j = start + i
+                if j >= n:
+                    break
+                prev = a * random.uniform(-1, 1) + (1 - a) * prev
+                buf[j] += ev["amp"] * prev * math.exp(-i / (ev["tau"] * SR))
+        elif ev["kind"] == "square":
+            # A PC speaker could only do this: full-swing square, no envelope
+            # to speak of beyond the on/off, which is why it sounds the way it
+            # does and why softening it would be wrong.
+            for i in range(int(ev["tau"] * SR)):
+                j = start + i
+                if j >= n:
+                    break
+                phase = (ev["hz"] * i / SR) % 1.0
+                buf[j] += ev["amp"] * (1.0 if phase < 0.5 else -1.0)
+        else:
+            for i in range(span):
+                j = start + i
+                if j >= n:
+                    break
+                t = i / SR
+                buf[j] += (ev["amp"] * math.sin(2 * math.pi * ev["hz"] * t)
+                           * math.exp(-t / ev["tau"]))
+
+    for i in range(int(0.001 * SR)):
+        buf[i] *= i / (0.001 * SR)
+    tail = int(0.004 * SR)
+    for i in range(tail):
+        buf[n - 1 - i] *= i / tail
+
+    peak = max((abs(v) for v in buf), default=1.0) or 1.0
+    return [v / peak * normalise for v in buf]
+
+
+def write_wav(path, samples):
+    data = bytearray()
+    for v in samples:
+        q = int(max(-1.0, min(1.0, v)) * 8388607)
+        b = struct.pack("<i", q)[:3]
+        data += b + b
+    hdr = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+           + struct.pack("<IHHIIHH", 16, 1, 2, SR, SR * 2 * 3, 6, 24)
+           + b"data" + struct.pack("<I", len(data)))
+    with open(path, "wb") as f:
+        f.write(hdr + data)
+
+
+def step(at, amp=1.0):
+    """One movement of the head: the motor's kick, the assembly ringing, the
+    case answering. Three components because a single click sounds like a
+    mouse button, not a mechanism."""
+    return [
+        {"kind": "noise",  "at": at, "amp": 0.9 * amp, "tau": 0.0016, "a": 0.55},
+        {"kind": "sine",   "at": at, "amp": 0.5 * amp, "tau": 0.010,  "hz": 190},
+        {"kind": "sine",   "at": at, "amp": 0.3 * amp, "tau": 0.020,  "hz": 96},
+    ]
+
+
+# ── The seek loop ────────────────────────────────────────────────────────────
+#
+# A 3.5" drive steps at roughly 3ms per track but seeks in bursts, so what you
+# actually hear is a rhythmic grind of a dozen-odd steps, a pause while it
+# reads, then another burst. Built to a whole number of beats so it loops.
+STEP_MS = 0.024
+seek_events = []
+t = 0.0
+for burst in range(3):
+    for i in range(9):
+        seek_events += step(t, amp=0.85 + 0.15 * random.random())
+        t += STEP_MS
+    t += 0.10          # the read pause between bursts
+# The spindle underneath it all: a continuous low hum for the whole loop.
+seek_dur = t
+for i in range(int(seek_dur / 0.02)):
+    seek_events.append(
+        {"kind": "sine", "at": i * 0.02, "amp": 0.06, "tau": 0.03, "hz": 61}
+    )
+
+# ── One-shots ────────────────────────────────────────────────────────────────
+
+insert = render(
+    step(0.0) + step(0.012, 0.7) + [
+        # The shutter sliding back, then the disk seating against the spring.
+        {"kind": "noise", "at": 0.000, "amp": 0.45, "tau": 0.030, "a": 0.28},
+        {"kind": "noise", "at": 0.070, "amp": 1.00, "tau": 0.004, "a": 0.60},
+        {"kind": "sine",  "at": 0.070, "amp": 0.55, "tau": 0.040, "hz": 140},
+    ], dur=0.28)
+
+eject = render([
+    # The button, then the spring throwing the disk clear.
+    {"kind": "noise", "at": 0.000, "amp": 0.70, "tau": 0.004, "a": 0.55},
+    {"kind": "sine",  "at": 0.000, "amp": 0.40, "tau": 0.030, "hz": 220},
+    {"kind": "noise", "at": 0.045, "amp": 0.85, "tau": 0.055, "a": 0.30},
+    {"kind": "sine",  "at": 0.045, "amp": 0.35, "tau": 0.070, "hz": 130},
+] + step(0.150, 0.6), dur=0.32)
+
+# The PC speaker. One frequency, no envelope, no apology.
+beep = render([{"kind": "square", "at": 0.0, "amp": 0.5, "tau": 0.12, "hz": 880}],
+              dur=0.14, normalise=0.6)
+
+# Two low beeps: the sound of "Abort, Retry, Fail?"
+error = render([
+    {"kind": "square", "at": 0.00, "amp": 0.5, "tau": 0.16, "hz": 233},
+    {"kind": "square", "at": 0.22, "amp": 0.5, "tau": 0.22, "hz": 175},
+], dur=0.46, normalise=0.6)
+
+seek = render(seek_events, dur=seek_dur)
+
+if __name__ == "__main__":
+    out = os.getcwd()
+    for name, samples in [
+        ("seek", seek), ("insert", insert), ("eject", eject),
+        ("beep", beep), ("error", error),
+    ]:
+        write_wav(os.path.join(out, f"{name}.wav"), samples)
+        print(f"{name}.wav  {len(samples) / SR:.2f}s")
