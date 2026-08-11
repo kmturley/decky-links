@@ -43,6 +43,7 @@ from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
 from decky_links import restricted_key
+from decky_links import themes as theme_files
 from decky_links import state
 
 # The sounds the plugin may ask for, by logical name. The frontend resolves
@@ -1645,6 +1646,27 @@ class Plugin:
             })
             return True, None
         return False, "the key is not present"
+
+    async def list_themes(self):
+        """Every theme installed, for the panel's picker.
+
+        Not refused while locked. Nothing here writes, and the contents are
+        files the user put in their own Documents folder — a locked device
+        gives nothing away by admitting they exist.
+        """
+        return theme_files.list_themes()
+
+    async def read_theme(self, theme_id: str):
+        """One theme's markup and manifest, or None if there is no such theme."""
+        return theme_files.read_theme(theme_id)
+
+    async def read_theme_asset(self, theme_id: str, name: str):
+        """One file from a theme's sounds folder, base64 encoded.
+
+        Base64 over the RPC channel because only the plugin's own dist/ is
+        served over HTTP, and a theme in Documents is not in it.
+        """
+        return theme_files.read_asset(theme_id, name)
 
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.

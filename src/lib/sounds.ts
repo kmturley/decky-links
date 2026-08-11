@@ -14,7 +14,7 @@
  * `assets/logo.png` 404). The build copies assets/sounds there.
  */
 import { sharedState } from "../shared";
-import { themeAssetUrl, themeFor } from "./themes";
+import { themeAssetUrl } from "./themes";
 
 /** The logical names the backend may ask for. Matching ALLOWED_SOUNDS in
  *  main.py: an unknown name is dropped rather than fetched, so a typo cannot
@@ -38,18 +38,28 @@ function element(url: string): HTMLAudioElement {
   return audio;
 }
 
-/** Where a logical sound comes from right now.
+/** Overrides published by the active theme, if any.
  *
- * A theme may replace any of them — the DOS theme's `error` is a PC speaker,
- * not the plugin's chime — but only while it is actually on screen. Sounds
- * from a theme whose visuals are switched off would be a period soundtrack
- * over Steam's own interface, which is nobody's intention.
+ * Set by the layer when it loads a theme rather than looked up here, so this
+ * module stays ignorant of what a theme is: it plays sounds, and something
+ * else decides which. Cleared when no theme is on, because a period
+ * soundtrack over Steam's own interface is nobody's intention.
  */
-function urlFor(name: SoundName): string {
-  if (sharedState.settings?.custom_visuals) {
-    const theme = themeFor(sharedState.settings?.theme);
-    const file = theme.sounds?.[name];
-    if (file) return themeAssetUrl(theme.id, `sounds/${file}`);
+let overrides: Record<string, string> = {};
+let overrideTheme: string | null = null;
+
+export function setThemeSounds(themeId: string | null, sounds: Record<string, string>): void {
+  overrideTheme = themeId;
+  overrides = themeId ? sounds : {};
+}
+
+async function urlFor(name: SoundName): Promise<string> {
+  const file = overrideTheme && sharedState.settings?.custom_visuals
+    ? overrides[name]
+    : undefined;
+  if (file && overrideTheme) {
+    const url = await themeAssetUrl(overrideTheme, file);
+    if (url) return url;
   }
   return `${BASE}/${name}.flac`;
 }
@@ -62,11 +72,9 @@ function urlFor(name: SoundName): string {
  */
 export function preloadSounds(): void {
   for (const name of KNOWN) {
-    try {
-      element(urlFor(name)).load();
-    } catch (e) {
-      console.warn(`[ Decky Links ] Could not preload ${name}:`, e);
-    }
+    void urlFor(name)
+      .then((url) => element(url).load())
+      .catch((e) => console.warn(`[ Decky Links ] Could not preload ${name}:`, e));
   }
 }
 
@@ -76,10 +84,11 @@ export function preloadSounds(): void {
  * vocabulary rather than the plugin's: nothing in the backend knows what
  * "seek.flac" is, and nothing should have to.
  */
-export function playThemeSound(themeId: string, file: string): void {
+export async function playThemeSound(themeId: string, file: string): Promise<void> {
+  const url = await themeAssetUrl(themeId, file);
+  if (!url) return;
   try {
-    const voice = new Audio(themeAssetUrl(themeId, `sounds/${file}`));
-    void voice.play().catch(() => undefined);
+    void new Audio(url).play().catch(() => undefined);
   } catch (e) {
     console.warn(`[ Decky Links ] Theme sound ${file} failed:`, e);
   }
@@ -94,8 +103,9 @@ let loop: HTMLAudioElement | null = null;
  * far worse than a missed one. Restarting the same file is a no-op, so a
  * repeated scene does not stutter.
  */
-export function startLoop(themeId: string, file: string): void {
-  const url = themeAssetUrl(themeId, `sounds/${file}`);
+export async function startLoop(themeId: string, file: string): Promise<void> {
+  const url = await themeAssetUrl(themeId, file);
+  if (!url) return;
   if (loop && loop.src === url && !loop.paused) return;
   stopLoop();
   try {
@@ -127,14 +137,15 @@ export function playSound(name: string): void {
     console.warn(`[ Decky Links ] Unknown sound: ${name}`);
     return;
   }
-  try {
-    const source = element(urlFor(name as SoundName));
-    const voice = new Audio(source.src);
-    voice.volume = 1;
-    void voice.play().catch((e) => {
-      console.warn(`[ Decky Links ] Sound ${name} did not play:`, e?.name ?? e);
-    });
-  } catch (e) {
-    console.warn(`[ Decky Links ] Sound ${name} failed:`, e);
-  }
+  void urlFor(name as SoundName).then((url) => {
+    try {
+      const voice = new Audio(element(url).src);
+      voice.volume = 1;
+      void voice.play().catch((e) => {
+        console.warn(`[ Decky Links ] Sound ${name} did not play:`, e?.name ?? e);
+      });
+    } catch (e) {
+      console.warn(`[ Decky Links ] Sound ${name} failed:`, e);
+    }
+  });
 }

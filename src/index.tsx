@@ -7,7 +7,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
-import { FC } from "react";
+import { FC, useEffect } from "react";
 import { FaLink } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
@@ -27,7 +27,7 @@ import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
 import { VisualsLayer } from "./VisualsLayer";
-import { allThemes, themeFor } from "./lib/themes";
+import { discoverThemes, knownThemes } from "./lib/themes";
 import { resolveRungameidTarget } from "./lib/steamIds";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -108,6 +108,11 @@ const Content: FC = () => {
   // calls notifySubscribers(), even while QA panel was closed in between.
   const state = useSharedState();
 
+  // Re-read the themes folder whenever the panel opens. A theme is a file
+  // someone can drop in while the plugin is running, and the point of a
+  // file-based format is that looking at the result does not need a restart.
+  useEffect(() => { void discoverThemes(); }, []);
+
   if (!state.settings) return null;
 
   // Locked: the triggers list, the settings and the Mifare tools all write
@@ -175,10 +180,10 @@ const Content: FC = () => {
             layout="below"
             rgOptions={[
               { data: NO_THEME, label: "None" },
-              ...allThemes().map((t) => ({ data: t.id, label: t.name })),
+              ...knownThemes().map((t) => ({ data: t.id, label: t.name })),
             ]}
             selectedOption={
-              state.settings.custom_visuals ? themeFor(state.settings.theme).id : NO_THEME
+              state.settings.custom_visuals ? (state.settings.theme ?? NO_THEME) : NO_THEME
             }
             onChange={(o: { data: string }) => void chooseTheme(o.data)}
           />

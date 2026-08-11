@@ -16,9 +16,8 @@ for (const name of names) {
   await cp(`assets/sounds/${name}`, `dist/sounds/${name}`);
 }
 
-// Theme assets go the same way and for the same reason: a theme's sounds are
-// fetched by URL at runtime, so they have to be somewhere Decky will serve.
-await cp("assets/themes", "dist/themes", { recursive: true });
-const themes = await readdir("assets/themes");
-
-console.log(`copied ${names.length} sounds and ${themes.length} theme(s) into dist/`);
+// Themes deliberately do *not* come this way. They are read from disk by the
+// backend — from the user's Documents folder as well as the plugin's own —
+// and their sounds arrive over the RPC channel, because a theme somebody
+// installs cannot be inside the one directory Decky serves.
+console.log(`copied ${names.length} sounds into dist/sounds`);
