@@ -675,6 +675,21 @@ export function startBackgroundManager(): () => void {
           await setRunningGame(currentId ? parseInt(currentId) : null);
         }
 
+        // 1b. Is one of Steam's side menus open?
+        //
+        // Read from Steam's store because Decky's useQuickAccessVisible does
+        // not reach a global component. m_eOpenSideMenu is 0 for none and 2
+        // for Quick Access, verified live. Polled rather than subscribed: the
+        // menu opens long before anything inside it is pressed, so half a
+        // second of latency is invisible, and this loop was already running.
+        const menuStore = (window as any).SteamUIStore
+          ?.WindowStore?.GamepadUIMainWindowInstance?.m_MenuStore;
+        const menuOpen = (menuStore?.m_eOpenSideMenu ?? 0) !== 0;
+        if (menuOpen !== sharedState.menuOpen) {
+          sharedState.menuOpen = menuOpen;
+          notifySubscribers();
+        }
+
         // 2. Everything reached over RPC, every 10th tick (~5s).
         //
         // All three are pushed by the backend when they change, so this is

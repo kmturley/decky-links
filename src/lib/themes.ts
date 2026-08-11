@@ -68,78 +68,19 @@ export interface Theme {
   sounds?: Record<string, string>;
 }
 
-const centred: CSSProperties = {
-  fontSize: "2.2em",
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  fontWeight: 300,
-  textShadow: "0 2px 24px rgba(0,0,0,0.6)",
-};
-
-/** The theme that ships, and the fallback for any slot another theme leaves
- *  empty — so a theme can be two scenes and still be a theme.
- *
- *  Deliberately plain. It is the neutral option for someone who wants their
- *  own screens rather than a period piece, and the reference for what the
- *  minimum looks like.
- */
-export const DEFAULT_THEME: Theme = {
-  id: "default",
-  name: "Default",
-  blurb: "Plain dark screens",
-  scenes: {
-    [Scene.READY]: {
-      scene: Scene.READY,
-      label: "Present a tag or disk",
-      background: "radial-gradient(circle at 50% 40%, #101c2c 0%, #05070c 75%)",
-      style: { ...centred, color: "#9ec8ea", fontSize: "1.9em" },
-      // Immediate, because any delay here is a window in which Steam's Home
-      // shows through — which is the one thing this feature exists to prevent.
-      immediate: true,
-    },
-    [Scene.AMBIENT]: {
-      scene: Scene.AMBIENT,
-      label: "Decky Links",
-      background: "radial-gradient(circle at 50% 45%, #0b1420 0%, #04060a 80%)",
-      style: { ...centred, color: "#4f6a85", fontSize: "1.5em" },
-      immediate: true,
-      fadeMs: 900,
-    },
-    [Scene.LAUNCHING]: {
-      scene: Scene.LAUNCHING,
-      label: "Loading",
-      background: "radial-gradient(circle at 50% 45%, #16283d 0%, #05070c 70%)",
-      style: { ...centred, color: "#8fd0ff" },
-    },
-    [Scene.READING]: {
-      scene: Scene.READING,
-      label: "Reading",
-      background: "rgba(4, 8, 14, 0.72)",
-      style: { ...centred, color: "#cfe6ff", fontSize: "1.6em" },
-    },
-    [Scene.ERROR]: {
-      scene: Scene.ERROR,
-      label: "Unreadable",
-      background: "rgba(40, 6, 6, 0.78)",
-      style: { ...centred, color: "#ff9d9d", fontSize: "1.8em" },
-      // Shown even if it lasts a moment: an error the user never sees is an
-      // error they will report as "nothing happened".
-      immediate: true,
-    },
-    [Scene.LOCKED]: {
-      scene: Scene.LOCKED,
-      label: "Locked",
-      background: "rgba(6, 10, 18, 0.85)",
-      style: { ...centred, color: "#9fb4cc", fontSize: "1.8em" },
-      immediate: true,
-    },
-  },
-};
-
 const THEMES: Record<string, Theme> = {
-  [DEFAULT_THEME.id]: DEFAULT_THEME,
   [DOS_THEME.id]: DOS_THEME,
 };
+
+/** What an unknown or missing theme id resolves to.
+ *
+ * There was a "default" theme of plain dark screens alongside this. It existed
+ * to prove the layer worked before there was anything to look at, and once
+ * there was, it was a second entry in a two-item list that nobody would ever
+ * choose — so it went, and "no theme" is now spelled by switching the feature
+ * off rather than by picking a blank one.
+ */
+const FALLBACK = DOS_THEME;
 
 /** Resolve a theme id, falling back rather than failing.
  *
@@ -148,17 +89,19 @@ const THEMES: Record<string, Theme> = {
  * is a bug.
  */
 export function themeFor(id?: string | null): Theme {
-  return (id && THEMES[id]) || DEFAULT_THEME;
+  return (id && THEMES[id]) || FALLBACK;
 }
 
-/** A theme's scene, or the default theme's, or nothing.
+/** A theme's scene, or its standby screen, or nothing.
  *
- * The fallback is per *scene*, not per theme, which is what lets a theme ship
- * only the screens it cares about: a floppy theme that never wants to draw an
- * ambient screen inherits one rather than showing Steam through the gap.
+ * The fallback is *within* the theme rather than to another one: a theme that
+ * does not draw an ambient screen should idle on its own standby screen, not
+ * borrow a stranger's. Falling through to Steam would be worse still — a gap
+ * in a takeover is the one thing this feature exists to prevent.
  */
 export function visualFor(id: string | undefined, scene: Scene): SceneVisual | undefined {
-  return themeFor(id).scenes[scene] ?? DEFAULT_THEME.scenes[scene];
+  const theme = themeFor(id);
+  return theme.scenes[scene] ?? theme.scenes[Scene.READY];
 }
 
 export function allThemes(): Theme[] {

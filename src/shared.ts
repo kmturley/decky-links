@@ -169,6 +169,20 @@ export interface SharedState {
    *  exactly what the Triggers list shows. */
   activeMedia: Record<string, ActiveMedium>;
   activeAppId: string | null;
+  /** A theme is painting over Steam's interface right now.
+   *
+   *  Read by anything of ours that decorates a Steam page: while a theme is
+   *  up, that page is not on screen, so an icon floating over it is an offer
+   *  to interact with something invisible. z-index cannot solve this — the
+   *  two live in different stacking contexts, which is why lowering the icon
+   *  below the layer's z-index changed nothing. */
+  visualsPainting: boolean;
+  /** One of Steam's side menus is open — Quick Access or the main menu.
+   *
+   *  Polled from Steam's own store rather than Decky's useQuickAccessVisible,
+   *  which reports nothing to a global component: the layer stayed up over an
+   *  open menu, and the theme picker's dropdown opened *behind* it. */
+  menuOpen: boolean;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
   pairing: boolean;
@@ -197,6 +211,8 @@ export const sharedState: SharedState = {
   readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
   activeMedia: {},
   activeAppId: null,
+  visualsPainting: false,
+  menuOpen: false,
   viewedApp: null,
   pairing: false,
   registeringKey: false,

@@ -1,6 +1,6 @@
 import { FC, useEffect, useState } from "react";
 import { scenes, Scene, MIN_VISIBLE_MS, type SceneChange } from "./lib/presentation";
-import { sharedState, subscribeToState } from "./shared";
+import { notifySubscribers, sharedState, subscribeToState } from "./shared";
 import { themeFor, visualFor, type SceneVisual } from "./lib/themes";
 import { LAYER_VISUALS } from "./lib/layers";
 import { playThemeSound, startLoop, stopLoop } from "./lib/sounds";
@@ -52,6 +52,17 @@ function mediumTrigger(): string | undefined {
 }
 
 export const VisualsLayer: FC = () => {
+  // Stand aside while one of Steam's menus is open.
+  //
+  // The Quick Access panel renders above this layer, but the *popups* it opens
+  // — a dropdown's option list — do not: they are mounted by Steam's modal
+  // system elsewhere in the tree, so the layer covered them and the theme
+  // picker appeared to do nothing when pressed. Rather than hunt for a
+  // z-index that sits above one and below the other across stacking contexts
+  // we do not control, the layer yields: with a menu open the user is
+  // configuring the Deck, not looking at an attract screen.
+  const [menuOpen, setMenuOpen] = useState(!!sharedState.menuOpen);
+
   // One piece of state, deliberately. An earlier version also kept an
   // `enabled` flag seeded from the settings at mount — but this layer mounts
   // at plugin start, *before* the first getSettings resolves, so it seeded
@@ -110,7 +121,10 @@ export const VisualsLayer: FC = () => {
     // The switch is in a panel that renders above this layer, so it can be
     // thrown while the takeover is up — and it has to take effect at once,
     // both ways.
-    const unsubscribeState = subscribeToState(() => paint(scenes.scene));
+    const unsubscribeState = subscribeToState(() => {
+      setMenuOpen(!!sharedState.menuOpen);
+      paint(scenes.scene);
+    });
 
     // Paint whatever is already true. The layer mounts once at plugin start,
     // long after the first scene in a session may have been decided.
@@ -124,7 +138,19 @@ export const VisualsLayer: FC = () => {
     };
   }, []);
 
-  if (!visual) return null;
+  const painting = !!visual && !menuOpen;
+
+  // Published so the game-page pair icon can hide behind the theme it cannot
+  // out-stack. In an effect rather than during render, because writing shared
+  // state mid-render is how two components end up disagreeing about the frame
+  // they are in.
+  useEffect(() => {
+    if (sharedState.visualsPainting === painting) return;
+    sharedState.visualsPainting = painting;
+    notifySubscribers();
+  }, [painting]);
+
+  if (!painting) return null;
 
   return (
     <div

@@ -276,8 +276,15 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   // icon lives on a game page that is rebuilt on navigation anyway.
   const locked = !!sharedState.restricted?.locked;
 
+  // A theme is painting over this page. z-index cannot fix this — the layer is
+  // a global component in a different stacking context, so lowering the icon
+  // below its z-index changed nothing — and there is nothing to fix anyway:
+  // the page this icon decorates is not on screen, so the icon was an offer to
+  // pair with a game the user could not see.
+  const hiddenByTheme = sharedState.visualsPainting;
+
   let iconNode: React.ReactNode = null;
-  if (locked) {
+  if (locked || hiddenByTheme) {
     iconNode = null;
   } else if (show && embedded) {
     iconNode = icon;
