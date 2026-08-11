@@ -177,18 +177,17 @@ export interface SharedState {
    *  two live in different stacking contexts, which is why lowering the icon
    *  below the layer's z-index changed nothing. */
   visualsPainting: boolean;
-  /** Steam has focus somewhere other than its main window: a side menu, or a
-   *  popup one of them opened.
+  /** Steam is showing something of its own over its interface: a side menu,
+   *  or a popup such as a dropdown's option list.
    *
-   *  Derived from FocusNavController rather than from the menu store, which
-   *  was the first attempt and was not enough. Opening the theme picker's
-   *  dropdown *closes* the Quick Access menu — m_eOpenSideMenu goes to 0 —
-   *  while the option list stays on screen, so a menu-open test said "no menu"
-   *  and the layer painted straight over the list the user was reading.
-   *  Focus does not move back to the main window until they are actually done.
+   *  Took three attempts and a measurement. Decky's useQuickAccessVisible
+   *  reports nothing to a global component. The menu store's m_eOpenSideMenu
+   *  goes to 0 the moment a dropdown opens. And focus returns to the main
+   *  window at the same moment — so no window-level signal separates "dropdown
+   *  open" from "nothing open", and the theme painted over the list.
    *
-   *  Decky's useQuickAccessVisible reports nothing to a global component, so
-   *  it is not an option here either. */
+   *  So this is two tests at once: focus off the main window, or a laid-out
+   *  context-menu element in that window's DOM. See the poll loop. */
   steamOverlayOpen: boolean;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;

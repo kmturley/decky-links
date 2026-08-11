@@ -675,21 +675,57 @@ export function startBackgroundManager(): () => void {
           await setRunningGame(currentId ? parseInt(currentId) : null);
         }
 
-        // 1b. Does Steam have focus somewhere other than its main window?
+        // 1b. Is anything of Steam's on top of its own interface?
         //
-        // Which is a different question from "is a menu open", and the right
-        // one. Opening the theme picker's dropdown closes the Quick Access
-        // menu while leaving its option list on screen, so the menu store said
-        // "nothing open" and the layer painted over the list. Focus stays in
-        // the Quick Access window for as long as anything it owns is up.
+        // Two tests, because one is not enough and it took measuring to find
+        // that out. Sampling Steam's state twice a second while the theme
+        // picker's dropdown was opened by hand gave:
         //
-        // Both names come from FocusNavController: "SP BPM_uid0" is the main
-        // window, "QuickAccess_uid2" the menu. Compared rather than matched
-        // against a literal, since those are per-session ids.
+        //   focused=SP BPM_uid0  root=SP BPM_uid0  sideMenu=0   (idle)
+        //   focused=QuickAccess  root=SP BPM_uid0  sideMenu=2   (menu open)
+        //   focused=SP BPM_uid0  root=SP BPM_uid0  sideMenu=0   (dropdown open!)
+        //
+        // Opening the dropdown closes the Quick Access menu *and* hands focus
+        // back to the main window, while the option list stays on screen. So
+        // no window-level signal distinguishes "dropdown open" from "idle" —
+        // both a menu-store test and a focus test report nothing, and the
+        // layer painted over the list the user was reading.
+        //
+        // What does distinguish it is the list itself, in the main window's
+        // DOM. Plugin code runs in SharedJSContext, so that document is
+        // reached through Steam's own window handle; it is same-origin, so
+        // this is a plain query rather than anything clever.
+        //
+        // Both are evaluated in the same tick deliberately: the menu closes
+        // and the popup appears together, so a sample sees one or the other
+        // and never a gap between them.
         const ctx = (window as any).FocusNavController?.m_ActiveContext;
         const focused = ctx?.m_activeWindow?.name;
         const root = ctx?.m_rootWindow?.name;
-        const overlayOpen = !!focused && !!root && focused !== root;
+        const focusElsewhere = !!focused && !!root && focused !== root;
+
+        let popupOpen = false;
+        try {
+          const doc = (window as any).SteamUIStore?.WindowStore
+            ?.GamepadUIMainWindowInstance?.BrowserWindow?.document;
+          // Steam leaves menu markup in the DOM after a menu closes, so
+          // presence is not enough — only a laid-out box counts.
+          const items = doc?.querySelectorAll?.(
+            '.contextMenuItem, [class*="contextmenu" i]',
+          );
+          popupOpen = !!items && [...items].some((el: any) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+        } catch {
+          // A future Steam build could rename the class or move the window
+          // handle. Then this reports false and the behaviour is what it was
+          // before this fix — a theme over a dropdown — rather than a crash in
+          // the loop that also drives launching.
+          popupOpen = false;
+        }
+
+        const overlayOpen = focusElsewhere || popupOpen;
         if (overlayOpen !== sharedState.steamOverlayOpen) {
           sharedState.steamOverlayOpen = overlayOpen;
           notifySubscribers();
