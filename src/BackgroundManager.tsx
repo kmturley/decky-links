@@ -675,18 +675,23 @@ export function startBackgroundManager(): () => void {
           await setRunningGame(currentId ? parseInt(currentId) : null);
         }
 
-        // 1b. Is one of Steam's side menus open?
+        // 1b. Does Steam have focus somewhere other than its main window?
         //
-        // Read from Steam's store because Decky's useQuickAccessVisible does
-        // not reach a global component. m_eOpenSideMenu is 0 for none and 2
-        // for Quick Access, verified live. Polled rather than subscribed: the
-        // menu opens long before anything inside it is pressed, so half a
-        // second of latency is invisible, and this loop was already running.
-        const menuStore = (window as any).SteamUIStore
-          ?.WindowStore?.GamepadUIMainWindowInstance?.m_MenuStore;
-        const menuOpen = (menuStore?.m_eOpenSideMenu ?? 0) !== 0;
-        if (menuOpen !== sharedState.menuOpen) {
-          sharedState.menuOpen = menuOpen;
+        // Which is a different question from "is a menu open", and the right
+        // one. Opening the theme picker's dropdown closes the Quick Access
+        // menu while leaving its option list on screen, so the menu store said
+        // "nothing open" and the layer painted over the list. Focus stays in
+        // the Quick Access window for as long as anything it owns is up.
+        //
+        // Both names come from FocusNavController: "SP BPM_uid0" is the main
+        // window, "QuickAccess_uid2" the menu. Compared rather than matched
+        // against a literal, since those are per-session ids.
+        const ctx = (window as any).FocusNavController?.m_ActiveContext;
+        const focused = ctx?.m_activeWindow?.name;
+        const root = ctx?.m_rootWindow?.name;
+        const overlayOpen = !!focused && !!root && focused !== root;
+        if (overlayOpen !== sharedState.steamOverlayOpen) {
+          sharedState.steamOverlayOpen = overlayOpen;
           notifySubscribers();
         }
 

@@ -110,19 +110,21 @@ def thud(at, amp=1.0):
     low-frequency thud around 70-120Hz with the click almost entirely absorbed
     by the plastic on the way out.
 
-    So: the noise burst is a tenth of what it was and heavily darkened (a=0.08
-    is nearly a low-pass), the resonances moved down about an octave, their
-    decays lengthened, and every component gets an attack ramp so none of them
-    starts on an edge.
+    Second pass, after the first was still too present: the noise is gone
+    entirely rather than merely quiet, because any broadband content at all
+    reads as a click and the case absorbs practically all of it. The
+    resonances drop another fourth (52/86/120Hz), the decays roughly double so
+    each movement blooms instead of snapping, and the attacks lengthen to
+    6-8ms, which is past the ear's threshold for hearing an onset as a
+    transient at all. What is left is a soft knock with no edge on either end.
     """
     return [
-        {"kind": "noise", "at": at, "amp": 0.10 * amp, "tau": 0.006, "a": 0.08},
-        {"kind": "sine",  "at": at, "amp": 0.55 * amp, "tau": 0.045, "hz": 74,
-         "attack": 0.0025},
-        {"kind": "sine",  "at": at, "amp": 0.30 * amp, "tau": 0.028, "hz": 118,
-         "attack": 0.0020},
-        {"kind": "sine",  "at": at, "amp": 0.10 * amp, "tau": 0.014, "hz": 165,
-         "attack": 0.0015},
+        {"kind": "sine", "at": at, "amp": 0.60 * amp, "tau": 0.090, "hz": 52,
+         "attack": 0.008},
+        {"kind": "sine", "at": at, "amp": 0.28 * amp, "tau": 0.060, "hz": 86,
+         "attack": 0.007},
+        {"kind": "sine", "at": at, "amp": 0.09 * amp, "tau": 0.030, "hz": 120,
+         "attack": 0.006},
     ]
 
 
@@ -130,29 +132,34 @@ def thud(at, amp=1.0):
 #
 # A 3.5" drive seeks in bursts: a run of steps, then a pause while it reads,
 # then another run. The rate matters as much as the timbre — at 24ms a burst
-# reads as a grind, while nearer 45ms you hear the individual movements, which
-# is what makes it sound mechanical rather than electronic. Built to a whole
-# number of beats so the loop join is silent.
-STEP_MS = 0.045
+# reads as a grind, at 45 as a rattle, and at 65 the movements are far enough
+# apart that each one is heard as a separate soft knock, which is the thing
+# being imitated. Built to a whole number of beats so the loop join is silent.
+STEP_MS = 0.065
 seek_events = []
 t = 0.0
 for burst in range(3):
-    for i in range(6):
+    for i in range(5):
         seek_events += thud(t, amp=0.85 + 0.15 * random.random())
         t += STEP_MS
-    t += 0.16          # the read pause between bursts
+    t += 0.22          # the read pause between bursts
 seek_dur = t
-# The spindle underneath it all. Louder than before and lower: at 3.5" speeds
-# this is the sound the drive makes continuously, and it is what ties the
-# separate thuds together into one machine rather than a series of taps.
+# The spindle underneath it all, and the main body of the sound now rather
+# than a bed under it: a 300rpm hub is a continuous 5Hz rotation whose
+# audible part is the motor and the case resonating, not the rotation itself.
+# The slow amplitude wobble is deliberate — a real spindle is never perfectly
+# balanced, and a mathematically steady hum is the one thing that gives
+# synthesis away.
 for i in range(int(seek_dur / 0.02)):
+    at = i * 0.02
+    wobble = 1.0 + 0.16 * math.sin(2 * math.pi * 1.7 * at)
     seek_events.append(
-        {"kind": "sine", "at": i * 0.02, "amp": 0.14, "tau": 0.045, "hz": 47,
-         "attack": 0.004}
+        {"kind": "sine", "at": at, "amp": 0.22 * wobble, "tau": 0.05, "hz": 43,
+         "attack": 0.006}
     )
     seek_events.append(
-        {"kind": "sine", "at": i * 0.02, "amp": 0.05, "tau": 0.040, "hz": 94,
-         "attack": 0.004}
+        {"kind": "sine", "at": at, "amp": 0.07 * wobble, "tau": 0.05, "hz": 86,
+         "attack": 0.006}
     )
 
 # ── One-shots ────────────────────────────────────────────────────────────────

@@ -177,12 +177,19 @@ export interface SharedState {
    *  two live in different stacking contexts, which is why lowering the icon
    *  below the layer's z-index changed nothing. */
   visualsPainting: boolean;
-  /** One of Steam's side menus is open — Quick Access or the main menu.
+  /** Steam has focus somewhere other than its main window: a side menu, or a
+   *  popup one of them opened.
    *
-   *  Polled from Steam's own store rather than Decky's useQuickAccessVisible,
-   *  which reports nothing to a global component: the layer stayed up over an
-   *  open menu, and the theme picker's dropdown opened *behind* it. */
-  menuOpen: boolean;
+   *  Derived from FocusNavController rather than from the menu store, which
+   *  was the first attempt and was not enough. Opening the theme picker's
+   *  dropdown *closes* the Quick Access menu — m_eOpenSideMenu goes to 0 —
+   *  while the option list stays on screen, so a menu-open test said "no menu"
+   *  and the layer painted straight over the list the user was reading.
+   *  Focus does not move back to the main window until they are actually done.
+   *
+   *  Decky's useQuickAccessVisible reports nothing to a global component, so
+   *  it is not an option here either. */
+  steamOverlayOpen: boolean;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
   pairing: boolean;
@@ -212,7 +219,7 @@ export const sharedState: SharedState = {
   activeMedia: {},
   activeAppId: null,
   visualsPainting: false,
-  menuOpen: false,
+  steamOverlayOpen: false,
   viewedApp: null,
   pairing: false,
   registeringKey: false,

@@ -9,6 +9,7 @@ import {
   setPairingToastSuppressed,
   sharedState,
   notifySubscribers,
+  useSharedState,
 } from "./shared";
 import { useViewedApp } from "./hooks/useAppId";
 import { mediumNoun } from "./lib/sourceIcons";
@@ -74,6 +75,12 @@ interface GamePagePairerProps {
 }
 
 const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
+  // Subscribed, not merely read. The icon lives on a game page that is not
+  // re-rendered by anything else, so reading sharedState directly meant it
+  // never noticed a theme appearing over it — which is why it kept floating
+  // above the theme after being told to hide.
+  useSharedState();
+
   const [show, setShow] = useState<boolean>(true);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>(MODAL_WAITING_TEXT);

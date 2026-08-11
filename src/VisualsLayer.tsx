@@ -52,16 +52,17 @@ function mediumTrigger(): string | undefined {
 }
 
 export const VisualsLayer: FC = () => {
-  // Stand aside while one of Steam's menus is open.
+  // Stand aside whenever Steam's focus is off its main window.
   //
-  // The Quick Access panel renders above this layer, but the *popups* it opens
-  // — a dropdown's option list — do not: they are mounted by Steam's modal
-  // system elsewhere in the tree, so the layer covered them and the theme
-  // picker appeared to do nothing when pressed. Rather than hunt for a
-  // z-index that sits above one and below the other across stacking contexts
-  // we do not control, the layer yields: with a menu open the user is
-  // configuring the Deck, not looking at an attract screen.
-  const [menuOpen, setMenuOpen] = useState(!!sharedState.menuOpen);
+  // The Quick Access panel renders above this layer, but the popups it opens
+  // — a dropdown's option list — do not: they are mounted elsewhere in the
+  // tree, so the layer covered them and the picker appeared to do nothing.
+  // Rather than hunt for a z-index above one and below the other across
+  // stacking contexts we do not control, the layer yields. While a menu or one
+  // of its popups has focus the user is configuring the Deck, not looking at
+  // an attract screen. See sharedState.steamOverlayOpen for why this is a
+  // focus test rather than a menu test.
+  const [menuOpen, setMenuOpen] = useState(!!sharedState.steamOverlayOpen);
 
   // One piece of state, deliberately. An earlier version also kept an
   // `enabled` flag seeded from the settings at mount — but this layer mounts
@@ -122,7 +123,7 @@ export const VisualsLayer: FC = () => {
     // thrown while the takeover is up — and it has to take effect at once,
     // both ways.
     const unsubscribeState = subscribeToState(() => {
-      setMenuOpen(!!sharedState.menuOpen);
+      setMenuOpen(!!sharedState.steamOverlayOpen);
       paint(scenes.scene);
     });
 
