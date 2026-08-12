@@ -8,7 +8,7 @@ speaker is a square wave through a paper cone and nothing else.
 
 Pure stdlib, 44.1k/24-bit stereo, matching the plugin's other sounds.
 
-    python3 scripts/make-theme-sounds.py
+    cd /tmp && python3 ~/Sites/decky-links/scripts/make-dos-sounds.py
     for f in *.wav; do ffmpeg -y -i "$f" -c:a flac -sample_fmt s32 \\
         -bits_per_raw_sample 24 "assets/themes/dos/sounds/${f%.wav}.flac"; done
 
@@ -18,72 +18,13 @@ The loops (seek) are built to a whole number of steps so the join is silent.
 import math
 import os
 import random
-import struct
+import sys
 
-SR = 44100
-random.seed(1985)   # reproducible: regenerating must not change the sound
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from synth import SR, render, seed, write_all  # noqa: E402
 
-def render(events, dur, normalise=0.89):
-    n = int(SR * dur)
-    buf = [0.0] * n
-
-    for ev in events:
-        start = int(ev["at"] * SR)
-        span = int(ev["tau"] * 6 * SR)
-        if ev["kind"] == "noise":
-            a, prev = ev["a"], 0.0
-            for i in range(span):
-                j = start + i
-                if j >= n:
-                    break
-                prev = a * random.uniform(-1, 1) + (1 - a) * prev
-                buf[j] += ev["amp"] * prev * math.exp(-i / (ev["tau"] * SR))
-        elif ev["kind"] == "square":
-            # A PC speaker could only do this: full-swing square, no envelope
-            # to speak of beyond the on/off, which is why it sounds the way it
-            # does and why softening it would be wrong.
-            for i in range(int(ev["tau"] * SR)):
-                j = start + i
-                if j >= n:
-                    break
-                phase = (ev["hz"] * i / SR) % 1.0
-                buf[j] += ev["amp"] * (1.0 if phase < 0.5 else -1.0)
-        else:
-            attack = max(1, int(ev.get("attack", 0.0) * SR))
-            for i in range(span):
-                j = start + i
-                if j >= n:
-                    break
-                t = i / SR
-                # An attack ramp, because a sine starting at full amplitude is
-                # a step change — which is a click, and clicks are exactly what
-                # this sound had too many of.
-                rise = min(1.0, i / attack)
-                buf[j] += (ev["amp"] * rise * math.sin(2 * math.pi * ev["hz"] * t)
-                           * math.exp(-t / ev["tau"]))
-
-    for i in range(int(0.001 * SR)):
-        buf[i] *= i / (0.001 * SR)
-    tail = int(0.004 * SR)
-    for i in range(tail):
-        buf[n - 1 - i] *= i / tail
-
-    peak = max((abs(v) for v in buf), default=1.0) or 1.0
-    return [v / peak * normalise for v in buf]
-
-
-def write_wav(path, samples):
-    data = bytearray()
-    for v in samples:
-        q = int(max(-1.0, min(1.0, v)) * 8388607)
-        b = struct.pack("<i", q)[:3]
-        data += b + b
-    hdr = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
-           + struct.pack("<IHHIIHH", 16, 1, 2, SR, SR * 2 * 3, 6, 24)
-           + b"data" + struct.pack("<I", len(data)))
-    with open(path, "wb") as f:
-        f.write(hdr + data)
+seed(1985)   # reproducible: regenerating must not change the sound
 
 
 def step(at, amp=1.0):
@@ -193,10 +134,7 @@ error = render([
 seek = render(seek_events, dur=seek_dur)
 
 if __name__ == "__main__":
-    out = os.getcwd()
-    for name, samples in [
+    write_all([
         ("seek", seek), ("insert", insert), ("eject", eject),
         ("beep", beep), ("error", error),
-    ]:
-        write_wav(os.path.join(out, f"{name}.wav"), samples)
-        print(f"{name}.wav  {len(samples) / SR:.2f}s")
+    ])

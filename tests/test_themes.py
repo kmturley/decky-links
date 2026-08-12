@@ -9,6 +9,7 @@ the normal case rather than the exceptional one.
 import base64
 import json
 import os
+import re
 
 import pytest
 
@@ -159,36 +160,88 @@ class TestAssets:
         assert themes.read_asset("retro", "tick.flac") is None
 
 
-class TestTheShippedTheme:
-    """The DOS theme is now data, so it can be wrong in ways a compiled module
-    could not be. These read the real file."""
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SHIPPED_DIR = os.path.join(REPO, "assets", "themes")
 
-    def _dos(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(root, "assets", "themes", "dos", "theme.html")
-        with open(path) as f:
-            return f.read()
+# Every scene a theme may draw. IN_GAME is deliberately absent: gamescope owns
+# the screen once a game paints, so the layer never renders it. Mirrors the
+# Scene enum in src/lib/presentation.ts.
+SCENES = ("ready", "ambient", "reading", "launching", "error", "locked")
 
-    def test_its_manifest_parses(self):
-        manifest = themes._manifest(self._dos())
-        assert manifest["name"] == "MS-DOS"
-        assert manifest["blurb"]
+# Everything VisualsLayer substitutes. A theme asking for {clock} instead of
+# {time} renders the word in braces on screen, which is the sort of typo only a
+# test catches — nothing errors.
+PLACEHOLDERS = {"title", "drive", "time"}
 
-    def test_every_sound_it_names_exists(self):
+SHIPPED = sorted(
+    entry for entry in os.listdir(SHIPPED_DIR)
+    if os.path.isfile(os.path.join(SHIPPED_DIR, entry, themes.THEME_FILE))
+)
+
+
+def _shipped(theme_id):
+    with open(os.path.join(SHIPPED_DIR, theme_id, themes.THEME_FILE)) as f:
+        return f.read()
+
+
+@pytest.mark.parametrize("theme_id", SHIPPED)
+class TestTheShippedThemes:
+    """The themes that ship are data now, so they can be wrong in ways a
+    compiled module could not be — a misspelled sound key, a scene name that
+    matches nothing, a file that was never added. All of those fail silently at
+    runtime, so they are checked here, against the real files, for every theme
+    in assets/themes rather than a named one: a theme added later inherits
+    every check below without anybody remembering to ask for it.
+    """
+
+    def test_it_is_discoverable(self, theme_id):
+        assert themes._ID.match(theme_id), "folder name is not a valid theme id"
+        assert themes.read_theme(theme_id) is not None
+
+    def test_its_manifest_parses_and_names_itself(self, theme_id):
+        manifest = themes._manifest(_shipped(theme_id))
+        assert manifest.get("name"), "a theme with no name is a picker entry reading 'dos'"
+        assert manifest.get("blurb")
+
+    def test_every_sound_it_names_exists(self, theme_id):
         """A theme naming a file it does not ship is a silent event — the one
         failure that looks exactly like working."""
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        sounds = os.path.join(root, "assets", "themes", "dos", "sounds")
-        manifest = themes._manifest(self._dos())
+        sounds = os.path.join(SHIPPED_DIR, theme_id, "sounds")
+        manifest = themes._manifest(_shipped(theme_id))
         named = set(manifest.get("sounds", {}).values())
         for scene in manifest.get("scenes", {}).values():
             named.update(v for k, v in scene.items() if k.endswith("Sound"))
+        assert named, "a theme with no sound at all is probably a mistake"
         for name in named:
             assert os.path.isfile(os.path.join(sounds, name)), name
 
-    def test_it_draws_every_scene(self):
+    def test_it_only_overrides_sounds_the_plugin_asks_for(self, theme_id):
+        """The keys under "sounds" are the plugin's event names, not the
+        theme's own. One that is not on the list is never looked up, so the
+        theme quietly keeps the default sound."""
+        import main
+
+        manifest = themes._manifest(_shipped(theme_id))
+        assert set(manifest.get("sounds", {})) <= set(main.ALLOWED_SOUNDS)
+
+    def test_its_scene_settings_name_real_scenes(self, theme_id):
+        manifest = themes._manifest(_shipped(theme_id))
+        assert set(manifest.get("scenes", {})) <= set(SCENES)
+
+    def test_it_draws_every_scene(self, theme_id):
         """Not required of a theme — a missing scene falls back to standby —
-        but the one that ships should show what a complete theme looks like."""
-        html = self._dos()
-        for scene in ("ready", "ambient", "reading", "launching", "error", "locked"):
+        but the ones that ship should show what a complete theme looks like."""
+        html = _shipped(theme_id)
+        for scene in SCENES:
             assert f'data-scene="{scene}"' in html, scene
+
+    def test_it_only_asks_for_placeholders_that_exist(self, theme_id):
+        used = set(re.findall(r"\{(\w+)\}", _shipped(theme_id)))
+        assert used <= PLACEHOLDERS, f"unknown placeholder(s): {used - PLACEHOLDERS}"
+
+
+def test_more_than_one_theme_ships():
+    """The format is for other people to write in, and one example is not a
+    format — a second theme is what proves nothing about the first was
+    special-cased."""
+    assert len(SHIPPED) >= 2

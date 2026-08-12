@@ -34,6 +34,30 @@ import { launchTargetName } from "./lib/appNames";
  *  game is up, so a visual here would be a promise the runtime cannot keep. */
 const NEVER_VISIBLE = new Set<Scene>([Scene.IN_GAME]);
 
+/** Scenes a Deck can sit in for hours, as opposed to the ones it passes
+ *  through in seconds. Only these get a ticking clock — see CLOCK_EVERY_MS. */
+const HELD = new Set<Scene>([Scene.READY, Scene.AMBIENT, Scene.LOCKED]);
+
+/** How often a held scene re-renders to move its clock on.
+ *
+ * A theme cannot run code, so a clock in one is only ever as fresh as the last
+ * render — and a taskbar clock stopped at the time the screen appeared is not
+ * a missing feature, it is a visible fault. Re-rendering replaces the markup,
+ * which restarts any CSS animation inside it, so this is deliberately confined
+ * to scenes that are *held* and to themes that actually ask for the time: a
+ * progress bar that jumped back to the start every 20 seconds would be a worse
+ * bug than the one being fixed.
+ */
+const CLOCK_EVERY_MS = 20_000;
+
+function clockText(): string {
+  try {
+    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
 interface Painted {
   scene: Scene;
   html: string;
@@ -146,6 +170,16 @@ export const VisualsLayer: FC = () => {
     };
   }, [theme]);
 
+  // Nudged on a timer so a theme's clock moves. Gated on the placeholder being
+  // present so a theme that never asks for the time never re-renders at all.
+  const [, tick] = useState(0);
+  const wantsClock = !!painted && HELD.has(painted.scene) && painted.html.includes("{time}");
+  useEffect(() => {
+    if (!wantsClock) return;
+    const timer = window.setInterval(() => tick((n) => n + 1), CLOCK_EVERY_MS);
+    return () => window.clearInterval(timer);
+  }, [wantsClock]);
+
   const showing = !!painted && !menuOpen;
 
   // Published so the game-page pair icon can hide behind a theme it cannot
@@ -178,10 +212,16 @@ export const VisualsLayer: FC = () => {
       <style>{`@keyframes dl-visual-in { from { opacity: 0 } to { opacity: 1 } }\n${painted.css}`}</style>
       {/* The theme's own markup. Inert by construction: it is set as
           innerHTML, which never executes script, and it came out of an inert
-          <template>. A theme is markup, and stays markup. */}
+          <template>. A theme is markup, and stays markup.
+
+          A second substitution pass, for the one value that changes while a
+          screen is up. {title} and {drive} were filled at paint time, when the
+          medium they describe was in play; the clock belongs to now. Filling
+          it here costs nothing when a theme has no clock — the markup comes
+          back unchanged, so React replaces nothing. */}
       <div
         style={{ width: "100%", height: "100%" }}
-        dangerouslySetInnerHTML={{ __html: painted.html }}
+        dangerouslySetInnerHTML={{ __html: fillScreen(painted.html, { time: clockText() }) }}
       />
     </div>
   );

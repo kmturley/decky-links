@@ -1,0 +1,570 @@
+<!--
+  Desktop 95 — the mid-90s beige desktop, drawn rather than screenshotted.
+
+  A whole theme in one file. The JSON below is the manifest, the <style> is
+  every screen's styling, and each <template data-scene="…"> is one screen.
+  Nothing here is compiled: edit it, reopen the panel, see it.
+
+  Available scenes, all optional — a theme that leaves one out falls back to
+  its own "ready" screen rather than letting Steam show through:
+
+    ready      waiting for a medium          launching   a game is starting
+    ambient    idle for 90 seconds           error       unreadable medium
+    reading    a medium is being read        locked      restricted mode
+
+  Three placeholders are substituted when a screen is rendered:
+    {title}    the game's name, when one is known
+    {drive}    "A" for a disk, "T" for a tag — a theme is free to ignore it
+    {time}     the clock, HH:MM in the device's locale
+
+  ── On not being anybody's product ─────────────────────────────────────────
+  This is a *period* desktop, not a specific one. The teal, the beige bevels,
+  the navy title bars and the bottom taskbar were the shared vocabulary of
+  every GUI of the decade, and none of that is ownable. What is ownable was
+  left out on purpose, and should stay out of any theme derived from this one:
+
+    - No product name anywhere. The taskbar says Decky Links.
+    - No four-pane flag on the Start button. It wears two interlocking links,
+      which is this plugin's own mark.
+    - No shipped fonts. The stack below *names* the period faces for anyone
+      who happens to have them and falls through to a generic sans otherwise;
+      a font file is licensed software, not an asset.
+    - No sampled sounds. The startup swell, the ding and the error chord are
+      synthesised from scratch — see scripts/make-desktop95-sounds.py. Bells
+      and a spinning disc are easy to write, and the famous versions of them
+      are somebody's recordings.
+    - Nothing needs clicking. There is a menu bar, a Start button and an
+      AutoRun dialog, and all of them are scenery: this layer never receives
+      input, so a game still launches the instant its medium is presented.
+      A theme that asked for a click would be a theme that broke the plugin.
+-->
+<script type="application/json" id="decky-theme">
+{
+  "name": "Desktop 95",
+  "blurb": "Teal desktop, beveled windows and a taskbar clock",
+  "sounds": {
+    "scan": "tick.flac",
+    "success": "ding.flac",
+    "error": "chord.flac",
+    "lock": "tick.flac",
+    "unlock": "chime.flac"
+  },
+  "scenes": {
+    "reading": { "enterSound": "tick.flac", "loopSound": "drive.flac", "minVisibleMs": 400 },
+    "launching": { "loopSound": "drive.flac" },
+    "error": { "enterSound": "chord.flac" },
+    "locked": { "enterSound": "chord.flac" }
+  }
+}
+</script>
+
+<style>
+  /* The 16-colour VGA palette these interfaces were designed in. The two that
+     matter are the desktop teal and the beige, because they are what a person
+     recognises from across a room. */
+  .w95 {
+    --teal: #008080;   --face: #C0C0C0;   --hi: #FFFFFF;
+    --lt: #DFDFDF;     --sh: #808080;     --dk: #0A0A0A;
+    --nav: #000080;    --ink: #000000;    --warn: #FFFF00;
+    --led: #00A800;    --brass: #E0B000;  --cyan: #00FFFF;
+
+    /* Named for anyone who has them; deliberately not shipped. The bevels and
+       the aliasing below carry far more of the impression than the letterforms
+       do, which is lucky, because a font file cannot be redistributed. */
+    font-family: "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Geneva, Verdana, sans-serif;
+    /* Aliased text, as a 1995 display had. Costs nothing where it is honoured
+       and is silently ignored where it is not. */
+    -webkit-font-smoothing: none;
+    font-size: min(2.6vh, 1.9vw);
+    line-height: 1.35;
+    color: var(--ink);
+    background: var(--teal);
+    width: 100%; height: 100%;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ── Bevels ───────────────────────────────────────────────────────────────
+     The whole look is two of these. Four inset shadows rather than borders:
+     light outside then lighter inside on the top-left, dark then mid on the
+     bottom-right, which is how a two-pixel bevel reads as a lit edge. Borders
+     could not do it without four extra elements. */
+  .w95 .up {
+    box-shadow: inset -1px -1px 0 var(--dk), inset 1px 1px 0 var(--hi),
+                inset -2px -2px 0 var(--sh), inset 2px 2px 0 var(--lt);
+  }
+  .w95 .down {
+    box-shadow: inset -1px -1px 0 var(--hi), inset 1px 1px 0 var(--dk),
+                inset -2px -2px 0 var(--lt), inset 2px 2px 0 var(--sh);
+  }
+
+  /* ── Windows ─────────────────────────────────────────────────────────── */
+  .w95 .win { background: var(--face); padding: 3px; }
+  .w95 .tbar {
+    background: var(--nav); color: var(--hi); font-weight: bold;
+    display: flex; align-items: center; gap: 0.4em;
+    padding: 0.15em 0.15em 0.15em 0.45em;
+  }
+  .w95 .tbar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .w95 .tbar b {
+    background: var(--face); color: var(--ink); font-weight: bold;
+    width: 1.5em; height: 1.25em; display: grid; place-items: center;
+    font-size: 0.75em; line-height: 1;
+  }
+  .w95 .menu { display: flex; gap: 1.1em; padding: 0.25em 0.55em; }
+  .w95 .menu u { text-decoration: underline; }
+  .w95 .client { background: var(--hi); margin-top: 3px; padding: 0.8em; }
+  .w95 .pad { padding: 1em 1.1em; }
+  .w95 .status { display: flex; gap: 3px; margin-top: 3px; }
+  .w95 .status span { padding: 0.15em 0.5em; }
+  .w95 .status span:first-child { flex: none; min-width: 8em; }
+  .w95 .status span:last-child { flex: 1; }
+  .w95 .dim { color: var(--sh); }
+
+  /* Dialogs sit in the middle of the screen, over whatever is behind them. */
+  .w95 .mid { position: absolute; inset: 0; display: grid; place-items: center; }
+
+  /* ── Buttons ──────────────────────────────────────────────────────────────
+     Drawn, never pressed by a person. The default one wears the dotted focus
+     rectangle it would have had, and the AutoRun screen shows one *already*
+     depressed — which is the honest picture, because by the time that screen
+     is up the plugin has taken the action itself. */
+  .w95 .btns { display: flex; gap: 0.6em; justify-content: center; margin-top: 1.1em; }
+  .w95 .push {
+    background: var(--face); min-width: 6em; text-align: center;
+    padding: 0.3em 0.9em; position: relative;
+  }
+  .w95 .push.def { outline: 1px dotted var(--ink); outline-offset: -4px; }
+  .w95 .push.held { padding: 0.35em 0.85em 0.25em 0.95em; }
+  .w95 .push.off { color: var(--sh); text-shadow: 1px 1px 0 var(--hi); }
+
+  /* ── Progress ─────────────────────────────────────────────────────────────
+     Discrete navy chunks, because this decade's progress bars were segmented
+     and the segments are half of what makes one recognisable. Stepped so it
+     advances a chunk at a time, and it stops short of the end: the plugin
+     cannot know how long a load takes, and a bar that filled and then sat
+     there would be a lie told in the most irritating way available. */
+  .w95 .prog { background: var(--hi); height: 1.3em; padding: 3px; position: relative; }
+  .w95 .prog i {
+    position: absolute; left: 3px; top: 3px; bottom: 3px; width: 0;
+    background: repeating-linear-gradient(90deg,
+      var(--nav) 0 0.62em, transparent 0.62em 0.82em);
+    animation: w95-fill 24s steps(18) forwards;
+  }
+  .w95 .prog.fast i { animation-duration: 5s; }
+  /* Starts at one chunk rather than none: with stepped timing the first step
+     holds its start value for a whole interval, so a bar starting at zero
+     would sit visibly empty for the first second and a bit of a launch — which
+     reads as nothing happening at the exact moment something is. */
+  @keyframes w95-fill { from { width: 5% } to { width: 88% } }
+
+  /* The file-copy animation: a page crossing between two folders, stepped so
+     it hops rather than glides. Six frames was about what the original got. */
+  .w95 .fly {
+    position: relative; width: 11em; height: 2.6em; margin: 0 auto 1em;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .w95 .fly .page {
+    position: absolute; left: 3em; top: 0.6em; width: 0.8em; height: 1em;
+    background: var(--hi); border: 1px solid var(--ink);
+    animation: w95-fly 1.15s steps(6) infinite;
+  }
+  @keyframes w95-fly { from { transform: translateX(0) } to { transform: translateX(5em) } }
+
+  /* ── Icons ────────────────────────────────────────────────────────────────
+     Pixel art without any pixels to ship: every one of these is a few boxes,
+     which is all a 32×32 16-colour icon ever was. */
+  .w95 .g { width: 2.2em; height: 2.2em; position: relative; flex: none; }
+  .w95 .g.small { font-size: 0.68em; }
+
+  /* A 3.5" disk: black shell, metal shutter, paper label. */
+  .w95 .g.disk { background: #202020; }
+  .w95 .g.disk::before {
+    content: ""; position: absolute; top: 7%; left: 30%; width: 40%; height: 27%;
+    background: var(--face); box-shadow: inset -1px -1px 0 var(--sh);
+  }
+  .w95 .g.disk::after {
+    content: ""; position: absolute; bottom: 8%; left: 16%; width: 68%; height: 40%;
+    background: var(--hi);
+  }
+
+  /* A folder, tab and all. */
+  .w95 .g.folder { background: none; }
+  .w95 .g.folder::before {
+    content: ""; position: absolute; left: 4%; top: 22%; width: 44%; height: 16%;
+    background: var(--brass); border: 1px solid #6A5200; border-bottom: none;
+  }
+  .w95 .g.folder::after {
+    content: ""; position: absolute; left: 2%; top: 36%; width: 94%; height: 52%;
+    background: var(--brass); border: 1px solid #6A5200;
+  }
+
+  /* A text file. */
+  .w95 .g.doc {
+    width: 1.75em; background: var(--hi); border: 1px solid var(--ink);
+    background-image: repeating-linear-gradient(var(--sh) 0 1px, transparent 1px 4px);
+    background-repeat: no-repeat; background-size: 60% 55%; background-position: 20% 22%;
+  }
+
+  /* A wastebasket, ridges and lid. */
+  .w95 .g.bin {
+    width: 1.6em; height: 1.8em; margin: 0.4em auto 0;
+    background: repeating-linear-gradient(90deg, #909090 0 2px, var(--face) 2px 4px);
+    border: 1px solid #404040; border-top: 0.34em solid var(--sh);
+    border-radius: 0 0 0.35em 0.35em;
+  }
+
+  /* A tag: a card with two waves leaving a point on it. Two arcs rather than
+     one, because a single arc reads as a "reload" symbol — the second is what
+     makes it a signal. The inner one is a nested <i>, since an element only
+     has two pseudo-elements and the dot has claimed one. */
+  .w95 .g.tag { background: var(--hi); border: 1px solid var(--ink); border-radius: 0.2em; }
+  .w95 .g.tag::before {
+    content: ""; position: absolute; left: 20%; top: 46%;
+    width: 0.3em; height: 0.3em; border-radius: 50%; background: var(--nav);
+  }
+  .w95 .g.tag::after {
+    content: ""; position: absolute; left: 12%; top: 18%;
+    width: 1.1em; height: 1.4em; border: 0.16em solid transparent;
+    border-right-color: var(--nav); border-radius: 50%;
+  }
+  .w95 .g.tag i {
+    position: absolute; left: 14%; top: 34%;
+    width: 0.62em; height: 0.78em; border: 0.15em solid transparent;
+    border-right-color: var(--nav); border-radius: 50%;
+  }
+
+  /* A USB stick, connector up. */
+  .w95 .g.usb {
+    width: 1.15em; height: 1.75em; margin: 0.45em auto 0; background: #404040;
+    border: 1px solid var(--ink);
+  }
+  .w95 .g.usb::before {
+    content: ""; position: absolute; left: 18%; right: 18%; top: -0.42em;
+    height: 0.42em; background: var(--face); border: 1px solid var(--ink);
+    border-bottom: none;
+  }
+
+  /* The warning triangle and the key, as dialog icons. Both are drawn as a
+     clipped shape with the symbol laid over it — clip-path takes descendants
+     with it, so the glyph cannot live inside the triangle. */
+  .w95 .sign { position: relative; width: 2.6em; height: 2.4em; flex: none; }
+  .w95 .sign .tri {
+    position: absolute; inset: 0; background: var(--warn);
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  }
+  .w95 .sign .bang {
+    position: absolute; left: 0; right: 0; bottom: 0.1em; text-align: center;
+    font-weight: bold; font-size: 1.2em; line-height: 1;
+  }
+  .w95 .sign .ring {
+    position: absolute; left: 0.15em; top: 0.7em; width: 0.85em; height: 0.85em;
+    border: 0.24em solid var(--brass); border-radius: 50%;
+  }
+  .w95 .sign .stem {
+    position: absolute; left: 1.15em; top: 1.02em; width: 1.2em; height: 0.24em;
+    background: var(--brass);
+    box-shadow: -0.3em 0.3em 0 -0.02em var(--brass), 0.25em 0.3em 0 -0.02em var(--brass);
+  }
+
+  .w95 .row { display: flex; gap: 1em; align-items: flex-start; }
+
+  /* A sunken text field with a caret and nothing in it — the shape of a
+     machine waiting for something it will not be typed. */
+  .w95 .field { background: var(--hi); padding: 0.25em 0.4em; margin-top: 0.9em; }
+  .w95 .field i {
+    display: inline-block; width: 1px; height: 1.1em; background: var(--ink);
+    vertical-align: -0.2em; animation: w95-caret 1.04s step-end infinite;
+  }
+  @keyframes w95-caret { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+
+  /* ── Desktop ─────────────────────────────────────────────────────────── */
+  .w95 .icons {
+    position: absolute; top: 1em; left: 1em; width: 6.4em;
+    display: flex; flex-direction: column; gap: 1.2em;
+  }
+  .w95 .ic {
+    display: flex; flex-direction: column; align-items: center; gap: 0.35em;
+    font-size: 0.85em; text-align: center;
+  }
+  .w95 .icons .ic { color: var(--hi); text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.45); }
+
+  .w95 .grid { display: flex; gap: 1.6em; justify-content: center; padding: 0.4em 0; }
+
+  /* ── Taskbar ─────────────────────────────────────────────────────────── */
+  .w95 .tasks {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: var(--face); display: flex; align-items: center;
+    gap: 0.3em; padding: 0.25em;
+  }
+  .w95 .start {
+    display: flex; align-items: center; gap: 0.4em; font-weight: bold;
+    background: var(--face); padding: 0.15em 0.6em 0.15em 0.4em;
+  }
+  /* Two interlocking links: this plugin's mark, in two colours the palette
+     already has. Nobody's flag. */
+  .w95 .start .lg { position: relative; width: 1.25em; height: 1.1em; }
+  .w95 .start .lg::before, .w95 .start .lg::after {
+    content: ""; position: absolute; top: 0.28em; width: 0.62em; height: 0.44em;
+    border: 0.17em solid var(--nav); border-radius: 0.24em;
+  }
+  .w95 .start .lg::after { left: 0.42em; border-color: #A00000; }
+
+  .w95 .task {
+    background: var(--face); min-width: 10em; max-width: 16em;
+    padding: 0.2em 0.6em; display: flex; align-items: center; gap: 0.4em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .w95 .task.on { font-weight: bold; padding: 0.25em 0.55em 0.15em 0.65em; }
+  .w95 .tray {
+    margin-left: auto; display: flex; align-items: center; gap: 0.6em;
+    padding: 0.2em 0.6em; background: var(--face);
+  }
+  .w95 .tray .spk {
+    width: 1em; height: 1em; background: var(--ink);
+    clip-path: polygon(0 34%, 34% 34%, 70% 0, 70% 100%, 34% 66%, 0 66%);
+  }
+  .w95 .tray .bat {
+    position: relative; width: 1.3em; height: 0.75em;
+    background: var(--face); border: 1px solid var(--ink);
+  }
+  .w95 .tray .bat::before {
+    content: ""; position: absolute; left: 1px; top: 1px; bottom: 1px;
+    width: 62%; background: var(--led);
+  }
+  .w95 .tray .bat::after {
+    content: ""; position: absolute; right: -3px; top: 28%;
+    width: 2px; height: 44%; background: var(--ink);
+  }
+
+  /* ── Screensaver ──────────────────────────────────────────────────────────
+     A marquee over a starfield: the two screensavers everybody's machine fell
+     back to, and the two that are simple enough to be nobody's. The text
+     crosses the screen while the whole line drifts up and down on a slower,
+     unrelated cycle, so it never traces the same path twice. */
+  .w95.saver { background: var(--ink); }
+  /* One 2px dot and thirty shadows of it. A tiling gradient was the obvious
+     way to do this and it looked like graph paper: stars have to be *placed*
+     irregularly or the eye finds the grid immediately. Offsets are in vw/vh so
+     the field fills whatever it is shown on, and the whole group sways rather
+     than scrolling, which needs no wraparound to stay seamless. */
+  .w95 .stars {
+    position: absolute; left: 0; top: 0; width: 2px; height: 2px; border-radius: 50%;
+    box-shadow:
+      7vw 12vh 0 var(--hi),   19vw 5vh 0 var(--face),  28vw 22vh 0 var(--hi),
+      36vw 9vh 0 var(--sh),   44vw 31vh 0 var(--hi),   52vw 6vh 0 var(--face),
+      61vw 18vh 0 var(--hi),  69vw 41vh 0 var(--sh),   77vw 11vh 0 var(--hi),
+      86vw 27vh 0 var(--face), 94vw 7vh 0 var(--hi),   4vw 38vh 0 var(--hi),
+      14vw 52vh 0 var(--face), 23vw 66vh 0 var(--hi),  33vw 47vh 0 var(--sh),
+      41vw 72vh 0 var(--hi),  49vw 58vh 0 var(--face), 58vw 84vh 0 var(--hi),
+      66vw 63vh 0 var(--sh),  74vw 77vh 0 var(--hi),   83vw 54vh 0 var(--face),
+      91vw 69vh 0 var(--hi),  11vw 88vh 0 var(--face), 26vw 93vh 0 var(--hi),
+      55vw 91vh 0 var(--sh),  79vw 89vh 0 var(--hi),   97vw 44vh 0 var(--face),
+      2vw 74vh 0 var(--hi),   38vw 96vh 0 var(--hi),   64vw 34vh 0 var(--face);
+    animation: w95-stars 70s ease-in-out infinite alternate;
+  }
+  @keyframes w95-stars {
+    from { transform: translate(0, 0) } to { transform: translate(-5vw, 3vh) }
+  }
+  .w95 .marq { position: absolute; top: 44%; left: 0; right: 0; animation: w95-bob 41s ease-in-out infinite alternate; }
+  .w95 .marq span {
+    display: inline-block; color: var(--cyan); font-weight: bold;
+    font-size: 2.4em; letter-spacing: 0.12em; white-space: nowrap;
+    /* Negative delay so the text is already crossing the screen when the
+       screensaver appears. Without it, an idle Deck goes black and then shows
+       nothing at all for the first two seconds, which looks like a fault
+       rather than a screensaver. */
+    animation: w95-slide 23s linear -8s infinite;
+  }
+  @keyframes w95-slide {
+    from { transform: translateX(100vw) } to { transform: translateX(-100%) }
+  }
+  @keyframes w95-bob {
+    from { transform: translateY(-24vh) } to { transform: translateY(26vh) }
+  }
+</style>
+
+<template data-scene="ready">
+  <div class="w95">
+    <div class="icons">
+      <div class="ic"><b class="g disk"></b><span>Media Drive</span></div>
+      <div class="ic"><b class="g folder"></b><span>Game Library</span></div>
+      <div class="ic"><b class="g doc"></b><span>Readme.txt</span></div>
+      <div class="ic"><b class="g bin"></b><span>Wastebasket</span></div>
+    </div>
+
+    <div class="win up" style="width: 27em; margin: 7vh auto 0;">
+      <div class="tbar"><span>Decky Links</span><b>_</b><b>□</b><b>✕</b></div>
+      <div class="menu"><span><u>F</u>ile</span><span><u>E</u>dit</span><span><u>V</u>iew</span><span><u>H</u>elp</span></div>
+      <div class="client down">
+        <div class="grid">
+          <div class="ic"><b class="g tag"><i></i></b><span>NFC Reader</span></div>
+          <div class="ic"><b class="g disk"></b><span>Floppy (A:)</span></div>
+          <div class="ic"><b class="g usb"></b><span>Removable (D:)</span></div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="down">3 device(s)</span>
+        <span class="down">Present media to launch a game</span>
+      </div>
+    </div>
+
+    <div class="tasks up">
+      <div class="start up"><b class="lg"></b>Start</div>
+      <div class="task on down">Decky Links</div>
+      <div class="tray down"><b class="spk"></b><b class="bat"></b><span>{time}</span></div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="ambient">
+  <div class="w95 saver">
+    <div class="stars"></div>
+    <div class="marq"><span>Decky Links</span></div>
+  </div>
+</template>
+
+<template data-scene="reading">
+  <div class="w95">
+    <div class="icons">
+      <div class="ic"><b class="g disk"></b><span>Media Drive</span></div>
+      <div class="ic"><b class="g folder"></b><span>Game Library</span></div>
+      <div class="ic"><b class="g doc"></b><span>Readme.txt</span></div>
+      <div class="ic"><b class="g bin"></b><span>Wastebasket</span></div>
+    </div>
+
+    <div class="mid">
+      <div class="win up" style="width: 23em;">
+        <div class="tbar"><span>Reading Drive {drive}:</span><b>✕</b></div>
+        <div class="pad">
+          <div class="fly">
+            <b class="g folder small"></b>
+            <b class="page"></b>
+            <b class="g folder small"></b>
+          </div>
+          <div>{drive}:\AUTORUN.INF</div>
+          <div class="prog fast down" style="margin-top: 0.7em;"><i></i></div>
+          <div class="btns"><span class="push up">Cancel</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tasks up">
+      <div class="start up"><b class="lg"></b>Start</div>
+      <div class="task on down">Reading Drive {drive}:</div>
+      <div class="tray down"><b class="spk"></b><b class="bat"></b><span>{time}</span></div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="launching">
+  <div class="w95">
+    <div class="icons">
+      <div class="ic"><b class="g disk"></b><span>Media Drive</span></div>
+      <div class="ic"><b class="g folder"></b><span>Game Library</span></div>
+      <div class="ic"><b class="g doc"></b><span>Readme.txt</span></div>
+      <div class="ic"><b class="g bin"></b><span>Wastebasket</span></div>
+    </div>
+
+    <div class="mid">
+      <div class="win up" style="width: 25em;">
+        <div class="tbar"><span>AutoRun</span><b>✕</b></div>
+        <div class="pad">
+          <div class="row">
+            <b class="g disk"></b>
+            <div>
+              <div><b>{title}</b></div>
+              <div class="dim">{drive}:\AUTORUN.EXE</div>
+            </div>
+          </div>
+          <div class="prog down" style="margin-top: 1em;"><i></i></div>
+          <div style="margin-top: 0.7em;">Starting {title}...</div>
+          <!-- Play Game is drawn already depressed, because by the time this
+               screen is up the plugin has pressed it. Nothing here is waiting
+               on a person. -->
+          <div class="btns">
+            <span class="push down held">Play Game</span>
+            <span class="push up off">Readme</span>
+            <span class="push up off">Cancel</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tasks up">
+      <div class="start up"><b class="lg"></b>Start</div>
+      <div class="task on down">{title}</div>
+      <div class="tray down"><b class="spk"></b><b class="bat"></b><span>{time}</span></div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="error">
+  <div class="w95">
+    <div class="icons">
+      <div class="ic"><b class="g disk"></b><span>Media Drive</span></div>
+      <div class="ic"><b class="g folder"></b><span>Game Library</span></div>
+      <div class="ic"><b class="g doc"></b><span>Readme.txt</span></div>
+      <div class="ic"><b class="g bin"></b><span>Wastebasket</span></div>
+    </div>
+
+    <div class="mid">
+      <div class="win up" style="width: 24em;">
+        <div class="tbar"><span>Decky Links</span><b>✕</b></div>
+        <div class="pad">
+          <div class="row">
+            <div class="sign"><i class="tri"></i><i class="bang">!</i></div>
+            <div>
+              <div>Cannot read from drive {drive}:</div>
+              <div class="dim" style="margin-top: 0.4em;">
+                The medium is unreadable or holds nothing this plugin can launch.
+              </div>
+            </div>
+          </div>
+          <div class="btns">
+            <span class="push up def">Retry</span>
+            <span class="push up">Cancel</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tasks up">
+      <div class="start up"><b class="lg"></b>Start</div>
+      <div class="task on down">Decky Links</div>
+      <div class="tray down"><b class="spk"></b><b class="bat"></b><span>{time}</span></div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="locked">
+  <div class="w95">
+    <div class="mid">
+      <div class="win up" style="width: 24em;">
+        <div class="tbar"><span>System Locked</span><b>✕</b></div>
+        <div class="pad">
+          <div class="row">
+            <div class="sign"><i class="ring"></i><i class="stem"></i></div>
+            <div>
+              <div>This device is locked.</div>
+              <div class="dim" style="margin-top: 0.4em;">
+                Present the key to continue.
+              </div>
+            </div>
+          </div>
+          <div class="field down"><i></i></div>
+          <div class="btns">
+            <span class="push up off">OK</span>
+            <span class="push up off">Cancel</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tasks up">
+      <div class="start up"><b class="lg"></b>Start</div>
+      <div class="task on down">System Locked</div>
+      <div class="tray down"><b class="spk"></b><b class="bat"></b><span>{time}</span></div>
+    </div>
+  </div>
+</template>
