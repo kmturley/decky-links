@@ -55,7 +55,7 @@ your own data, and mounting that uninvited is both a surprise and a delay.
   non-Steam shortcuts) and `https://…`, validated against an allowlist backend-side.
 - **Restricted mode with a physical key.** Register any medium as a key; take it
   away and the Deck locks down — see below.
-- **Custom visuals.** Replace Steam's Home, game pages and loading screens with
+- **Custom theme.** Replace Steam's Home, game pages and loading screens with
   a theme of your own — one HTML file and a folder of sounds, no build step.
   Ships with an MS-DOS theme and a mid-90s beige desktop; see
   [docs/themes.md](docs/themes.md).

@@ -1,4 +1,4 @@
-import { FC, useEffect, useState } from "react";
+import { FC, SyntheticEvent, useEffect, useState } from "react";
 import { scenes, Scene, MIN_VISIBLE_MS, type SceneChange } from "./lib/presentation";
 import { notifySubscribers, sharedState, subscribeToState } from "./shared";
 import {
@@ -28,6 +28,10 @@ import { launchTargetName } from "./lib/appNames";
  * moment a game paints, which is why nothing here times the end of a launch.
  * The way out stays visible — Steam's menus render above this — and the layer
  * additionally yields whenever one is open.
+ *
+ * It also swallows pointer input, which is a reversal: see the note on the
+ * container below for why letting taps through turned out to be worse than
+ * blocking them.
  */
 
 /** Never rendered, whatever a theme provides: gamescope owns the screen once a
@@ -49,6 +53,18 @@ const HELD = new Set<Scene>([Scene.READY, Scene.AMBIENT, Scene.LOCKED]);
  * bug than the one being fixed.
  */
 const CLOCK_EVERY_MS = 20_000;
+
+/** Absorb an event rather than let it reach anything.
+ *
+ * pointerEvents: auto is what actually does the blocking — the hit test lands
+ * here, so the element underneath never hears about the tap at all. These
+ * handlers close the other half of it: the event still bubbles up this
+ * document, and Steam has listeners near the root that act on stray taps.
+ */
+function swallow(e: SyntheticEvent): void {
+  e.preventDefault();
+  e.stopPropagation();
+}
 
 function clockText(): string {
   try {
@@ -198,14 +214,39 @@ export const VisualsLayer: FC = () => {
   return (
     <div
       data-decky-links-visual={painted.scene}
+      // Taps stop here.
+      //
+      // This layer used to be transparent to input on the theory that a layer
+      // which somehow failed to clear should leave a Deck that looks wrong
+      // rather than one that cannot be used. On hardware that reasoning was
+      // backwards: touching the theme played the click of whatever Steam
+      // button was underneath, so the screen was lying about what it was — a
+      // takeover you can operate through is not a takeover, it is a picture of
+      // one over a live interface.
+      //
+      // Blocking is safe because the way out was never a tap. The Steam and
+      // Quick Access buttons are handled below the browser, gamescope routes
+      // them whatever this document does, and the layer hides itself outright
+      // while a menu is open, so the control that switches the theme off is
+      // always both reachable and visible.
+      //
+      // Steam's own menus paint above this layer, and hit testing follows
+      // paint: what is covered cannot be tapped, and what is not covered is
+      // not ours to block.
+      onPointerDown={swallow}
+      onPointerUp={swallow}
+      onMouseDown={swallow}
+      onMouseUp={swallow}
+      onClick={swallow}
+      onTouchStart={swallow}
+      onTouchEnd={swallow}
+      onContextMenu={swallow}
+      onWheel={swallow}
       style={{
         position: "fixed",
         inset: 0,
         zIndex: LAYER_VISUALS,
-        // Never swallows input, however long it is up. Steam keeps receiving
-        // everything underneath, so a layer that somehow failed to clear
-        // leaves a Deck that looks wrong rather than one that cannot be used.
-        pointerEvents: "none",
+        pointerEvents: "auto",
         animation: `dl-visual-in ${painted.fadeMs ?? 220}ms ease-out`,
       }}
     >

@@ -1,7 +1,7 @@
 # Writing a theme
 
 A theme replaces Steam's Home, game pages and loading screens with your own,
-for as long as **Custom Visuals** is switched on in the plugin panel.
+for as long as one is picked under **Custom Theme** in the plugin panel.
 
 A theme is **one HTML file** and, if you want sound, a folder of audio next to
 it. There is no build step and no toolchain: edit the file, reopen the panel,
@@ -130,18 +130,23 @@ blinking block cursor, a segmented progress bar, a page hopping between
 folders, a drifting starfield and a scrolling marquee, and neither uses a line
 of JavaScript.
 
-**Nothing receives input.** The layer never takes pointer or button events —
-Steam keeps them all, so the Deck stays usable even while covered.
+**Taps go nowhere.** The layer absorbs pointer and touch events, so touching a
+theme cannot operate the Steam interface hidden underneath it. It used to let
+them through, and the result was audible: tapping the screen played the click of
+whichever Steam button happened to be behind that pixel. Your theme does not
+have to do anything to get this — a screen with no buttons on it still cannot be
+tapped through.
 
-**Steam's menus stay on top.** The Quick Access menu renders above any theme,
-and the layer hides itself while a menu is open, so the switch that turns this
-off is always reachable.
+**Steam's menus stay on top.** The Quick Access and Steam menus render above any
+theme, and the layer hides itself entirely while one is open, so the control
+that switches this off is always both reachable and visible. Those buttons are
+handled below the browser, so no theme can take them away.
 
 ## Testing yours
 
 1. Put the folder in `~/Documents/decky-links/themes/`
 2. Open the plugin panel — it re-reads the folder each time it opens
-3. Pick your theme under **Custom Visuals**
+3. Pick your theme under **Custom Theme**
 
 If it does not appear, the folder name is not a valid id or `theme.html` is
 missing. If it appears but shows nothing, check that a template's `data-scene`

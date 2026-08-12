@@ -176,7 +176,7 @@ const Content: FC = () => {
               layout="below" because the inline form gives the control what is
               left after the label, which was enough for "MS-D...". */}
           <DropdownItem
-            label="Custom Visuals"
+            label="Custom Theme"
             layout="below"
             rgOptions={[
               { data: NO_THEME, label: "None" },
