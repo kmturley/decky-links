@@ -111,6 +111,13 @@ so it is an `enterSound`. A drive seeking continues for as long as the drive is
 working, so it is a `loopSound` — a one-shot would fall silent while the
 progress bar on screen was still filling. Loops stop when a game starts.
 
+**Watch for doubling.** Three of the plugin's events fire at the same instant a
+scene begins: `scan` with `reading`, `error` with `error`, and `lock` with
+`locked`. Giving those scenes an `enterSound` as well plays a second copy of the
+same file a millisecond later — audible as a flam rather than as two sounds. If
+a scene has an event, remap the event; `launching` and `ambient` have none,
+which is why they are usually where a scene sound belongs.
+
 ## Per-scene options
 
 | | |
@@ -154,26 +161,30 @@ matches a name from the table above.
 
 ## Start from one of these
 
-Both ship, both use every feature described here, and they are deliberately
-unalike — one is text mode with no boxes at all, the other is a windowed
-desktop. Between them they show that nothing above was written around a
+All three ship, all three use every feature described here, and they are
+deliberately unalike — text mode with no boxes at all, a windowed desktop, and a
+cabinet. Between them they show that nothing above was written around a
 particular look.
 
 | | |
 | --- | --- |
 | [`assets/themes/dos/theme.html`](../assets/themes/dos/theme.html) | MS-DOS. Text mode, block cursor, drive that seeks. |
 | [`assets/themes/desktop95/theme.html`](../assets/themes/desktop95/theme.html) | Desktop 95. Teal desktop, beveled windows, taskbar clock. |
+| [`assets/themes/arcade/theme.html`](../assets/themes/arcade/theme.html) | Arcade. CRT bezel, coin doors, credit counter, attract mode. |
 
 Their sounds are generated, not recorded — see
-[`scripts/make-dos-sounds.py`](../scripts/make-dos-sounds.py) and
-[`scripts/make-desktop95-sounds.py`](../scripts/make-desktop95-sounds.py) if you
-want a set of your own. Both are pure stdlib Python and take no arguments.
+[`make-dos-sounds.py`](../scripts/make-dos-sounds.py),
+[`make-desktop95-sounds.py`](../scripts/make-desktop95-sounds.py) and
+[`make-arcade-sounds.py`](../scripts/make-arcade-sounds.py) if you want a set of
+your own. All are pure stdlib Python, take no arguments, and share the small
+synthesiser in [`scripts/synth.py`](../scripts/synth.py).
 
 ## One thing to keep out
 
 If you are building a theme after a real product, take the *era* and leave the
 *trademarks*: no product names, no logos, no shipped font files, no sampled
-system sounds. Desktop 95 is built to be an example of that — its Start button
-wears this plugin's own mark, its fonts are named rather than bundled, and its
-startup swell was synthesised from scratch. A theme is something people share,
-and it should be shareable.
+system sounds. Desktop 95 and Arcade are both built as examples of that — a
+Start button wearing this plugin's own mark instead of anyone's flag, a cabinet
+booting an invented board on a Decky Links marquee, fonts named rather than
+bundled, and every sound synthesised from scratch. A theme is something people
+share, and it should be shareable.

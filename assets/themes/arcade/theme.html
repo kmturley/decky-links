@@ -1,0 +1,430 @@
+<!--
+  Arcade — a cabinet, seen from the stool.
+
+  A whole theme in one file. The JSON below is the manifest, the <style> is
+  every screen's styling, and each <template data-scene="…"> is one screen.
+  Nothing here is compiled: edit it, reopen the panel, see it.
+
+  Available scenes, all optional — a theme that leaves one out falls back to
+  its own "ready" screen rather than letting Steam show through:
+
+    ready      waiting for a medium          launching   a game is starting
+    ambient    idle for 90 seconds           error       unreadable medium
+    reading    a medium is being read        locked      restricted mode
+
+  Three placeholders are substituted when a screen is rendered:
+    {title}    the game's name, when one is known
+    {drive}    "A" for a disk, "T" for a tag — used here as the slot letter
+    {time}     the clock, HH:MM in the device's locale — unused: a cabinet
+               that told you the time would be working against its owner
+
+  ── The conceit ────────────────────────────────────────────────────────────
+  The plugin's states already are an arcade cabinet's, which is why this fits
+  without inventing anything:
+
+    ready       INSERT COIN. The attract-adjacent state, doors lit.
+    reading     the coin drops and the credit registers.
+    launching   the board boots, self-tests, and hands over.
+    ambient     attract mode.
+    error       the coin comes back.
+    locked      out of service; the marquee goes dark.
+
+  ── On not being anybody's product ─────────────────────────────────────────
+  Every board named on the launch screen is invented. The famous late-80s
+  arcade hardware is trademarked down to the boot screens, so this one boots a
+  DL-2600 on a Decky Links marquee, and any theme derived from it should stay
+  equally fictional. Nothing here is sampled either: the coin, the chip and the
+  room are synthesised — see scripts/make-arcade-sounds.py.
+
+  ── On sound, and doubling ─────────────────────────────────────────────────
+  Only "launching" declares an enterSound. The plugin already fires its own
+  event at the exact instant a medium lands ("scan"), fails ("error") or locks
+  ("lock"), and those are remapped under "sounds" below — so a scene enterSound
+  for the same moment would play a second copy of the same file a millisecond
+  later. Launching has no event of its own, which is why it is the one that
+  needs one.
+-->
+<script type="application/json" id="decky-theme">
+{
+  "name": "Arcade",
+  "blurb": "Insert coin. Cabinet bezel, credit counter and a chip that boots",
+  "sounds": {
+    "scan": "coin.flac",
+    "success": "fanfare.flac",
+    "error": "buzz.flac",
+    "lock": "clack.flac",
+    "unlock": "fanfare.flac"
+  },
+  "scenes": {
+    "reading": { "minVisibleMs": 700 },
+    "launching": { "enterSound": "boot.flac", "fadeMs": 90 },
+    "ambient": { "loopSound": "room.flac" }
+  }
+}
+</script>
+
+<style>
+  /* Saturated, high-contrast, and only a handful of hues — a cabinet's colour
+     came from a CRT pushed hard and from lamps behind coloured plastic, and
+     neither does pastels. */
+  .arc {
+    --ink: #000000;      --panel: #12121A;   --steel: #2A2A34;
+    --cyan: #00E5FF;     --pink: #FF2E88;    --amber: #FFB000;
+    --yellow: #FFE300;   --red: #E01B24;     --green: #35E06A;
+    --white: #FFFFFF;    --gold: #E8B63C;
+
+    /* No pixel font ships — a font file is licensed software, not an asset.
+       Uppercase, wide tracking and a hard glow do most of the work anyway,
+       because what reads as "arcade" is the *treatment*, not the letterforms. */
+    font-family: "Press Start 2P", "VT323", "Courier New", monospace;
+    font-size: min(2.2vh, 1.6vw);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    line-height: 1.7;
+    color: var(--white);
+    background: #05050A;
+    width: 100%; height: 100%;
+    padding: 0.9vh 1.1vw;
+    box-sizing: border-box;
+    /* The gap has to clear the bezel, not just separate the boxes. The tube's
+       frame is drawn with spread box-shadows, which take up no layout space at
+       all, so at a smaller gap the frame overlapped the marquee above it and
+       the control panel below and clipped both. */
+    display: flex; flex-direction: column; gap: 2.2vh;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ── Marquee ──────────────────────────────────────────────────────────────
+     The backlit header above the glass. Lit by a gradient plus a glow that
+     breathes very slightly: fluorescent tubes behind acrylic are never quite
+     steady, and a perfectly constant one looks like a print of a cabinet
+     rather than a cabinet. */
+  .arc .marquee {
+    flex: none; text-align: center; padding: 0.8vh 1vw; border-radius: 0.3em;
+    background: linear-gradient(180deg, #FFF6D8 0%, #FFD062 45%, #E8890C 100%);
+    box-shadow: 0 0 2.2vh rgba(255, 190, 60, 0.55), inset 0 -0.4vh 0 rgba(0,0,0,0.3);
+    animation: arc-tube 5.5s ease-in-out infinite;
+  }
+  .arc .marquee span {
+    color: #2A1400; font-weight: bold; font-size: 1.5em; letter-spacing: 0.3em;
+  }
+  @keyframes arc-tube {
+    0%, 100% { filter: brightness(1) } 47% { filter: brightness(1.09) }
+    52% { filter: brightness(0.97) }
+  }
+  /* Out of service: the tube is off. A dark marquee is how you know from
+     across a room, and it is the one thing the locked screen must say. */
+  .arc.dark .marquee {
+    background: linear-gradient(180deg, #3A3428 0%, #241F16 100%);
+    box-shadow: none; animation: none;
+  }
+  .arc.dark .marquee span { color: #6B6151; }
+
+  /* ── The glass ────────────────────────────────────────────────────────────
+     A tube in a bezel: rounded corners, a heavy frame, the picture darkening
+     toward the edges, scanlines over everything, and one glare running across
+     the top-left of the glass. */
+  .arc .crt {
+    flex: 1; position: relative; overflow: hidden;
+    border-radius: 2.2em / 3.2em;
+    background: radial-gradient(ellipse at 50% 45%, #101018 0%, #05050A 70%, #000 100%);
+    box-shadow: 0 0 0 0.7vh #16161C, 0 0 0 1.3vh #0A0A0E,
+                inset 0 0 6vh rgba(0, 0, 0, 0.95);
+  }
+  .arc .crt::before, .arc .crt::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+  }
+  .arc .crt::before {
+    background: repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0 2px, rgba(0,0,0,0.32) 2px 4px);
+    mix-blend-mode: multiply;
+  }
+  .arc .crt::after {
+    background: linear-gradient(118deg,
+      rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.03) 18%,
+      rgba(255,255,255,0) 42%);
+    border-radius: inherit;
+  }
+  .arc .screen {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.6vh;
+    padding: 2vh 3vw; text-align: center;
+  }
+
+  /* ── Type ─────────────────────────────────────────────────────────────── */
+  .arc .big { font-size: 2.1em; font-weight: bold; letter-spacing: 0.24em; }
+  .arc .mid { font-size: 1.3em; }
+  /* Light enough to read on a handheld at arm's length. The first value here
+     was #6A6A7A, which looked right on a desktop monitor and turned out to be
+     barely legible on the device — a dark grey on black loses whatever
+     contrast it had the moment the screen is not the brightest thing in the
+     room. */
+  .arc .dim { color: #A6ADC4; }
+  .arc .c { color: var(--cyan); text-shadow: 0 0 1.2vh rgba(0, 229, 255, 0.75); }
+  .arc .p { color: var(--pink); text-shadow: 0 0 1.2vh rgba(255, 46, 136, 0.75); }
+  .arc .y { color: var(--yellow); text-shadow: 0 0 1.2vh rgba(255, 227, 0, 0.7); }
+  .arc .g { color: var(--green); text-shadow: 0 0 1.2vh rgba(53, 224, 106, 0.6); }
+  .arc .r { color: var(--red); text-shadow: 0 0 1.4vh rgba(224, 27, 36, 0.8); }
+
+  /* The blink every cabinet in the world was doing at once. Hard-edged, on a
+     slow cadence: a fade would be a modern screen imitating this one. */
+  .arc .blink { animation: arc-blink 1.1s step-end infinite; }
+  .arc .blink-fast { animation: arc-blink 0.42s step-end infinite; }
+  @keyframes arc-blink { 0%, 54% { opacity: 1 } 55%, 100% { opacity: 0 } }
+
+  /* ── Control panel ────────────────────────────────────────────────────────
+     Coin doors either side of the credit display, below the glass. The doors
+     pulse while the cabinet is waiting for money and sit dead otherwise, which
+     makes "is this thing on?" answerable at a glance. */
+  .arc .panel {
+    flex: none; display: flex; align-items: center; justify-content: center;
+    gap: 2.5vw; padding: 0.7vh 0;
+  }
+  .arc .door {
+    /* Padded at the top to leave room for the slot above the denomination,
+       which is where a chute door has it — centred, the slot sat on top of the
+       lettering. */
+    width: 8vw; padding: 2.3vh 0 0.6vh; text-align: center; border-radius: 0.25em;
+    background: linear-gradient(180deg, #C4161C 0%, #8E1014 100%);
+    color: #FFE9C0; font-size: 0.85em; letter-spacing: 0.1em;
+    box-shadow: inset 0 0.25vh 0 rgba(255,255,255,0.35),
+                inset 0 -0.3vh 0 rgba(0,0,0,0.45);
+    position: relative;
+  }
+  /* The slot itself, and where a coin lands. */
+  .arc .door::before {
+    content: ""; position: absolute; left: 50%; top: 0.7vh; width: 0.42vw;
+    height: 1.3vh; margin-left: -0.21vw; border-radius: 0.1em;
+    background: #140406; box-shadow: inset 0 0 0.5vh #000,
+                0 0.15vh 0 rgba(255,255,255,0.25);
+  }
+  .arc .door.live { animation: arc-coin-light 1.3s ease-in-out infinite; }
+  @keyframes arc-coin-light {
+    0%, 100% { box-shadow: inset 0 0.25vh 0 rgba(255,255,255,0.35),
+                           inset 0 -0.3vh 0 rgba(0,0,0,0.45),
+                           0 0 0.6vh rgba(224, 27, 36, 0.45) }
+    50% { box-shadow: inset 0 0.25vh 0 rgba(255,255,255,0.35),
+                      inset 0 -0.3vh 0 rgba(0,0,0,0.45),
+                      0 0 2.6vh rgba(255, 90, 90, 0.95) }
+  }
+  .arc.dark .door {
+    background: linear-gradient(180deg, #4A2224 0%, #2C1416 100%);
+    color: #7A5F55; animation: none;
+  }
+
+  /* The credit counter: LEDs behind a red filter, which is why the unlit
+     segments are still faintly visible. */
+  .arc .credits {
+    padding: 0.5vh 1.2vw; border-radius: 0.2em; background: #14060A;
+    box-shadow: inset 0 0 1.4vh rgba(0,0,0,0.9), 0 0 0 0.25vh #2A2A34;
+    color: #FF3B30; text-shadow: 0 0 1.4vh rgba(255, 59, 48, 0.9);
+    font-size: 1.15em; letter-spacing: 0.22em;
+  }
+  .arc .credits b { color: #FF6A5F; font-weight: bold; }
+
+  /* ── The coin ─────────────────────────────────────────────────────────────
+     Falls into the left door and stops. Stepped, because a coin seen on a
+     50Hz screen was never smooth, and the squash at the end is the whole
+     illusion: something that stops dead reads as weightless. */
+  /* Lives *inside* the door rather than being placed next to it. Positioned by
+     hand it landed an inch to the left of the slot, because where the doors end
+     up depends on how wide the credit counter's text renders — and the one
+     thing this animation has to get right is which hole the coin goes in.
+
+     The drop is short on purpose: anything longer sends it across the glass,
+     and a coin falling over the picture reads as being *on* the screen rather
+     than in front of the cabinet. */
+  .arc .door .coin {
+    position: absolute; left: 50%; top: 0.4vh; width: 2.2vh; height: 2.2vh;
+    margin-left: -1.1vh; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #FFF0B0 0%, var(--gold) 45%, #8A6A18 100%);
+    box-shadow: 0 0 1.4vh rgba(232, 182, 60, 0.85);
+    animation: arc-drop 0.5s steps(7) forwards;
+  }
+  @keyframes arc-drop {
+    0% { transform: translateY(-9vh) rotate(0deg); opacity: 0 }
+    14% { opacity: 1 }
+    82% { transform: translateY(0) rotate(200deg) scale(1, 1); opacity: 1 }
+    /* Squashes as it stops, then is gone — something that halts dead without
+       deforming has no weight, and a coin that stayed on the door would be a
+       coin that never went in. */
+    100% { transform: translateY(0.3vh) rotate(200deg) scale(1.2, 0.7); opacity: 0 }
+  }
+
+  /* ── Boot screen ──────────────────────────────────────────────────────────
+     A board's self-test: fixed-width lines, results arriving one at a time,
+     and a colour bar because every one of these had a test pattern somewhere.
+     The lines appear on a stagger rather than all at once — a board that
+     passed instantly would not have needed a screen to say so. */
+  .arc .boot { align-items: flex-start; text-align: left; padding: 4vh 6vw; gap: 0.2vh; }
+  .arc .boot .line { opacity: 0; animation: arc-line 0.01s linear forwards; }
+  .arc .boot .line:nth-child(1) { animation-delay: 0.05s }
+  .arc .boot .line:nth-child(2) { animation-delay: 0.30s }
+  .arc .boot .line:nth-child(3) { animation-delay: 0.55s }
+  .arc .boot .line:nth-child(4) { animation-delay: 0.80s }
+  .arc .boot .line:nth-child(5) { animation-delay: 1.15s }
+  .arc .boot .line:nth-child(6) { animation-delay: 1.55s }
+  @keyframes arc-line { to { opacity: 1 } }
+  .arc .bars {
+    display: flex; height: 1.6vh; width: 22vw; margin-top: 1.4vh;
+  }
+  .arc .bars i { flex: 1; }
+  .arc .bars i:nth-child(1) { background: var(--white) }
+  .arc .bars i:nth-child(2) { background: var(--yellow) }
+  .arc .bars i:nth-child(3) { background: var(--cyan) }
+  .arc .bars i:nth-child(4) { background: var(--green) }
+  .arc .bars i:nth-child(5) { background: var(--pink) }
+  .arc .bars i:nth-child(6) { background: var(--red) }
+  .arc .bars i:nth-child(7) { background: #2020C0 }
+
+  /* The degauss: one wobble and a flash as the board takes the tube. Plays
+     once, at the start of the launch, rather than at the end — the layer does
+     not know when a game will paint, and an effect that has to finish exactly
+     then would be wrong far more often than right. */
+  .arc .degauss { animation: arc-degauss 0.55s ease-out 1; }
+  @keyframes arc-degauss {
+    0% { filter: brightness(2.2) saturate(0.2); transform: scaleY(0.02) }
+    12% { filter: brightness(1.5) saturate(1.6); transform: scaleY(1.06) skewX(2deg) }
+    26% { transform: scaleY(0.98) skewX(-1.4deg) }
+    45% { transform: scaleY(1.02) skewX(0.6deg) }
+    100% { filter: none; transform: none }
+  }
+
+  /* ── Attract mode ─────────────────────────────────────────────────────────
+     Two cards, shown alternately forever, which is exactly what a cabinet did
+     with nobody in front of it. Both animations run the same 16s cycle offset
+     by half, so there is always one and only one on screen. */
+  .arc .attract { position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.4vh; opacity: 0; }
+  .arc .attract.one { animation: arc-card-a 16s step-end infinite; }
+  .arc .attract.two { animation: arc-card-b 16s step-end infinite; }
+  @keyframes arc-card-a { 0% { opacity: 1 } 50%, 100% { opacity: 0 } }
+  @keyframes arc-card-b { 0%, 50% { opacity: 0 } 51%, 100% { opacity: 1 } }
+  .arc table { border-collapse: collapse; font-size: 1.05em; }
+  .arc td { padding: 0.2vh 1.1vw; }
+  .arc td.rank { color: var(--amber); }
+  .arc td.score { color: var(--cyan); text-align: right; }
+  .arc td.name { color: var(--pink); letter-spacing: 0.3em; }
+</style>
+
+<template data-scene="ready">
+  <div class="arc">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt">
+      <div class="screen">
+        <div class="big y blink">Insert Coin</div>
+        <div class="mid c">Free play &nbsp;·&nbsp; 1 player</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door live">25¢</div>
+      <div class="credits">Credits <b>00</b></div>
+      <div class="door live">25¢</div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="ambient">
+  <div class="arc">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt">
+      <div class="attract one">
+        <div class="mid p">High Scores</div>
+        <table>
+          <tr><td class="rank">1st</td><td class="score">327,600</td><td class="name">DEK</td></tr>
+          <tr><td class="rank">2nd</td><td class="score">214,850</td><td class="name">NFC</td></tr>
+          <tr><td class="rank">3rd</td><td class="score">198,020</td><td class="name">TAG</td></tr>
+          <tr><td class="rank">4th</td><td class="score">150,400</td><td class="name">USB</td></tr>
+          <tr><td class="rank">5th</td><td class="score">96,750</td><td class="name">CD</td></tr>
+        </table>
+      </div>
+      <div class="attract two">
+        <div class="big c">Decky Links</div>
+        <div class="mid y blink">Insert coin to play</div>
+        <div class="dim">Present a tag, a disk or a drive</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door live">25¢</div>
+      <div class="credits">Credits <b>00</b></div>
+      <div class="door live">25¢</div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="reading">
+  <div class="arc">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt">
+      <div class="screen">
+        <div class="big y blink-fast">Credit Added</div>
+        <div class="mid c">Reading slot {drive}</div>
+        <div class="dim">Free play</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door"><i class="coin"></i>25¢</div>
+      <div class="credits">Credits <b>01</b></div>
+      <div class="door">25¢</div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="launching">
+  <div class="arc">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt degauss">
+      <div class="screen boot">
+        <div class="line">Decky Links Arcade System</div>
+        <div class="line dim">Board DL-2600 &nbsp; Rev C</div>
+        <div class="line g">RAM OK &nbsp; ROM OK &nbsp; Sound OK</div>
+        <div class="line">Reading cartridge payload<span class="blink">...</span></div>
+        <div class="line g">Payload OK &nbsp;—&nbsp; <span class="y">{title}</span></div>
+        <div class="line p blink">Credit deducted — launching</div>
+        <div class="bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door">25¢</div>
+      <div class="credits">Credits <b>00</b></div>
+      <div class="door">25¢</div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="error">
+  <div class="arc">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt">
+      <div class="screen">
+        <div class="big r blink-fast">Cartridge Error</div>
+        <div class="mid">Coin returned</div>
+        <div class="dim">Slot {drive} could not be read — try another</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door live">25¢</div>
+      <div class="credits">Credits <b>00</b></div>
+      <div class="door live">25¢</div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="locked">
+  <div class="arc dark">
+    <div class="marquee"><span>Decky Links Arcade</span></div>
+    <div class="crt">
+      <div class="screen">
+        <div class="big r">Out of Service</div>
+        <div class="mid y">Attendant key required</div>
+        <div class="dim">Present the key to return this cabinet to play</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="door">25¢</div>
+      <div class="credits">Credits <b>00</b></div>
+      <div class="door">25¢</div>
+    </div>
+  </div>
+</template>
