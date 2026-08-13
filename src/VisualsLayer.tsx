@@ -54,16 +54,23 @@ const HELD = new Set<Scene>([Scene.READY, Scene.AMBIENT, Scene.LOCKED]);
  */
 const CLOCK_EVERY_MS = 20_000;
 
-/** Absorb an event rather than let it reach anything.
+/** Absorb an event rather than let it reach anything — but count it first.
  *
  * pointerEvents: auto is what actually does the blocking — the hit test lands
  * here, so the element underneath never hears about the tap at all. These
  * handlers close the other half of it: the event still bubbles up this
  * document, and Steam has listeners near the root that act on stray taps.
+ *
+ * Swallowed is not the same as ignored. A tap that goes nowhere is still a
+ * person saying they are here, which is exactly what the ambient screen is
+ * waiting to hear — so the scene store is told before the event is dropped.
+ * Gamepad input reaches BackgroundManager instead; this is the touchscreen's
+ * half of the same signal.
  */
 function swallow(e: SyntheticEvent): void {
   e.preventDefault();
   e.stopPropagation();
+  scenes.activity();
 }
 
 function clockText(): string {

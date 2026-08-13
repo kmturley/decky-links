@@ -290,6 +290,32 @@ export function startBackgroundManager(): () => void {
     () => setLaunching(false),
   );
 
+  // Input ends the ambient screen.
+  //
+  // Someone who picks the Deck up and presses a button has announced they are
+  // there, and an attract screen that carries on regardless reads as a device
+  // that has stopped listening. Nothing else can tell us: the plugin's own
+  // events all come from media, and a person waking a Deck up touches no
+  // media at all.
+  //
+  // Two doors, because there are two ways to touch a Deck. Buttons, sticks and
+  // trackpads arrive here; the touchscreen arrives at VisualsLayer, which is
+  // already intercepting taps so they cannot reach the Steam UI underneath,
+  // and calls scenes.activity() with them.
+  //
+  // Measured before being used: with nobody touching the device this fired
+  // exactly zero times in six seconds, which is the property that matters —
+  // a stream that reported stick jitter or gyro drift would mean the ambient
+  // screen could never be reached at all.
+  const controllerInput =
+    (window as any).SteamClient?.Input?.RegisterForControllerInputMessages?.(
+      () => scenes.activity(),
+    );
+
+  // restate(false) rather than restate(): activity() has already restarted the
+  // idle clock, and this only has to recompute now that it has.
+  const stopWatchingActivity = scenes.onActivity(() => restate(false));
+
   // Sounds, played here rather than in the backend.
   //
   // The backend still decides which sound belongs to which event — it owns the
@@ -792,6 +818,8 @@ export function startBackgroundManager(): () => void {
     clearInterval(sceneTicker);
     clearTimeout(abandonTimer);
     gameActionEnd?.unregister?.();
+    controllerInput?.unregister?.();
+    stopWatchingActivity();
     removeEventListener("play_sound", soundListener);
     removeEventListener("media_loading", loadingListener);
     removeEventListener("media_detected", tagListener);

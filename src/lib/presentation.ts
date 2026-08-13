@@ -130,6 +130,7 @@ type Listener = (change: SceneChange) => void;
 class SceneStore {
   private current: Scene | null = null;
   private listeners = new Set<Listener>();
+  private activityListeners = new Set<() => void>();
   private lastEventAt = Date.now();
 
   get scene(): Scene | null {
@@ -139,6 +140,35 @@ class SceneStore {
   /** Note that something happened, for the AMBIENT timer. */
   touch(): void {
     this.lastEventAt = Date.now();
+  }
+
+  /** Note that a *person* did something.
+   *
+   * Kept separate from touch() because the two have different consequences. A
+   * plugin event only has to restart the idle clock, and whatever raised it is
+   * about to recompute the scene anyway. Input has to end the ambient screen
+   * *now*: someone who picks the Deck up and presses a button has said they
+   * are here, and a screensaver that waits up to ten seconds for the next
+   * tick before admitting it is not idle any more looks broken rather than
+   * unhurried.
+   *
+   * Listeners recompute rather than assign, so this cannot force a scene the
+   * facts do not support — input during an error still shows the error.
+   */
+  activity(): void {
+    this.touch();
+    for (const listener of this.activityListeners) {
+      try {
+        listener();
+      } catch (e) {
+        console.error("[ Decky Links ] Activity listener threw:", e);
+      }
+    }
+  }
+
+  onActivity(listener: () => void): () => void {
+    this.activityListeners.add(listener);
+    return () => this.activityListeners.delete(listener);
   }
 
   get idleMs(): number {
