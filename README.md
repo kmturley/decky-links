@@ -57,8 +57,8 @@ your own data, and mounting that uninvited is both a surprise and a delay.
   away and the Deck locks down — see below.
 - **Custom theme.** Replace Steam's Home, game pages and loading screens with
   a theme of your own — one HTML file and a folder of sounds, no build step.
-  Ships with three: MS-DOS, a mid-90s beige desktop, and an arcade cabinet. See
-  [docs/themes.md](docs/themes.md).
+  Ships with four: MS-DOS, a mid-90s beige desktop, an arcade cabinet, and a
+  16-bit console. See [docs/themes.md](docs/themes.md).
 
 ## Restricted Mode
 

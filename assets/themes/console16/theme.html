@@ -1,0 +1,501 @@
+<!--
+  16-Bit Console — the intro screen, not the machine that drew it.
+
+  A whole theme in one file. The JSON below is the manifest, the <style> is
+  every screen's styling, and each <template data-scene="…"> is one screen.
+  Nothing here is compiled: edit it, reopen the panel, see it.
+
+  Available scenes, all optional — a theme that leaves one out falls back to
+  its own "ready" screen rather than letting Steam show through:
+
+    ready      waiting for a medium          launching   a game is starting
+    ambient    idle for 90 seconds           error       unreadable medium
+    reading    a medium is being read        locked      restricted mode
+
+  Three placeholders are substituted when a screen is rendered:
+    {title}    the game's name, when one is known
+    {drive}    "A" for a disk, "T" for a tag — shown as the slot letter
+    {time}     the clock, HH:MM in the device's locale
+
+  ── Inside, not outside ────────────────────────────────────────────────────
+  The first version of this theme drew the console itself — a grey shell on a
+  shelf with a slot in the top — and it was the odd one out. Every other theme
+  puts you *at* the machine rather than in front of it: the DOS theme is the
+  prompt, Desktop 95 is the desktop, Arcade is the glass. A picture of hardware
+  is a product shot; what a person remembers of a 16-bit console is what it
+  threw at the television the moment it powered up.
+
+  So this is that: a boot screen. Copper bars, a chequerboard floor running to
+  the horizon, a logo with an extrude on it, and INSERT CARTRIDGE flashing
+  underneath. The whole thing is CSS — the floor is one conic gradient in
+  perspective, the bars are six divs on offset sine timings, and nothing here
+  runs a line of JavaScript.
+
+  ── The pixel grid ─────────────────────────────────────────────────────────
+  A Mega Drive drew 320x224 and a SNES 256x224; this Deck is 1280x800. So a
+  period pixel is a 4x4 block of real ones, and --px below is that block.
+  Every weight, offset and sprite dimension here is a whole multiple of it,
+  the sky is eight flat bands rather than a gradient, and the copper bars move
+  in whole-pixel steps.
+
+  What is deliberately *not* done is rendering at 320x200. Sampling the whole
+  screen down to that and back up (which is how the above was checked) shows
+  the graphics surviving intact and the type turning to mush — a period screen
+  had a bitmap font drawn for that size, and a font file cannot be shipped
+  here. So the graphics take the period grid and the text stays crisp.
+
+  ── On not being anybody's product ─────────────────────────────────────────
+  Two console makers owned this decade and both still enforce it. No real
+  system name, no real boot emblem, no shipped font: this is a DL-16, the mark
+  is this plugin's own two links drawn as pixels, and the fonts are named for
+  anyone who has them and fall through to a generic monospace otherwise. The
+  sounds are synthesised — see scripts/make-console16-sounds.py.
+
+  ── On sound ──────────────────────────────────────────────────────────────
+  Only "launching" declares an enterSound. The plugin fires its own event at
+  the instant a medium lands, fails or locks, and those are remapped under
+  "sounds" — a scene sound for the same moment would play the same file twice,
+  a millisecond apart. Standby is silent on purpose.
+-->
+<script type="application/json" id="decky-theme">
+{
+  "name": "16-Bit Console",
+  "blurb": "Copper bars, a chequerboard horizon and INSERT CARTRIDGE",
+  "sounds": {
+    "scan": "latch.flac",
+    "success": "chime.flac",
+    "error": "buzz.flac",
+    "lock": "eject.flac",
+    "unlock": "chime.flac"
+  },
+  "scenes": {
+    "reading": { "minVisibleMs": 800 },
+    "launching": { "enterSound": "power.flac", "fadeMs": 80 }
+  }
+}
+</script>
+
+<style>
+  .c16 {
+    --sky-hi: #241A4A;   --sky-lo: #0B0A1E;   --ink: #06060E;
+    --ivory: #F2EFE4;    --cream: #FFE9A8;
+    --red: #E63946;      --blue: #1D3557;     --sun: #F4A261;
+    --teal: #2A9D8F;     --cyan: #59D8E6;     --pink: #F26BB2;
+    --green: #57E389;    --amber: #FFB020;
+
+    /* One period pixel.
+       Checked rather than assumed: a Mega Drive drew 320x224 and a SNES
+       256x224, while this Deck is 1280x800 — so a 16-bit pixel is a 4x4 block
+       of real ones, and 200 of them stack up the screen. Rendering the theme
+       into an actual 320x200 buffer and blowing it back up showed what was
+       wrong: the geometry survived, but line weights landed on half pixels and
+       the sky held more shades than the hardware had.
+       Everything below is a whole multiple of this. */
+    --px: calc(100vh / 200);
+
+    font-family: "Press Start 2P", "Pixel Operator", "VT323", "Courier New", monospace;
+    /* Six pixels of body text, not four. The shadow under it is one pixel, as
+       it was, and at four the shadow was a quarter of the letter height —
+       which is what a period font's shadow looks like only if the font is
+       twice this size. Scale them together or neither is right. */
+    font-size: calc(var(--px) * 6);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    line-height: 1.85;
+    color: var(--ivory);
+    /* Aliased where the platform honours it. A smooth-edged glyph is the one
+       thing no machine of this era could draw. */
+    -webkit-font-smoothing: none;
+    /* Banded, not blended. Eight flat steps: these machines picked a colour per
+       scanline and held it, and a 700-shade sky is the giveaway that something
+       modern drew it. */
+    background: linear-gradient(180deg,
+      #0B0A1E 0 17%, #12102C 17% 32%, #191540 32% 45%, #241A4A 45% 57%,
+      #2E1E58 57% 68%, #3A2168 68% 79%, #52276E 79% 90%, #6E2E6B 90% 100%);
+    width: 100%; height: 100%;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Everything sits above the background layers. */
+  .c16 .screen {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2.2vh; padding: 4vh 5vw; text-align: center;
+  }
+
+  /* ── The floor ────────────────────────────────────────────────────────────
+     One conic gradient makes a chequerboard; a perspective rotation lays it
+     down and running its background-position gives infinite forward motion.
+     The whole trick is that the tile is square in the source and only the
+     projection makes it converge, so the horizon comes out right without a
+     single hand-placed line.
+
+     Widened past both edges because a rotated box narrows at the far end and
+     would otherwise show the sky through its corners. */
+  .c16 .floor {
+    position: absolute; left: -80%; right: -80%; bottom: 0; height: 100%;
+    z-index: 1;
+    background-image: conic-gradient(
+      #2E2478 0 25%, #140F3C 0 50%, #2E2478 0 75%, #140F3C 0);
+    background-size: 11vh 11vh;
+    /* A long perspective distance and a shallow-ish tilt. Measured by
+       screenshot: at perspective(26vh) the plane collapsed into a strip a few
+       pixels tall along the bottom edge — a short focal length puts the
+       vanishing point almost on the near edge, so nearly the whole floor lands
+       in the last few rows. Pulling the camera back to 90vh spreads it across
+       the bottom fifth of the screen, which is where a horizon belongs. */
+    transform: perspective(90vh) rotateX(70deg);
+    transform-origin: bottom center;
+    animation: c16-floor 2.6s linear infinite;
+  }
+  .c16 .floor.fast { animation-duration: 0.6s; }
+  @keyframes c16-floor { from { background-position: 0 0 } to { background-position: 0 11vh } }
+
+  /* A glow along the horizon, which is what sold every one of these: the floor
+     has to *arrive* from somewhere rather than simply stopping. */
+  .c16 .haze {
+    position: absolute; left: 0; right: 0; bottom: 19%; height: calc(var(--px) * 11);
+    z-index: 2;
+    /* Four flat bands where there was a blur. A gaussian is the most modern
+       thing a screen can do; a period machine faked a glow by stacking a few
+       lines of brighter colour, and so does this. */
+    background: linear-gradient(180deg,
+      rgba(242,107,178,0.10) 0 30%, rgba(242,107,178,0.22) 30% 58%,
+      rgba(140,160,220,0.34) 58% 80%, rgba(89,216,230,0.52) 80% 100%);
+    pointer-events: none;
+  }
+
+  /* ── Copper bars ──────────────────────────────────────────────────────────
+     Six bars on the same slow travel at different offsets, so the group never
+     lines up twice. Kept to a band across the upper third rather than the
+     whole screen: edge to edge they stopped reading as an effect behind the
+     logo and started reading as wallpaper. Hard-edged and unblurred: these were single scanline
+     colours written per raster line, and softening them is the one change that
+     makes the effect look modern. */
+  .c16 .copper { position: absolute; left: 0; right: 0; top: 6%; height: 30%; z-index: 1; overflow: hidden; }
+  .c16 .copper i {
+    position: absolute; left: 0; right: 0; height: calc(var(--px) * 2); opacity: 0.62;
+    /* Stepped, not eased: a copper list was rewritten once a frame, so a bar
+       moved in whole scanlines. Sliding smoothly is what gives a modern
+       imitation away, and it costs one keyword to fix. */
+    animation: c16-copper 6.5s steps(12) infinite alternate;
+  }
+  .c16 .copper i:nth-child(1) { top: 8%;  background: var(--red);   animation-delay: -0.0s }
+  .c16 .copper i:nth-child(2) { top: 22%; background: var(--sun);   animation-delay: -1.1s }
+  .c16 .copper i:nth-child(3) { top: 36%; background: var(--amber); animation-delay: -2.2s }
+  .c16 .copper i:nth-child(4) { top: 50%; background: var(--green); animation-delay: -3.3s }
+  .c16 .copper i:nth-child(5) { top: 64%; background: var(--cyan);  animation-delay: -4.4s }
+  .c16 .copper i:nth-child(6) { top: 78%; background: var(--pink);  animation-delay: -5.5s }
+  @keyframes c16-copper {
+    from { transform: translateY(calc(var(--px) * -6)) }
+    to { transform: translateY(calc(var(--px) * 6)) }
+  }
+
+  /* Scanlines over the lot, because this is a picture on a television. */
+  .c16::after {
+    content: ""; position: absolute; inset: 0; z-index: 4; pointer-events: none;
+    background: repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0 var(--px), rgba(0,0,0,0.20) var(--px) calc(var(--px) * 2));
+  }
+
+  /* ── The mark ─────────────────────────────────────────────────────────────
+     Two interlocking links, drawn as pixels: square corners, one chunky border
+     width, no anti-aliasing anywhere. Real pixel art at a scale that can be
+     read across a room, which is what a boot logo is for. */
+  .c16 .mark { position: relative; width: calc(var(--px) * 34); height: calc(var(--px) * 22); }
+  .c16 .mark i {
+    position: absolute; width: calc(var(--px) * 20); height: calc(var(--px) * 14);
+    border: calc(var(--px) * 3) solid var(--cyan);
+    box-shadow: 0 0 0 var(--px) var(--ink), inset 0 0 0 var(--px) var(--ink);
+  }
+  .c16 .mark i:first-child { left: 0; top: 0; }
+  /* Offset on a diagonal rather than side by side, by 8 pixels of the 14 the
+     ring is tall. Overlapped squarely the two rings merged into one block, and
+     at half that offset they still read as two rectangles that happened to
+     touch; a chain is two rings caught at an angle. The black outline on the
+     front one punches the gap that makes it pass *through* the back one. */
+  .c16 .mark i:last-child { right: 0; bottom: 0; border-color: var(--pink); z-index: 2; }
+
+  /* ── The wordmark ─────────────────────────────────────────────────────────
+     Cream face, hard extrude in two reds, and a black outline built from four
+     offset shadows. No blur in any of them: this is the layered look every
+     16-bit title screen had, and a soft edge anywhere gives it away. */
+  .c16 .logo {
+    position: relative; display: inline-block;
+    font-size: calc(var(--px) * 14); letter-spacing: 0.2em; color: var(--cream);
+    line-height: 1.25;
+    /* Outline and extrude in whole pixels, which is what makes this read as a
+       drawn logo rather than as text with a shadow on it. */
+    text-shadow:
+      var(--px) 0 0 var(--ink), calc(var(--px) * -1) 0 0 var(--ink),
+      0 var(--px) 0 var(--ink), 0 calc(var(--px) * -1) 0 var(--ink),
+      0 calc(var(--px) * 2) 0 var(--red), 0 calc(var(--px) * 3) 0 #7A1018,
+      0 calc(var(--px) * 4) 0 var(--ink);
+  }
+  .c16 .tag {
+    font-size: calc(var(--px) * 4); color: var(--cyan); letter-spacing: 0.42em;
+    text-shadow: var(--px) var(--px) 0 var(--ink);
+  }
+
+  /* A light sweeping across the logo, once, as it arrives.
+     On a *duplicate* laid over the wordmark rather than on the wordmark
+     itself. Clipping a gradient to the text means filling the text with
+     transparent, and the first version did that to the real logo — which
+     rendered it invisible the moment the animation finished, leaving nothing
+     on screen but its own drop shadow. */
+  .c16 .logo .shine {
+    position: absolute; left: 0; top: 0; text-shadow: none;
+    background: linear-gradient(100deg,
+      transparent 38%, rgba(255,255,255,0.9) 48%, transparent 58%);
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent; -webkit-text-fill-color: transparent;
+    animation: c16-shine 1.4s ease-out 1 both;
+  }
+  @keyframes c16-shine {
+    from { background-position: 120% 0 } to { background-position: -60% 0 }
+  }
+
+  /* ── Type ─────────────────────────────────────────────────────────────── */
+  .c16 .big { font-size: calc(var(--px) * 8); }
+  .c16 .sub { color: #B9C0DA; }
+  .c16 .g { color: var(--green); }
+  .c16 .y { color: var(--amber); }
+  .c16 .r { color: var(--red); }
+  .c16 .c { color: var(--cyan); }
+  .c16 .shadow { text-shadow: var(--px) var(--px) 0 var(--ink); }
+  .c16 .blink { animation: c16-blink 1.02s step-end infinite; }
+  .c16 .blink-fast { animation: c16-blink 0.4s step-end infinite; }
+  @keyframes c16-blink { 0%, 56% { opacity: 1 } 57%, 100% { opacity: 0 } }
+
+  .c16 .foot {
+    position: absolute; left: 0; right: 0; bottom: 2.4vh; z-index: 3;
+    text-align: center; font-size: calc(var(--px) * 4); color: #9AA0C4;
+    text-shadow: var(--px) var(--px) 0 var(--ink);
+  }
+
+  /* ── Sprites ──────────────────────────────────────────────────────────────
+     Square corners and flat fills only. A cartridge is a body, a label and
+     three ridges; a padlock is a body and a three-sided shackle. Both are as
+     many boxes as a 16x16 tile would have had colours. */
+  .c16 .cart {
+    position: relative; width: calc(var(--px) * 22); height: calc(var(--px) * 18);
+    background: #4A4A5E;
+    box-shadow: 0 0 0 var(--px) var(--ink), inset 0 calc(var(--px) * 2) 0 #6C6C86;
+  }
+  .c16 .cart::before {
+    content: ""; position: absolute; left: calc(var(--px) * 3); right: calc(var(--px) * 3);
+    top: calc(var(--px) * 6); height: calc(var(--px) * 8);
+    background: var(--ivory); box-shadow: inset 0 0 0 var(--px) #A9A48F;
+  }
+  .c16 .cart::after {
+    content: ""; position: absolute; left: calc(var(--px) * 4); right: calc(var(--px) * 4);
+    bottom: 0; height: calc(var(--px) * 3);
+    background: repeating-linear-gradient(90deg,
+      var(--amber) 0 calc(var(--px) * 2), #4A4A5E calc(var(--px) * 2) calc(var(--px) * 4));
+  }
+  /* Bobs on the spot, in whole steps. Nothing in this decade moved smoothly. */
+  .c16 .cart.bob { animation: c16-bob 1.5s steps(4) infinite alternate; }
+  @keyframes c16-bob {
+    from { transform: translateY(calc(var(--px) * -2)) }
+    to { transform: translateY(calc(var(--px) * 2)) }
+  }
+  /* Rejected: tips out of square and shakes. */
+  .c16 .cart.bad { animation: c16-shake 0.42s steps(2) infinite; }
+  @keyframes c16-shake {
+    0% { transform: translateX(calc(var(--px) * -1)) }
+    50% { transform: translateX(var(--px)) }
+    100% { transform: translateX(calc(var(--px) * -1)) }
+  }
+
+  .c16 .padlock { position: relative; width: calc(var(--px) * 18); height: calc(var(--px) * 14); }
+  .c16 .padlock i {
+    position: absolute; bottom: 0; left: 0; right: 0; height: calc(var(--px) * 9);
+    background: var(--amber); box-shadow: 0 0 0 var(--px) var(--ink);
+  }
+  .c16 .padlock i::after {
+    content: ""; position: absolute; left: 0; right: 0; top: calc(var(--px) * 2);
+    width: calc(var(--px) * 2); height: calc(var(--px) * 4); margin: 0 auto;
+    background: #7A5406;
+  }
+  .c16 .padlock b {
+    position: absolute; top: 0; left: calc(var(--px) * 3); right: calc(var(--px) * 3);
+    height: calc(var(--px) * 7);
+    border: calc(var(--px) * 2) solid var(--amber); border-bottom: none;
+    box-shadow: 0 calc(var(--px) * -1) 0 0 var(--ink),
+                calc(var(--px) * -1) 0 0 0 var(--ink),
+                var(--px) 0 0 0 var(--ink);
+  }
+
+  /* ── Loading bar ──────────────────────────────────────────────────────────
+     Chunky, outlined, and stepped so it fills a block at a time. Stops short
+     of the end: nothing here knows how long a load takes, and a bar that
+     completed and then sat there would be a lie told in the most irritating
+     way available. */
+  .c16 .bar {
+    width: calc(var(--px) * 140); max-width: 84vw; height: calc(var(--px) * 8);
+    background: #150F33;
+    box-shadow: 0 0 0 var(--px) var(--ink), inset 0 0 0 var(--px) #4B4380;
+    position: relative;
+  }
+  .c16 .bar i {
+    position: absolute; left: calc(var(--px) * 2); top: calc(var(--px) * 2);
+    bottom: calc(var(--px) * 2); width: 6%;
+    background: repeating-linear-gradient(90deg,
+      var(--cyan) 0 calc(var(--px) * 4), #1E7F91 calc(var(--px) * 4) calc(var(--px) * 5));
+    animation: c16-fill 6s steps(14) forwards;
+  }
+  @keyframes c16-fill { from { width: 6% } to { width: 88% } }
+
+  /* ── Boot ─────────────────────────────────────────────────────────────────
+     The launch screen drops the world and shows the logo on black, the way a
+     cartridge boot did before the game took over. Lines arrive on a stagger,
+     counted inside their own box so nothing above them can shift the sequence
+     — an emblem in the count once put the last line first. */
+  .c16.boot { background: var(--ink); }
+  .c16 .lines { display: flex; flex-direction: column; gap: 0.5vh; }
+  .c16 .lines .line { opacity: 0; animation: c16-line 0.01s linear forwards; }
+  .c16 .lines .line:nth-child(1) { animation-delay: 0.35s }
+  .c16 .lines .line:nth-child(2) { animation-delay: 0.70s }
+  .c16 .lines .line:nth-child(3) { animation-delay: 1.05s }
+  @keyframes c16-line { to { opacity: 1 } }
+
+  /* Power-on: the picture snaps out of a horizontal line, the way a set does
+     when it takes a signal. At the *start* of a launch rather than the end,
+     because nothing here knows when the game will paint, and an effect timed
+     to finish exactly then would be wrong far more often than right.
+
+     On .screen, never on the root. Scaling the outermost element collapses the
+     only thing painting a background, so for the couple of hundred
+     milliseconds it is squeezed flat the rest of the screen is transparent —
+     and on a Deck that means Steam's own interface appears mid-launch, which
+     is precisely what this feature exists to prevent. The black stays put and
+     the picture arrives out of it instead. */
+  .c16.beam .screen { animation: c16-beam 0.46s ease-out 1; }
+  @keyframes c16-beam {
+    0% { transform: scaleY(0.008) scaleX(1.2); filter: brightness(4) }
+    22% { transform: scaleY(0.06) scaleX(1); filter: brightness(2.4) }
+    55% { transform: scaleY(1.04); filter: brightness(1.3) }
+    100% { transform: none; filter: none }
+  }
+
+  /* Error: the border flashes, which is the one thing a machine of this era
+     could do without redrawing anything. */
+  .c16.fault { box-shadow: inset 0 0 0 1.2vh var(--red); animation: c16-fault 0.5s step-end infinite; }
+  @keyframes c16-fault {
+    0%, 50% { box-shadow: inset 0 0 0 1.2vh var(--red) }
+    51%, 100% { box-shadow: inset 0 0 0 1.2vh #3A0A0E }
+  }
+
+  /* Standby dims the world but keeps it running: an attract screen that froze
+     would look like a crash, and this is the screen that runs for hours. */
+  .c16.rest .copper i { opacity: 0.45; }
+  .c16.rest .floor { opacity: 0.5; }
+  .c16.rest .haze { opacity: 0.4; }
+
+  /* The scroller: one line crossing the screen forever, the demo's signature.
+     It also bobs, on a cycle unrelated to its travel, so it never traces the
+     same path twice. */
+  .c16 .scroller {
+    position: absolute; left: 0; right: 0; bottom: 7vh; z-index: 3; overflow: hidden;
+    animation: c16-scroll-bob 13s ease-in-out infinite alternate;
+  }
+  .c16 .scroller span {
+    display: inline-block; white-space: nowrap; color: var(--cream);
+    font-size: calc(var(--px) * 6); text-shadow: var(--px) var(--px) 0 var(--ink);
+    animation: c16-scroll 26s linear -6s infinite;
+  }
+  @keyframes c16-scroll { from { transform: translateX(100vw) } to { transform: translateX(-100%) } }
+  @keyframes c16-scroll-bob { from { transform: translateY(-2vh) } to { transform: translateY(2vh) } }
+</style>
+
+<template data-scene="ready">
+  <div class="c16">
+    <div class="copper"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="floor"></div>
+    <div class="haze"></div>
+    <div class="screen">
+      <div class="mark"><i></i><i></i></div>
+      <div class="logo">Decky Links<span class="shine">Decky Links</span></div>
+      <div class="tag">DL-16 System</div>
+      <div class="big y blink shadow" style="margin-top: 1.4vh">Insert cartridge</div>
+    </div>
+    <div class="foot">Slot {drive} ready &nbsp;·&nbsp; tag, disk or drive</div>
+  </div>
+</template>
+
+<template data-scene="ambient">
+  <div class="c16 rest">
+    <div class="copper"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="floor"></div>
+    <div class="haze"></div>
+    <div class="screen" style="justify-content: flex-start; padding-top: 12vh">
+      <div class="mark"><i></i><i></i></div>
+      <div class="logo">Decky Links</div>
+      <div class="tag">DL-16 System</div>
+    </div>
+    <div class="scroller">
+      <span>Present a tag, a disk or a drive to play &nbsp;···&nbsp; the launch address lives on the medium, not in a database &nbsp;···&nbsp; DL-16 system standing by &nbsp;···&nbsp;</span>
+    </div>
+  </div>
+</template>
+
+<template data-scene="reading">
+  <div class="c16">
+    <div class="copper"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="floor fast"></div>
+    <div class="haze"></div>
+    <div class="screen">
+      <div class="cart bob"></div>
+      <div class="big g shadow">Cartridge locked</div>
+      <div class="bar"><i></i></div>
+      <div class="sub shadow">Reading slot {drive}</div>
+    </div>
+    <div class="foot">Do not remove the cartridge</div>
+  </div>
+</template>
+
+<template data-scene="launching">
+  <div class="c16 boot beam">
+    <div class="screen">
+      <div class="mark"><i></i><i></i></div>
+      <div class="logo">Decky Links<span class="shine">Decky Links</span></div>
+      <div class="tag">DL-16 System</div>
+      <div class="lines" style="margin-top: 2.4vh">
+        <div class="line g">Rom header ok &nbsp; checksum valid</div>
+        <div class="line big y">{title}</div>
+        <div class="line c blink">Now loading</div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template data-scene="error">
+  <div class="c16 fault">
+    <div class="copper"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="floor"></div>
+    <div class="haze"></div>
+    <div class="screen">
+      <div class="cart bad"></div>
+      <div class="big r blink-fast shadow">Cartridge error</div>
+      <div class="sub shadow">Slot {drive} could not be read</div>
+      <div class="sub shadow">Remove it and try another</div>
+    </div>
+    <div class="foot">Rom header invalid</div>
+  </div>
+</template>
+
+<template data-scene="locked">
+  <div class="c16 rest">
+    <div class="copper"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="floor"></div>
+    <div class="haze"></div>
+    <div class="screen">
+      <div class="padlock"><b></b><i></i></div>
+      <div class="big y shadow">System locked</div>
+      <div class="sub shadow">Present the key to continue</div>
+    </div>
+    <div class="foot">DL-16 system &nbsp;·&nbsp; key required</div>
+  </div>
+</template>
