@@ -43,7 +43,13 @@ from decky_links import uri as uri_rules
 from decky_links import card_rpcs
 from decky_links import nfc_rpcs
 from decky_links import restricted_key
+from decky_links import themes as theme_files
 from decky_links import state
+
+# The sounds the plugin may ask for, by logical name. The frontend resolves
+# each to a file it serves out of dist/ and plays — see src/lib/sounds.ts, and
+# _play_sound below for why playback is not done here.
+ALLOWED_SOUNDS = frozenset({"scan", "success", "error", "lock", "unlock"})
 from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
 from nfc.key_manager import KeyManager
@@ -533,7 +539,7 @@ class Plugin:
         ))
 
         # Audio feedback (Spec §11)
-        self._play_sound("scan.flac")
+        self._play_sound("scan")
 
         # Pairing must be handled BEFORE any URI inspection (Spec §7).
         # A blank tag — the normal case when pairing a new card — carries no URI,
@@ -591,7 +597,7 @@ class Plugin:
             decky.logger.info(
                 f"{'Unreadable media' if unreadable else 'No URI found on media'} {uid_hex}"
             )
-            self._play_sound("error.flac")
+            self._play_sound("error")
             if is_nfc:
                 self.current_tag_uri = None
             await decky.emit("uri_detected", {
@@ -613,7 +619,7 @@ class Plugin:
         # Allowlist check (Spec §4) — emit null URI so frontend knows it's blocked
         if not self._validate_uri(uri):
             decky.logger.warning(f"URI blocked by allowlist: {uri}")
-            self._play_sound("error.flac")
+            self._play_sound("error")
             self.current_tag_uri = None
             await decky.emit("uri_detected", {"uri": None, "uid": uid_hex, "blocked": True})
             self._set_state(state.after_unusable_media(
@@ -876,7 +882,7 @@ class Plugin:
         # look at — the key comes out while the Deck is being handed over — so
         # the sound is the whole notification, and it has to say *which way* it
         # went. A bolt going over falls; a latch springing open rises.
-        self._play_sound("lock.flac" if locked else "unlock.flac")
+        self._play_sound("lock" if locked else "unlock")
 
         payload = dict(self._restricted_state())
         payload["reason"] = reason
@@ -938,7 +944,7 @@ class Plugin:
             # than failing silently: a key that stopped working is otherwise
             # indistinguishable from a reader that stopped reading.
             decky.logger.warning(f"Unrecognised key presented on {event.source_id}")
-            self._play_sound("error.flac")
+            self._play_sound("error")
             await decky.emit("uri_detected", {
                 "uri": None, "uid": uid_hex, "key": True, "authorized": False,
                 "source_id": event.source_id,
@@ -1093,7 +1099,7 @@ class Plugin:
         decky.logger.info(f"Pairing: writing {pairing_uri} to {media_id} via {source_id}")
         try:
             success, error_msg = await source.write_uri(media_id, pairing_uri, pairing_title)
-            self._play_sound("success.flac" if success else "error.flac")
+            self._play_sound("success" if success else "error")
 
             if success and pending_key:
                 # Committed only now. Recording the hash when the button was
@@ -1204,67 +1210,37 @@ class Plugin:
 
     # --- Audio ---
 
-    def _play_sound(self, filename):
-        """Play a sound file from the assets/sounds directory.
-        
-        Only whitelisted sound files are allowed to prevent path traversal attacks.
+    def _play_sound(self, name):
+        """Ask the frontend to play a sound. Names only — never a path.
+
+        Playback used to happen here, through ``paplay``. Measured on a Deck,
+        that costs ~512ms of fixed overhead (process spawn plus a PulseAudio
+        handshake) before a 10ms file is audible, and the figure does not move
+        with file length — so the scan sound landed about half a second after
+        the tag touched the reader. The same clip through an HTMLAudioElement
+        in the Steam UI plays in 0.3ms once preloaded.
+
+        So the decision stays here, where the state machine is, and only the
+        speaker moves. The allowlist stays too: it is now the set of logical
+        names the frontend will resolve, and an unknown one is refused at both
+        ends rather than turning into a fetch for an arbitrary path.
+
+        Fire-and-forget by design — every caller is mid-way through handling a
+        medium, and none of them should wait on a chime. Desktop Mode loses
+        sounds along with the rest of the UI, which Spec §13 already lists as a
+        non-goal.
         """
-        # Whitelist allowed sounds
-        ALLOWED_SOUNDS = {
-            "scan.flac", "success.flac", "error.flac", "lock.flac", "unlock.flac",
-        }
-        
-        if filename not in ALLOWED_SOUNDS:
-            decky.logger.warning(f"Attempted to play unauthorized sound: {filename}")
+        if name not in ALLOWED_SOUNDS:
+            decky.logger.warning(f"Refusing unknown sound: {name}")
             return
-        
         try:
-            # The decky CLI zips a fixed allowlist (main.py, plugin.json,
-            # package.json, dist/, py_modules/, LICENSE, README.md) — a
-            # top-level assets/ is dropped, so the build vendors the sounds
-            # into py_modules/. Check the source-tree location first so a
-            # development checkout still works.
-            candidates = [
-                os.path.join(decky.DECKY_PLUGIN_DIR, "assets", "sounds", filename),
-                os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules", "assets", "sounds", filename),
-            ]
-            sound_path = next((p for p in candidates if os.path.exists(p)), None)
-
-            if sound_path is None:
-                decky.logger.error(
-                    f"Sound file not found: {filename} (looked in {', '.join(candidates)})"
-                )
-                return
-            
-            # Verify it's a regular file (not a directory or symlink to sensitive location)
-            if not os.path.isfile(sound_path):
-                decky.logger.error(f"Sound path is not a regular file: {sound_path}")
-                return
-            
-            self._spawn(["paplay", sound_path], env=self._audio_env())
-        except Exception as e:
-            decky.logger.error(f"Failed to play sound {filename}: {e}")
-
-    def _audio_env(self):
-        """Environment that lets paplay reach the desktop user's audio server.
-
-        The plugin runs as root (needed to mount disks), which puts it outside
-        the user's PipeWire session — paplay would find no server and every
-        sound would silently vanish. Point it at the session socket explicitly;
-        root can open it regardless of its ownership.
-        """
-        env = dict(os.environ)
-        if os.geteuid() != 0:
-            return env
-        try:
-            import pwd
-            user = getattr(decky, "DECKY_USER", None) or "deck"
-            uid = pwd.getpwnam(user).pw_uid
-        except (KeyError, ImportError):
-            return env
-        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{uid}")
-        env.setdefault("PULSE_SERVER", f"unix:/run/user/{uid}/pulse/native")
-        return env
+            asyncio.get_running_loop().create_task(
+                decky.emit("play_sound", {"sound": name})
+            )
+        except RuntimeError:
+            # No running loop: a synchronous caller outside the event loop,
+            # which today means a test. Silence is the right answer.
+            decky.logger.debug(f"No event loop for sound {name}")
 
     # -----------------------------------------------------------
     # Callable methods (called from JS frontend)
@@ -1670,6 +1646,27 @@ class Plugin:
             })
             return True, None
         return False, "the key is not present"
+
+    async def list_themes(self):
+        """Every theme installed, for the panel's picker.
+
+        Not refused while locked. Nothing here writes, and the contents are
+        files the user put in their own Documents folder — a locked device
+        gives nothing away by admitting they exist.
+        """
+        return theme_files.list_themes()
+
+    async def read_theme(self, theme_id: str):
+        """One theme's markup and manifest, or None if there is no such theme."""
+        return theme_files.read_theme(theme_id)
+
+    async def read_theme_asset(self, theme_id: str, name: str):
+        """One file from a theme's sounds folder, base64 encoded.
+
+        Base64 over the RPC channel because only the plugin's own dist/ is
+        served over HTTP, and a theme in Documents is not in it.
+        """
+        return theme_files.read_asset(theme_id, name)
 
     async def get_active_media(self):
         """Return every medium currently presented, across all sources.

@@ -4,7 +4,7 @@
   "description": "Decky Links enables launching games and other URIs on SteamOS by tapping NFC cards",
   "type": "module",
   "scripts": {
-    "build": "rollup -c",
+    "build": "rollup -c && node scripts/copy-sounds.mjs",
     "logs": "./scripts/deck.sh logs",
     "logs:follow": "./scripts/deck.sh follow",
     "logs:loader": "./scripts/deck.sh loader",

@@ -986,7 +986,7 @@ class TestPairing:
              patch.object(plugin, "_play_sound") as mock_sound:
             await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
-        mock_sound.assert_called_with("success.flac")
+        mock_sound.assert_called_with("success")
 
     @pytest.mark.asyncio
     async def test_pairing_plays_error_sound_on_write_fail(self, plugin, mock_decky):
@@ -998,7 +998,7 @@ class TestPairing:
              patch.object(plugin, "_play_sound") as mock_sound:
             await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
 
-        mock_sound.assert_called_with("error.flac")
+        mock_sound.assert_called_with("error")
 
     @pytest.mark.asyncio
     async def test_pairing_exits_mode_after_write(self, plugin):
@@ -1100,21 +1100,21 @@ class TestAudioFeedback:
         event = _make_load_event("DEADBEEF", uri="steam://rungameid/400")
         with patch.object(plugin, "_play_sound") as mock_sound:
             await plugin._handle_media_load(event)
-        mock_sound.assert_any_call("scan.flac")
+        mock_sound.assert_any_call("scan")
 
     @pytest.mark.asyncio
     async def test_error_sound_when_no_uri(self, plugin, mock_decky):
         event = _make_load_event("DEADBEEF", uri=None)
         with patch.object(plugin, "_play_sound") as mock_sound:
             await plugin._handle_media_load(event)
-        mock_sound.assert_any_call("error.flac")
+        mock_sound.assert_any_call("error")
 
     @pytest.mark.asyncio
     async def test_error_sound_when_uri_blocked_by_allowlist(self, plugin, mock_decky):
         event = _make_load_event("DEADBEEF", uri="ftp://evil.example.com")
         with patch.object(plugin, "_play_sound") as mock_sound:
             await plugin._handle_media_load(event)
-        mock_sound.assert_any_call("error.flac")
+        mock_sound.assert_any_call("error")
 
     @pytest.mark.asyncio
     async def test_no_launch_when_uri_blocked(self, plugin, mock_decky):
@@ -2372,3 +2372,52 @@ class TestCardRpcs:
     def test_output_dir_is_under_the_user_home(self, plugin):
         import os as _os
         assert plugin._card_output_dir().endswith(_os.path.join("Documents", "decky-links"))
+
+
+class TestSoundsPlayInTheFrontend:
+    """Playback moved to the frontend; the decision did not.
+
+    Measured on a Deck: `paplay` costs ~512ms of fixed overhead before a 10ms
+    file is audible, and the figure does not move with file length — so the
+    scan sound landed about half a second after the tag touched the reader.
+    Issue #8 asks for feedback within 200ms. The same clip through an
+    HTMLAudioElement plays in 0.3ms once preloaded.
+
+    So the backend still says *which* sound an event deserves, because it owns
+    the state machine, and emits a name for the frontend to play.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_emits_the_name(self, plugin, mock_decky):
+        plugin._play_sound("scan")
+        await asyncio.sleep(0)          # let the fire-and-forget task run
+        played = [c.args[1] for c in mock_decky.emit.call_args_list
+                  if c.args[0] == "play_sound"]
+        assert played == [{"sound": "scan"}]
+
+    @pytest.mark.asyncio
+    async def test_it_refuses_a_name_it_does_not_know(self, plugin, mock_decky):
+        """The allowlist is the same guard it always was, now against a name
+        the frontend would otherwise turn into a URL."""
+        plugin._play_sound("../../etc/passwd")
+        await asyncio.sleep(0)
+        assert not [c for c in mock_decky.emit.call_args_list
+                    if c.args[0] == "play_sound"]
+
+    @pytest.mark.asyncio
+    async def test_it_never_spawns_a_player(self, plugin, mock_decky):
+        """paplay is the thing being removed, not merely bypassed."""
+        with patch.object(plugin, "_spawn") as spawn:
+            plugin._play_sound("scan")
+            await asyncio.sleep(0)
+        spawn.assert_not_called()
+
+    def test_every_allowed_name_has_audio(self):
+        """A name with no file is a silent event that looks like a working one.
+        The frontend resolves <name>.flac out of dist/, which the build copies
+        from here."""
+        import main as main_module
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for name in main_module.ALLOWED_SOUNDS:
+            path = os.path.join(root, "assets", "sounds", f"{name}.flac")
+            assert os.path.isfile(path), f"{name} has no audio at {path}"

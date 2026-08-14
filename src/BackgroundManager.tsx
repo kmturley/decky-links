@@ -19,8 +19,12 @@ import {
 } from "./shared";
 import { Navigation, Router, sleep, SideMenu } from "@decky/ui";
 import { comparableAppIdFromUri as parseSteamAppIdFromUri } from "./lib/steamIds";
+import { playSound, preloadSounds } from "./lib/sounds";
+import { scenes } from "./lib/presentation";
 
 let stopBackgroundManagerFn: (() => void) | null = null;
+/** How long a launch may take before the plugin stops believing in it. */
+const LAUNCH_ABANDONED_MS = 45_000;
 const STEAM_RUN_PREFIX = "steam://run/";
 const STEAM_RUNGAMEID_PREFIX = "steam://rungameid/";
 let cachedSteamUriLauncher: ((uri: string) => void) | null = null;
@@ -226,6 +230,106 @@ export function startBackgroundManager(): () => void {
   };
   init();
 
+  // The scene, recomputed from what the plugin already knows.
+  //
+  // Derived rather than assigned: every caller pushes the same snapshot
+  // through the same reducer, so a scene the facts do not support cannot be
+  // reached by some path forgetting to reset a flag. `launching` is the one
+  // fact with no backend equivalent — it is the window between accepting a URI
+  // and the game painting, which only this side can see.
+  let launching = false;
+  const restate = (touch = true) => {
+    if (touch) scenes.touch();
+    const media = Object.values(sharedState.activeMedia);
+    scenes.apply({
+      reading: media.some((m) => m.problem === "loading"),
+      launching,
+      inGame: !!activeAppIdRef.current,
+      failed: media.some((m) => m.problem === "unreadable" || m.problem === "blocked"),
+      locked: !!restrictedRef.current?.locked,
+    });
+  };
+  let abandonTimer: number | undefined;
+  const setLaunching = (value: boolean) => {
+    launching = value;
+    window.clearTimeout(abandonTimer);
+    if (value) {
+      // A launch that never completes would otherwise leave the scene at
+      // LAUNCHING for good: Steam never paints, so nothing composites the
+      // layer away, and the Deck sits on a loading screen for a game that is
+      // not coming. Generous, because a cold shader cache on a big game is
+      // genuinely slow, but finite. Cleared here rather than in the layer so
+      // the *scene* stops being a lie, and every renderer benefits.
+      abandonTimer = window.setTimeout(() => {
+        console.warn("[ Decky Links ] Launch abandoned — no game appeared");
+        setLaunching(false);
+      }, LAUNCH_ABANDONED_MS);
+    }
+    restate();
+  };
+
+  // What ends a launch, measured rather than assumed.
+  //
+  // The obvious signal — Router.MainRunningApp becoming non-null — fires 501ms
+  // after RunGame on this device, while Steam's own launch flow runs for
+  // another six seconds behind its "Starting launch…" card. Ending the splash
+  // there cut it off almost immediately, which is exactly the bug this
+  // instrumentation was written to find:
+  //
+  //   115ms  task CheckShaderDepotManifest
+  //   501ms  MainRunningApp set        <- not the end of anything
+  //   6835ms task WaitingGameWindow
+  //   6841ms task Completed
+  //   6918ms GameActionEnd             <- the end
+  //
+  // Deliberately not held until the game paints, even though the compositor
+  // would remove the layer for us. The scene has to *stop* being LAUNCHING
+  // sometime, and if it did not, pressing STEAM mid-game would bring the
+  // splash back over a running game.
+  const gameActionEnd = (window as any).SteamClient?.Apps?.RegisterForGameActionEnd?.(
+    () => setLaunching(false),
+  );
+
+  // Input ends the ambient screen.
+  //
+  // Someone who picks the Deck up and presses a button has announced they are
+  // there, and an attract screen that carries on regardless reads as a device
+  // that has stopped listening. Nothing else can tell us: the plugin's own
+  // events all come from media, and a person waking a Deck up touches no
+  // media at all.
+  //
+  // Two doors, because there are two ways to touch a Deck. Buttons, sticks and
+  // trackpads arrive here; the touchscreen arrives at VisualsLayer, which is
+  // already intercepting taps so they cannot reach the Steam UI underneath,
+  // and calls scenes.activity() with them.
+  //
+  // Measured before being used: with nobody touching the device this fired
+  // exactly zero times in six seconds, which is the property that matters —
+  // a stream that reported stick jitter or gyro drift would mean the ambient
+  // screen could never be reached at all.
+  const controllerInput =
+    (window as any).SteamClient?.Input?.RegisterForControllerInputMessages?.(
+      () => scenes.activity(),
+    );
+
+  // restate(false) rather than restate(): activity() has already restarted the
+  // idle clock, and this only has to recompute now that it has.
+  const stopWatchingActivity = scenes.onActivity(() => restate(false));
+
+  // Sounds, played here rather than in the backend.
+  //
+  // The backend still decides which sound belongs to which event — it owns the
+  // state machine — and sends the name. Only the speaker moved, because
+  // `paplay` costs ~512ms of fixed overhead on a Deck and the feedback has to
+  // land within 200ms of the tag touching the reader. See src/lib/sounds.ts.
+  preloadSounds();
+  const soundListener = addEventListener<[data: { sound?: string }]>(
+    "play_sound",
+    (data) => {
+      if (data?.sound) playSound(data.sound);
+    },
+  );
+
   // A medium is present but not yet readable. Recorded as a normal entry with
   // problem: "loading" so it occupies its row the same way a real medium does
   // — the row is what the user is watching, and it has to stop saying "No
@@ -247,6 +351,7 @@ export function startBackgroundManager(): () => void {
       },
     };
     notifySubscribers();
+    restate();
   });
 
   // event listeners
@@ -275,6 +380,9 @@ export function startBackgroundManager(): () => void {
   });
 
   const removeListener = addEventListener<[data?: { source_id?: string }]>("media_removed", (data) => {
+    // Removing the medium ends whatever it was doing, including a launch that
+    // was still in flight.
+    launching = false;
     // Only the source that reported the removal loses its row. Clearing the
     // whole map when source_id was absent meant one trigger losing its medium
     // blanked every other trigger's row too — a floppy ejecting would erase
@@ -423,6 +531,12 @@ export function startBackgroundManager(): () => void {
               });
           }
           // Now launch the game after backend is ready
+          //
+          // The splash goes up here rather than on uri_detected: a URI that
+          // turns out to be blocked, or a game already running, never reaches
+          // this line, and a splash for a launch that was never attempted is
+          // the flicker MIN_VISIBLE_MS exists to prevent.
+          setLaunching(true);
           launchSteamUri(uri);
           return;
         }
@@ -460,6 +574,7 @@ export function startBackgroundManager(): () => void {
     sharedState.restricted = state;
     restrictedRef.current = state;
     notifySubscribers();
+    restate();
     console.info(`[ Decky Links ] Restricted mode ${data.locked ? "on" : "off"} (${reason ?? "?"})`);
   });
 
@@ -471,6 +586,7 @@ export function startBackgroundManager(): () => void {
     sharedState.restricted = data;
     restrictedRef.current = data;
     notifySubscribers();
+    restate();
   });
 
   const pairingListener = addEventListener<[data: { success: boolean, uid: string, error?: string }]>("pairing_result", (data) => {
@@ -578,7 +694,67 @@ export function startBackgroundManager(): () => void {
           activeAppIdRef.current = currentId;
           sharedState.activeAppId = currentId;
           notifySubscribers();
+          // Not the end of the launch — see RegisterForGameActionEnd above.
+          // A game *disappearing*, though, ends anything in flight.
+          if (!currentId) launching = false;
+          restate();
           await setRunningGame(currentId ? parseInt(currentId) : null);
+        }
+
+        // 1b. Is anything of Steam's on top of its own interface?
+        //
+        // Two tests, because one is not enough and it took measuring to find
+        // that out. Sampling Steam's state twice a second while the theme
+        // picker's dropdown was opened by hand gave:
+        //
+        //   focused=SP BPM_uid0  root=SP BPM_uid0  sideMenu=0   (idle)
+        //   focused=QuickAccess  root=SP BPM_uid0  sideMenu=2   (menu open)
+        //   focused=SP BPM_uid0  root=SP BPM_uid0  sideMenu=0   (dropdown open!)
+        //
+        // Opening the dropdown closes the Quick Access menu *and* hands focus
+        // back to the main window, while the option list stays on screen. So
+        // no window-level signal distinguishes "dropdown open" from "idle" —
+        // both a menu-store test and a focus test report nothing, and the
+        // layer painted over the list the user was reading.
+        //
+        // What does distinguish it is the list itself, in the main window's
+        // DOM. Plugin code runs in SharedJSContext, so that document is
+        // reached through Steam's own window handle; it is same-origin, so
+        // this is a plain query rather than anything clever.
+        //
+        // Both are evaluated in the same tick deliberately: the menu closes
+        // and the popup appears together, so a sample sees one or the other
+        // and never a gap between them.
+        const ctx = (window as any).FocusNavController?.m_ActiveContext;
+        const focused = ctx?.m_activeWindow?.name;
+        const root = ctx?.m_rootWindow?.name;
+        const focusElsewhere = !!focused && !!root && focused !== root;
+
+        let popupOpen = false;
+        try {
+          const doc = (window as any).SteamUIStore?.WindowStore
+            ?.GamepadUIMainWindowInstance?.BrowserWindow?.document;
+          // Steam leaves menu markup in the DOM after a menu closes, so
+          // presence is not enough — only a laid-out box counts.
+          const items = doc?.querySelectorAll?.(
+            '.contextMenuItem, [class*="contextmenu" i]',
+          );
+          popupOpen = !!items && [...items].some((el: any) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+        } catch {
+          // A future Steam build could rename the class or move the window
+          // handle. Then this reports false and the behaviour is what it was
+          // before this fix — a theme over a dropdown — rather than a crash in
+          // the loop that also drives launching.
+          popupOpen = false;
+        }
+
+        const overlayOpen = focusElsewhere || popupOpen;
+        if (overlayOpen !== sharedState.steamOverlayOpen) {
+          sharedState.steamOverlayOpen = overlayOpen;
+          notifySubscribers();
         }
 
         // 2. Everything reached over RPC, every 10th tick (~5s).
@@ -631,8 +807,20 @@ export function startBackgroundManager(): () => void {
   };
   pollLoop();
 
+  // AMBIENT is reached by nothing happening, which no event can announce. One
+  // slow tick, deliberately far slower than the poll loop: it only has to
+  // notice a 90-second threshold, and this is the one timer that runs while
+  // the Deck is idle.
+  const sceneTicker = window.setInterval(() => restate(false), 10_000);
+
   stopBackgroundManagerFn = () => {
     active = false;
+    clearInterval(sceneTicker);
+    clearTimeout(abandonTimer);
+    gameActionEnd?.unregister?.();
+    controllerInput?.unregister?.();
+    stopWatchingActivity();
+    removeEventListener("play_sound", soundListener);
     removeEventListener("media_loading", loadingListener);
     removeEventListener("media_detected", tagListener);
     removeEventListener("media_removed", removeListener);

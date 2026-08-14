@@ -315,3 +315,63 @@ class TestLoggerInjection:
         path.write_text(json.dumps({"auto_launch": "nonsense"}))
         SettingsManager(str(path), logger=log)
         assert log.warning.called
+
+
+class TestCustomVisualsSetting:
+    """Custom home and loading screens (issue #8), which replace Steam's own
+    interface for as long as they are on."""
+
+    def test_off_by_default(self, tmp_path):
+        """It hides Steam's Home and game pages outright, which is a far
+        bigger change to someone's Deck than a plugin should make uninvited.
+
+        This is what puts the panel's theme picker on None for a fresh
+        install: the control reads the feature's own switch, so "off" and
+        "no theme" cannot disagree."""
+        assert _mgr(tmp_path).settings["custom_visuals"] is False
+
+    def test_a_fresh_install_has_no_settings_file_and_still_reads_off(self, tmp_path):
+        """The case an existing settings.json cannot cover: nothing on disk at
+        all, which is every first run."""
+        mgr = SettingsManager(str(tmp_path / "never-written.json"))
+        assert mgr.settings["custom_visuals"] is False
+
+    def test_it_survives_a_restart(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"custom_visuals": True}))
+        assert SettingsManager(str(path)).settings["custom_visuals"] is True
+
+    def test_a_non_boolean_is_refused(self, tmp_path):
+        """A takeover of the whole screen must not be switchable on by a
+        malformed value in a file."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"custom_visuals": "yes"}))
+        assert SettingsManager(str(path)).settings["custom_visuals"] is False
+
+
+class TestThemeSetting:
+    """Which theme paints the custom visuals."""
+
+    def test_defaults_to_the_one_that_ships(self, tmp_path):
+        assert _mgr(tmp_path).settings["theme"] == "dos"
+
+    def test_a_known_id_survives_a_restart(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "dos"}))
+        assert SettingsManager(str(path)).settings["theme"] == "dos"
+
+    def test_a_path_is_refused(self, tmp_path):
+        """It is an id, not a location. The frontend turns it into a URL under
+        the plugin's own dist/, so a settings file must not be able to point
+        that anywhere else."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "../../etc/passwd"}))
+        assert SettingsManager(str(path)).settings["theme"] == "dos"
+
+    def test_an_unknown_but_wellformed_id_is_kept(self, tmp_path):
+        """The frontend falls back for a theme it does not have, so refusing
+        it here would break a settings file merely because a theme was
+        uninstalled."""
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"theme": "commodore"}))
+        assert SettingsManager(str(path)).settings["theme"] == "commodore"

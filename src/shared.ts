@@ -8,6 +8,12 @@ import { useState, useEffect } from "react";
 export interface Settings {
     auto_launch: boolean;
     auto_close: boolean;
+    /** Custom home and loading screens (issue #8), which replace Steam's own
+     *  interface while on. Off by default: a plugin should not take over the
+     *  whole device uninvited. */
+    custom_visuals?: boolean;
+    /** Which theme paints it. Unknown ids fall back rather than fail. */
+    theme?: string;
     sources: {
         nfc: {
             device_path: string;
@@ -163,6 +169,26 @@ export interface SharedState {
    *  exactly what the Triggers list shows. */
   activeMedia: Record<string, ActiveMedium>;
   activeAppId: string | null;
+  /** A theme is painting over Steam's interface right now.
+   *
+   *  Read by anything of ours that decorates a Steam page: while a theme is
+   *  up, that page is not on screen, so an icon floating over it is an offer
+   *  to interact with something invisible. z-index cannot solve this — the
+   *  two live in different stacking contexts, which is why lowering the icon
+   *  below the layer's z-index changed nothing. */
+  visualsPainting: boolean;
+  /** Steam is showing something of its own over its interface: a side menu,
+   *  or a popup such as a dropdown's option list.
+   *
+   *  Took three attempts and a measurement. Decky's useQuickAccessVisible
+   *  reports nothing to a global component. The menu store's m_eOpenSideMenu
+   *  goes to 0 the moment a dropdown opens. And focus returns to the main
+   *  window at the same moment — so no window-level signal separates "dropdown
+   *  open" from "nothing open", and the theme painted over the list.
+   *
+   *  So this is two tests at once: focus off the main window, or a laid-out
+   *  context-menu element in that window's DOM. See the poll loop. */
+  steamOverlayOpen: boolean;
   /** Game detail page currently open, or null when not on one. */
   viewedApp: ViewedApp | null;
   pairing: boolean;
@@ -178,6 +204,8 @@ export interface SharedState {
 
 export type SettingKey =
   | "auto_launch"
+  | "custom_visuals"
+  | "theme"
   | "auto_close"
   | "device_path"
   | "baudrate"
@@ -189,6 +217,8 @@ export const sharedState: SharedState = {
   readerStatus: { connected: false, path: "", source_type: SourceType.NFC },
   activeMedia: {},
   activeAppId: null,
+  visualsPainting: false,
+  steamOverlayOpen: false,
   viewedApp: null,
   pairing: false,
   registeringKey: false,
@@ -225,6 +255,16 @@ type Listener = () => void;
 const subscribers = new Set<Listener>();
 export function notifySubscribers() {
   subscribers.forEach(fn => fn());
+}
+
+/** Subscribe outside React.
+ *
+ * The splash layer is a global component that lives longer than any panel and
+ * needs the settings the panel writes — chiefly whether it is switched on at
+ * all, since the switch is behind the layer it switches off. */
+export function subscribeToState(listener: Listener): () => void {
+  subscribers.add(listener);
+  return () => { subscribers.delete(listener); };
 }
 
 export function useSharedState(): SharedState {

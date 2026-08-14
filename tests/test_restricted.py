@@ -796,6 +796,10 @@ class TestTheLockHasItsOwnSound:
 
     It used to play success.flac in both directions, which is also what a
     pairing and a launch play.
+
+    Names are logical now, not filenames: the backend decides which sound an
+    event deserves and the frontend owns playback, because paplay cost ~512ms
+    before anything was audible.
     """
 
     @pytest.mark.asyncio
@@ -807,19 +811,18 @@ class TestTheLockHasItsOwnSound:
         await plugin._handle_media_unload(_unload_event())
 
         played = [c.args[0] for c in plugin._play_sound.call_args_list]
-        assert played[-2:] == ["unlock.flac", "lock.flac"]
+        assert played[-2:] == ["unlock", "lock"]
 
     @pytest.mark.asyncio
     async def test_neither_is_the_pairing_sound(self, plugin):
         token = _register(plugin)
         plugin._play_sound = MagicMock()
         await _present_key(plugin, token)
-        assert "success.flac" not in [c.args[0] for c in plugin._play_sound.call_args_list]
+        assert "success" not in [c.args[0] for c in plugin._play_sound.call_args_list]
 
     def test_both_files_ship(self):
-        """_play_sound refuses anything off its allowlist, and a missing file
-        is a silent no-op — so a name that ships without its audio is a lock
-        that just stops making a sound."""
+        """A name the frontend cannot resolve to a file is a lock that simply
+        stops making a sound — silent, and indistinguishable from working."""
         import os
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         for name in ("lock.flac", "unlock.flac"):

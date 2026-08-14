@@ -1,0 +1,212 @@
+<!--
+  MS-DOS — a 1993 PC, rendered rather than filmed.
+
+  A whole theme in one file. The JSON below is the manifest, the <style> is
+  every screen's styling, and each <template data-scene="…"> is one screen.
+  Nothing here is compiled: edit it, reload the plugin, see it.
+
+  Available scenes, all optional — a theme that leaves one out falls back to
+  its own "ready" screen rather than letting Steam show through:
+
+    ready      waiting for a medium          launching   a game is starting
+    ambient    idle for 90 seconds           error       unreadable medium
+    reading    a medium is being read        locked      restricted mode
+
+  Two placeholders are substituted when a screen is rendered:
+    {title}    the game's name, when one is known
+    {drive}    "A" for a disk, "T" for a tag — a theme is free to ignore it
+
+  Sounds are filenames in this folder's sounds/ directory.
+    "sounds"           replace the plugin's own event sounds
+    "enterSound"       played once when a scene starts
+    "loopSound"        played for as long as the scene lasts
+
+  The period aimed at is roughly 1988-1995: MS-DOS 5/6 grey-on-black, the blue
+  and cyan of the DOS Editor, and the PC speaker. Not Windows 95 — the moment
+  this plugin is about is a disk going into a drive, and by 95 that had
+  stopped being how you started a game.
+-->
+<script type="application/json" id="decky-theme">
+{
+  "name": "MS-DOS",
+  "blurb": "Text mode, block cursors and a drive that seeks",
+  "sounds": {
+    "scan": "insert.flac",
+    "success": "beep.flac",
+    "error": "error.flac",
+    "lock": "eject.flac",
+    "unlock": "insert.flac"
+  },
+  "scenes": {
+    "reading": { "enterSound": "insert.flac", "loopSound": "seek.flac", "minVisibleMs": 400 },
+    "launching": { "loopSound": "seek.flac" },
+    "error": { "enterSound": "error.flac" },
+    "locked": { "enterSound": "error.flac" }
+  }
+}
+</script>
+
+<style>
+  /* IBM's text-mode palette. These are the real CGA/EGA triples rather than
+     approximations — the exact cyan is most of what makes a screenshot of
+     this look right. */
+  .dos {
+    --black: #000000;  --blue: #0000AA;   --green: #00AA00;
+    --cyan: #00AAAA;   --red: #AA0000;    --grey: #AAAAAA;
+    --dark: #555555;   --bcyan: #55FFFF;  --bgreen: #55FF55;
+    --bred: #FF5555;   --yellow: #FFFF55; --white: #FFFFFF;
+
+    /* A real bitmap face — Perfect DOS VGA, Fixedsys, IBM VGA 8x16 — is what
+       this wants, and none can be shipped: they are either not
+       redistributable or a font file larger than everything else here
+       combined. Named first for anyone who has one installed; the CRT
+       treatment below does more for the impression than the letterforms. */
+    font-family: "Perfect DOS VGA 437", "IBM VGA 8x16", Fixedsys, "Courier New", monospace;
+    font-size: min(3.1vh, 2.2vw);
+    line-height: 1.5;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--grey);
+    background: var(--black);
+    width: 100%; height: 100%;
+    padding: 3.5vh 4vw;
+    box-sizing: border-box;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .dos b { color: var(--white); font-weight: normal; }
+  .dos .dim { color: var(--dark); }
+  .dos .cyan { color: var(--bcyan); }
+  .dos .yellow { color: var(--yellow); }
+  .dos .red { color: var(--bred); }
+
+  /* Scanlines and phosphor bloom, as ::before/::after so every screen gets
+     them without repeating the markup. */
+  .dos::before, .dos::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+  }
+  .dos::before {
+    background: repeating-linear-gradient(
+      to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 1px,
+      rgba(0,0,0,0.28) 2px, rgba(0,0,0,0.28) 3px);
+    mix-blend-mode: multiply;
+  }
+  .dos::after {
+    background: radial-gradient(ellipse at 50% 50%,
+      rgba(255,255,255,0.05) 0%, rgba(0,0,0,0.45) 92%);
+    animation: dos-flicker 7s linear infinite;
+  }
+  @keyframes dos-flicker {
+    0%, 96%, 100% { opacity: 0.92 } 97% { opacity: 0.86 } 98% { opacity: 0.95 }
+  }
+
+  /* The block cursor, on the cadence a real one had. step-end so it snaps
+     rather than fades — a cursor that faded would be the wrong decade. */
+  .dos i.cur {
+    display: inline-block; width: 0.62em; height: 1.05em;
+    background: var(--grey); vertical-align: -0.18em;
+    animation: dos-blink 1.06s step-end infinite;
+  }
+  @keyframes dos-blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+
+  /* [████████░░░░░░░░] — a progress bar as it was: text.
+     Two layers of block characters, the filled one revealed by a width
+     animation stepped to whole cells so it advances a block at a time.
+     It eases toward the end and never arrives, because the plugin cannot know
+     how long a load takes and a bar that completed and then sat there would
+     be a lie told in the most irritating way available. */
+  .dos .bar { position: relative; display: inline-block; color: var(--dark); }
+  .dos .bar span {
+    position: absolute; left: 0; top: 0; overflow: hidden;
+    white-space: nowrap; color: var(--bcyan);
+    width: 0; animation: dos-fill 26s steps(16) forwards;
+  }
+  .dos .bar.fast span { animation-duration: 6s; }
+  @keyframes dos-fill { from { width: 0 } to { width: 92% } }
+
+  .dos .box {
+    border: 2px solid var(--bcyan); padding: 2.5vh 3vw;
+    max-width: 34ch; margin: 12vh auto 0;
+  }
+
+  /* The screensaver drifts by whole character cells, as the period ones did —
+     they moved in text coordinates because that is all there was. */
+  .dos .drift { animation: dos-drift 47s steps(12) infinite alternate; }
+  @keyframes dos-drift {
+    from { transform: translate(0, 0) } to { transform: translate(38ch, 9em) }
+  }
+</style>
+
+<template data-scene="ready">
+  <div class="dos">
+    <b>Decky Links Operating System</b>
+    <div class="dim">Version 1.00 (C) 2026</div>
+    <br>
+    <div>Volume in drive A has no label</div>
+    <div>Directory of A:\</div>
+    <br>
+    <div class="cyan">&nbsp;&nbsp;NFC&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&lt;TAG&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Ready</div>
+    <div class="cyan">&nbsp;&nbsp;FLOPPY&nbsp;&nbsp;&nbsp;&lt;DRIVE&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Ready</div>
+    <div class="dim">&nbsp;&nbsp;USB&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&lt;DRIVE&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Ready</div>
+    <br>
+    <div class="yellow">Insert disk and press any key to continue</div>
+    <br>
+    <b>A:\&gt; <i class="cur"></i></b>
+  </div>
+</template>
+
+<template data-scene="ambient">
+  <div class="dos" style="color: var(--green)">
+    <div class="drift">
+      <span style="color: var(--bgreen)">Decky Links <i class="cur"></i></span>
+    </div>
+  </div>
+</template>
+
+<template data-scene="reading">
+  <div class="dos">
+    <b>A:\&gt; DIR</b>
+    <br><br>
+    <div class="cyan">Reading drive {drive}:</div>
+    <br>
+    <div class="bar fast">[░░░░░░░░░░░░░░░░]<span>[████████████████]</span></div>
+    <br><br>
+    <div class="dim">Please wait...</div>
+  </div>
+</template>
+
+<template data-scene="launching">
+  <div class="dos">
+    <b>A:\&gt; {title}.EXE</b>
+    <br><br>
+    <div class="yellow">Loading {title}</div>
+    <br>
+    <div class="bar">[░░░░░░░░░░░░░░░░]<span>[████████████████]</span></div>
+    <br><br>
+    <div class="dim">Do not remove disk <i class="cur"></i></div>
+  </div>
+</template>
+
+<template data-scene="error">
+  <div class="dos">
+    <div class="red">General failure reading drive {drive}:</div>
+    <div class="red">Abort, Retry, Fail?</div>
+    <br>
+    <div>The disk could not be read.</div>
+    <div class="dim">Remove it and try another.</div>
+    <br>
+    <b>A:\&gt; <i class="cur"></i></b>
+  </div>
+</template>
+
+<template data-scene="locked">
+  <div class="dos" style="background: var(--blue); color: var(--bcyan)">
+    <div class="box">
+      <b>System locked</b>
+      <br><br>
+      <div>Non-system disk or disk error</div>
+      <div>Insert key disk and press any key</div>
+    </div>
+  </div>
+</template>

@@ -1,4 +1,5 @@
 import {
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   Router,
@@ -6,7 +7,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { definePlugin, routerHook } from "@decky/api";
-import { FC } from "react";
+import { FC, useEffect } from "react";
 import { FaLink } from "react-icons/fa";
 
 // shared utilities extracted to avoid circular imports
@@ -25,6 +26,8 @@ import { RestrictedPanel, LockedPanel } from "./RestrictedPanel";
 import { SectorManagementPanel } from "./SectorManagementPanel";
 import patchLibraryApp from "./lib/patchLibraryApp";
 import { startBackgroundManager } from "./BackgroundManager";
+import { VisualsLayer } from "./VisualsLayer";
+import { discoverThemes, knownThemes } from "./lib/themes";
 import { resolveRungameidTarget } from "./lib/steamIds";
 import { TriggersPanel } from "./TriggersPanel";
 
@@ -61,6 +64,32 @@ function resolvePairTarget(): { uri: string; label: string } | null {
  *
  * Per-source settings do not come through here — the Triggers panel writes
  * those with setSourceSetting, which the backend validates per source. */
+/** The dropdown value that means "leave Steam's own interface alone", and what
+ *  a fresh install sits on: `custom_visuals` ships false, so the control reads
+ *  None until someone picks otherwise. A plugin should not take over the whole
+ *  device on the strength of having been installed.
+ *
+ *  The list also carries a Cancel entry. That one is Steam's, appended to
+ *  every dropdown it renders, and is not ours to remove. */
+const NO_THEME = "none";
+
+/** Apply a theme choice, which is two settings behind one control.
+ *
+ * Order matters on the way on: the theme is stored *before* the feature is
+ * switched on, so the layer's first paint is already the chosen theme rather
+ * than the previous one for a frame. Switching off leaves the theme stored, so
+ * turning it back on returns to the theme you last used rather than to the
+ * default.
+ */
+async function chooseTheme(id: string) {
+  if (id === NO_THEME) {
+    await triggerUpdateSetting("custom_visuals", false);
+    return;
+  }
+  await triggerUpdateSetting("theme", id);
+  await triggerUpdateSetting("custom_visuals", true);
+}
+
 async function triggerUpdateSetting(key: SettingKey, value: any) {
   const ok = await setSetting(key, value);
   if (!ok) {
@@ -78,6 +107,11 @@ const Content: FC = () => {
   // Subscribe to sharedState — re-renders automatically when BackgroundManager
   // calls notifySubscribers(), even while QA panel was closed in between.
   const state = useSharedState();
+
+  // Re-read the themes folder whenever the panel opens. A theme is a file
+  // someone can drop in while the plugin is running, and the point of a
+  // file-based format is that looking at the result does not need a restart.
+  useEffect(() => { void discoverThemes(); }, []);
 
   if (!state.settings) return null;
 
@@ -131,6 +165,29 @@ const Content: FC = () => {
             onChange={(v: boolean) => triggerUpdateSetting("auto_close", v)}
           />
         </PanelSectionRow>
+        <PanelSectionRow>
+          {/* One control, not a switch plus a picker.
+              Those were two ways to say the same thing — "off" and "which
+              one" — and with a single theme installed the picker had exactly
+              one option, so opening it could only ever re-select what was
+              already selected. None *is* off, which also makes the switch
+              discoverable: you find out themes exist by looking at the thing
+              that turns them on.
+              layout="below" because the inline form gives the control what is
+              left after the label, which was enough for "MS-D...". */}
+          <DropdownItem
+            label="Custom Theme"
+            layout="below"
+            rgOptions={[
+              { data: NO_THEME, label: "None" },
+              ...knownThemes().map((t) => ({ data: t.id, label: t.name })),
+            ]}
+            selectedOption={
+              state.settings.custom_visuals ? (state.settings.theme ?? NO_THEME) : NO_THEME
+            }
+            onChange={(o: { data: string }) => void chooseTheme(o.data)}
+          />
+        </PanelSectionRow>
       </PanelSection>
 
       {state.restricted && <RestrictedPanel restricted={state.restricted} />}
@@ -149,6 +206,12 @@ export default definePlugin(() => {
   const embeddedPatch = patchLibraryApp();
   const stopBackground = startBackgroundManager();
 
+  // Mounted once, for the life of the plugin. A global component rather than
+  // anything inside the panel: the panel exists only while the Quick Access
+  // menu is open, and this layer's whole job is to be on screen when it is
+  // not. It renders nothing until the feature is switched on.
+  routerHook.addGlobalComponent("DeckyLinksVisuals", VisualsLayer);
+
   return {
     name: "Decky Links",
     titleView: <div className={staticClasses.Title}>Decky Links</div>,
@@ -157,6 +220,7 @@ export default definePlugin(() => {
     icon: <FaLink />,
     onDismount() {
       stopBackground();
+      routerHook.removeGlobalComponent("DeckyLinksVisuals");
       routerHook.removePatch('/library/app/:appid', embeddedPatch);
     },
   };
