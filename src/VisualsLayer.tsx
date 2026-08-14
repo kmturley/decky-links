@@ -1,4 +1,4 @@
-import { FC, SyntheticEvent, useEffect, useState } from "react";
+import { FC, SyntheticEvent, useEffect, useRef, useState } from "react";
 import { scenes, Scene, MIN_VISIBLE_MS, type SceneChange } from "./lib/presentation";
 import { notifySubscribers, sharedState, subscribeToState } from "./shared";
 import {
@@ -90,6 +90,8 @@ interface Painted {
 
 export const VisualsLayer: FC = () => {
   const [painted, setPainted] = useState<Painted | null>(null);
+  /** The scene whose enterSound has already been played. See paint(). */
+  const sounded = useRef<Scene | null>(null);
   const [menuOpen, setMenuOpen] = useState(!!sharedState.steamOverlayOpen);
   const [theme, setTheme] = useState<Theme | null>(null);
   const themeId = theme?.id ?? null;
@@ -132,18 +134,21 @@ export const VisualsLayer: FC = () => {
 
       if (!sharedState.settings?.custom_visuals || !theme) {
         stopLoop();
+        sounded.current = null;
         return setPainted(null);
       }
       if (!scene || NEVER_VISIBLE.has(scene)) {
         // Includes IN_GAME: a drive seeking under someone's game would be the
         // single most annoying bug this feature could ship.
         stopLoop();
+        sounded.current = null;
         return setPainted(null);
       }
 
       const markup = screenFor(theme, scene);
       if (!markup) {
         stopLoop();
+        sounded.current = null;
         return setPainted(null);
       }
       const config = configFor(theme, scene);
@@ -151,7 +156,20 @@ export const VisualsLayer: FC = () => {
       // Sound follows the scene, not the paint: an edge sound belongs to the
       // moment the scene changed, and waiting out a dwell for it would put the
       // latch click after the disk had already been read.
-      if (config.enterSound) void playThemeSound(theme.id, config.enterSound);
+      //
+      // Which is exactly why it is guarded. This function is called on every
+      // shared-state notification as well as on every scene change, and a
+      // launch produces several — the media registry updating, the backend
+      // acknowledging the running game, the poll loop coming round. Each one
+      // used to replay the theme's launch sound, so a boot chime that should
+      // fire once fired two or three times, a few hundred milliseconds apart.
+      // An enterSound is an edge; the level is not allowed to trigger it.
+      if (config.enterSound && sounded.current !== scene) {
+        void playThemeSound(theme.id, config.enterSound);
+      }
+      sounded.current = scene;
+      // Loops are already idempotent — startLoop returns early for the same
+      // file — so they need no equivalent guard.
       if (config.loopSound) void startLoop(theme.id, config.loopSound);
       else stopLoop();
 
@@ -161,15 +179,23 @@ export const VisualsLayer: FC = () => {
       // shows through.
       const show = () => {
         if (scenes.scene !== scene) return;
-        setPainted({
-          scene,
-          html: fillScreen(markup, {
-            title: mediumTitle() ?? "Program",
-            drive: mediumTrigger() === "nfc" ? "T" : "A",
-          }),
-          css: theme.css,
-          fadeMs: config.fadeMs,
+        const html = fillScreen(markup, {
+          title: mediumTitle() ?? "Program",
+          drive: mediumTrigger() === "nfc" ? "T" : "A",
         });
+        // Same screen as the one already up? Keep the object we have.
+        //
+        // Returning the previous state makes React bail out of the render
+        // entirely, which matters because the alternative is handing
+        // dangerouslySetInnerHTML a fresh string several times a second: React
+        // would replace the markup, and replacing markup restarts every CSS
+        // animation inside it. A theme's launch effect is not something to
+        // play again because the poll loop came round.
+        setPainted((prev) =>
+          prev && prev.scene === scene && prev.html === html
+            && prev.css === theme.css && prev.fadeMs === config.fadeMs
+            ? prev
+            : { scene, html, css: theme.css, fadeMs: config.fadeMs });
       };
       const delay = config.minVisibleMs;
       // Capped, so a theme cannot leave the screen on Steam by asking for a
@@ -216,7 +242,14 @@ export const VisualsLayer: FC = () => {
     notifySubscribers();
   }, [showing]);
 
-  if (!showing || !painted) return null;
+  // Hidden rather than unmounted while a Steam menu is up.
+  //
+  // Returning null throws the element away, and the next render builds a new
+  // one — with every CSS animation in the theme starting from the top. Steam
+  // moves focus around during a launch, which flips this flag, so a launch
+  // effect could play, vanish and play again. visibility:hidden paints
+  // nothing, takes no hit testing, and leaves the animations where they were.
+  if (!painted) return null;
 
   return (
     <div
@@ -254,6 +287,19 @@ export const VisualsLayer: FC = () => {
         inset: 0,
         zIndex: LAYER_VISUALS,
         pointerEvents: "auto",
+        visibility: showing ? "visible" : "hidden",
+        // Opaque, so a hole in a theme costs a black frame rather than a
+        // glimpse of Steam. Found on hardware: the 16-bit theme's power-on
+        // effect scaled its own outermost element, which was the only thing
+        // painting a background, and for a couple of hundred milliseconds
+        // mid-launch the library showed through the gap. That was a bug in one
+        // theme, but the failure mode belongs to the format — a theme is
+        // hand-written markup, and any of it can leave a gap.
+        //
+        // Black rather than transparent is also the honest default for what
+        // this feature promises: Steam's interface, replaced. It fades in with
+        // the theme, so a scene change still crossfades rather than blinking.
+        background: "#000",
         animation: `dl-visual-in ${painted.fadeMs ?? 220}ms ease-out`,
       }}
     >

@@ -132,10 +132,20 @@ delay before them is a gap in which Steam shows through.
 
 **Scripts do not run.** Screens are set as markup, so a `<script>` tag or an
 `onclick` in a template does nothing at all. Animation is CSS: `@keyframes`,
-`steps()`, `animation-delay`. Between them the two shipped themes animate a
-blinking block cursor, a segmented progress bar, a page hopping between
-folders, a drifting starfield and a scrolling marquee, and neither uses a line
-of JavaScript.
+`steps()`, `animation-delay`. Between them the shipped themes animate a blinking
+block cursor, a segmented progress bar, a page hopping between folders, a
+drifting starfield, a scrolling marquee, a coin falling into a slot, and a
+chequerboard floor running to a horizon under a stack of copper bars — and not
+one of them uses a line of JavaScript.
+
+**Do not transform the outermost element.** A `scale`, `translate` or `rotate`
+on a screen's root moves the only thing painting a background, and for as long
+as it is off-centre or squeezed flat the rest of the layer has nothing in it.
+The 16-bit theme's power-on effect did this and put Steam's library on screen
+for a couple of hundred milliseconds in the middle of every launch. The layer
+now paints black behind every theme, so the cost is a black gap rather than a
+glimpse of Steam — but it still will not look like what you intended. Animate
+something inside the root instead.
 
 **Taps go nowhere.** The layer absorbs pointer and touch events, so touching a
 theme cannot operate the Steam interface hidden underneath it. It used to let
@@ -161,23 +171,25 @@ matches a name from the table above.
 
 ## Start from one of these
 
-All three ship, all three use every feature described here, and they are
-deliberately unalike — text mode with no boxes at all, a windowed desktop, and a
-cabinet. Between them they show that nothing above was written around a
-particular look.
+All four ship, all four use every feature described here, and they are
+deliberately unalike — text mode with no boxes at all, a windowed desktop, a
+cabinet, and a console boot screen. Between them they show that nothing above
+was written around a particular look.
 
 | | |
 | --- | --- |
 | [`assets/themes/dos/theme.html`](../assets/themes/dos/theme.html) | MS-DOS. Text mode, block cursor, drive that seeks. |
 | [`assets/themes/desktop95/theme.html`](../assets/themes/desktop95/theme.html) | Desktop 95. Teal desktop, beveled windows, taskbar clock. |
 | [`assets/themes/arcade/theme.html`](../assets/themes/arcade/theme.html) | Arcade. CRT bezel, coin doors, credit counter, attract mode. |
+| [`assets/themes/console16/theme.html`](../assets/themes/console16/theme.html) | 16-Bit Console. Copper bars, a chequerboard horizon, a logo with an extrude. |
 
 Their sounds are generated, not recorded — see
 [`make-dos-sounds.py`](../scripts/make-dos-sounds.py),
-[`make-desktop95-sounds.py`](../scripts/make-desktop95-sounds.py) and
-[`make-arcade-sounds.py`](../scripts/make-arcade-sounds.py) if you want a set of
-your own. All are pure stdlib Python, take no arguments, and share the small
-synthesiser in [`scripts/synth.py`](../scripts/synth.py).
+[`make-desktop95-sounds.py`](../scripts/make-desktop95-sounds.py),
+[`make-arcade-sounds.py`](../scripts/make-arcade-sounds.py) and
+[`make-console16-sounds.py`](../scripts/make-console16-sounds.py) if you want a
+set of your own. All are pure stdlib Python, take no arguments, and share the
+small synthesiser in [`scripts/synth.py`](../scripts/synth.py).
 
 ## One thing to keep out
 
