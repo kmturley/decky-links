@@ -5,9 +5,12 @@ All hardware-level dependencies (pyudev, subprocess, /proc/mounts, file I/O)
 are mocked so the suite runs on any platform.
 """
 import asyncio
+import errno
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open
@@ -55,7 +58,14 @@ def _make_source(settings=None):
     if settings is None:
         settings = {"drive_kinds": {k: True for k in (
             DriveKind.FLOPPY, DriveKind.OPTICAL, DriveKind.USB, DriveKind.FLASH)}}
-    return StorageSource(settings, logger=MagicMock())
+    src = StorageSource(settings, logger=MagicMock())
+    # A tmp_path directory stands in for a mount point all through these tests,
+    # and the write guard asks /proc/mounts whether it really is one — which on
+    # a Linux host would rightly say no, and on macOS cannot be asked at all.
+    # Stubbed here so every test does not have to; the tests for the guard
+    # itself take the real method back with `del src._is_mounted_at`.
+    src._is_mounted_at = lambda devnode, mountpoint: True
+    return src
 
 
 def _make_udev_device(action: str, devnode: str):
@@ -809,13 +819,14 @@ class TestDriveKinds:
         from sources.storage_source import DriveKind
         assert self._classify({}) == DriveKind.USB
 
-    def test_only_floppy_is_on_by_default(self):
-        """A floppy drive on a Steam Deck was attached to be a trigger. Every
-        other category is general storage holding the user's own data, and
-        mounting it uninvited is both a surprise and a delay."""
+    def test_no_category_is_on_by_default(self):
+        """NFC is the recommended trigger and the only one on out of the box.
+        Every category here is storage holding the user's own data — including
+        the floppy drive, which is attached on purpose but still not claimed
+        until asked for — and mounting one uninvited is a surprise and a delay."""
         from sources.storage_source import StorageSource, DriveKind
         src = StorageSource({}, logger=MagicMock())
-        assert src._drive_kind_enabled(DriveKind.FLOPPY) is True
+        assert src._drive_kind_enabled(DriveKind.FLOPPY) is False
         assert src._drive_kind_enabled(DriveKind.OPTICAL) is False
         assert src._drive_kind_enabled(DriveKind.USB) is False
         assert src._drive_kind_enabled(DriveKind.FLASH) is False
@@ -835,7 +846,9 @@ class TestDriveKinds:
     @pytest.mark.asyncio
     async def test_enabled_category_is_mounted(self, tmp_path):
         from sources.storage_source import StorageSource, DriveKind
-        src = StorageSource({}, logger=MagicMock())     # floppies on by default
+        # Nothing is on by default any more, so the category has to be switched
+        # on the way a user switches it on in the panel.
+        src = StorageSource({"drive_kinds": {"floppy": True}}, logger=MagicMock())
         with patch.object(src, "_find_mount_point", return_value=None), \
              patch.object(src, "_is_removable", return_value=True), \
              patch.object(src, "classify_drive", return_value=DriveKind.FLOPPY), \
@@ -1031,6 +1044,22 @@ class TestWriteUri:
         assert [c.args[1] for c in mock_remount.call_args_list] == ["rw", "ro"]
 
     @pytest.mark.asyncio
+    async def test_a_read_only_disk_says_so_in_words(self, tmp_path):
+        """`[Errno 30] Read-only file system: '/tmp/decky-links-…'` reads as
+        though the plugin were writing to the wrong place. Every remaining way
+        to reach it is the medium's own doing."""
+        src = _make_source()
+        src._our_mounts["/dev/sdb1"] = str(tmp_path)
+        rofs = OSError(errno.EROFS, "Read-only file system")
+        with patch.object(src, "_remount", AsyncMock(return_value=True)), \
+             patch("builtins.open", side_effect=rofs):
+            ok, err = await src.write_uri("/dev/sdb1", "steam://run/1")
+        assert ok is False
+        assert "read-only" in err
+        assert "write-protect" in err
+        assert "Errno" not in err
+
+    @pytest.mark.asyncio
     async def test_fails_when_not_mounted(self):
         src = _make_source()
         with patch.object(src, "_find_mount_point", return_value=None):
@@ -1057,6 +1086,147 @@ class TestWriteUri:
                 ok, _ = await src.write_uri("/dev/sdb1", "steam://run/1")
         assert ok is True
         assert (tmp_path / "decky-links.json").exists()
+
+
+# ── Adopting our own mounts ───────────────────────────────────────────────────
+
+class TestStaleMountAdoption:
+    """Reported on hardware: a USB stick showing its paired game, and Pair
+    failing with `[Errno 30] Read-only file system:
+    '/tmp/decky-links-xxxxxxxx/decky-links.json'`.
+
+    The mount was one of ours, made before a reload that took `_our_mounts`
+    with it. Media is mounted read-only and pairing remounts read-write only
+    for a mount it owns, so an untracked one was left read-only and the write
+    hit EROFS. Nothing else on the system mounts under our prefix, so a mount
+    there is ours whether or not this process is the one that made it.
+    """
+
+    def _stale_mount(self):
+        from sources.storage_source import _MOUNT_PREFIX
+        return tempfile.mkdtemp(prefix=os.path.basename(_MOUNT_PREFIX),
+                                dir=os.path.dirname(_MOUNT_PREFIX))
+
+    @pytest.mark.asyncio
+    async def test_pairing_remounts_a_mount_left_by_a_previous_run(self):
+        mountpoint = self._stale_mount()
+        try:
+            src = _make_source()          # _our_mounts is empty, as after a reload
+            with patch.object(src, "_find_mount_point", return_value=mountpoint), \
+                 patch.object(src, "_remount", AsyncMock(return_value=True)) as remount:
+                ok, err = await src.write_uri("/dev/sda1", "steam://rungameid/620")
+            assert (ok, err) == (True, None)
+            assert [c.args[1] for c in remount.call_args_list] == ["rw", "ro"]
+            assert os.path.exists(os.path.join(mountpoint, "decky-links.json"))
+        finally:
+            shutil.rmtree(mountpoint, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_an_adopted_mount_is_tracked_so_stop_can_release_it(self):
+        """The other half of the same bug: an untracked mount is never unmounted
+        either, and a leaked mount pins its device node."""
+        mountpoint = self._stale_mount()
+        try:
+            src = _make_source()
+            with patch.object(src, "_find_mount_point", return_value=mountpoint), \
+                 patch.object(src, "_remount", AsyncMock(return_value=True)):
+                await src.write_uri("/dev/sda1", "steam://run/1")
+            assert src._our_mounts == {"/dev/sda1": mountpoint}
+
+            with patch.object(src, "_unmount_device", new_callable=AsyncMock) as umount:
+                await src.stop()
+            umount.assert_awaited_once_with(mountpoint)
+        finally:
+            shutil.rmtree(mountpoint, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_a_system_mount_is_still_left_alone(self, tmp_path):
+        """Only our own prefix is adopted. A mount made by udisks in desktop
+        mode is already writable and belongs to whoever made it — remounting it
+        read-only afterwards would break someone else's mount."""
+        src = _make_source()
+        with patch.object(src, "_find_mount_point", return_value=str(tmp_path)), \
+             patch.object(src, "_remount", AsyncMock(return_value=True)) as remount:
+            ok, _ = await src.write_uri("/dev/sda1", "steam://run/1")
+        assert ok is True
+        remount.assert_not_awaited()
+        assert src._our_mounts == {}
+
+    def test_the_startup_scan_adopts_one_reaping_could_not_clear(self):
+        """`_reap_stale_mounts` runs first, but an unmount of a busy mount
+        fails and leaves the mount in place — which is how one reaches the scan."""
+        mountpoint = self._stale_mount()
+        try:
+            src = _make_source()
+            src._adopt_mount("/dev/sda1", mountpoint)
+            assert src._our_mounts == {"/dev/sda1": mountpoint}
+        finally:
+            shutil.rmtree(mountpoint, ignore_errors=True)
+
+
+# ── The write guard ───────────────────────────────────────────────────────────
+
+class TestWritesStayOnTheMedium:
+    """Everything written goes inside a mount point, and this plugin's own
+    mounts live under /tmp. If the mount has gone, the identical write lands on
+    the Deck's filesystem: a stray file in /tmp, and a pairing reported as done
+    against a disk that carries nothing."""
+
+    def _unguarded(self):
+        src = _make_source()
+        del src._is_mounted_at      # take the real method back from _make_source
+        return src
+
+    def test_mount_table_naming_the_pair_is_a_mount(self):
+        src = self._unguarded()
+        mounts = "/dev/sda1 /tmp/decky-links-abc vfat ro,nosuid 0 0\n"
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            assert src._is_mounted_at("/dev/sda1", "/tmp/decky-links-abc") is True
+
+    def test_same_path_mounted_from_another_device_is_not(self):
+        src = self._unguarded()
+        mounts = "/dev/sdb1 /tmp/decky-links-abc vfat ro 0 0\n"
+        with patch("builtins.open", mock_open(read_data=mounts)):
+            assert src._is_mounted_at("/dev/sda1", "/tmp/decky-links-abc") is False
+
+    def test_a_path_that_is_no_longer_mounted_is_not(self):
+        src = self._unguarded()
+        with patch("builtins.open", mock_open(read_data="/dev/nvme0n1p8 / ext4 rw 0 0\n")):
+            assert src._is_mounted_at("/dev/sda1", "/tmp/decky-links-abc") is False
+
+    def test_an_unreadable_mount_table_does_not_block_pairing(self):
+        """/proc/mounts exists everywhere this runs. Refusing to pair because it
+        could not be read would fail more often than the case being guarded."""
+        src = self._unguarded()
+        with patch("builtins.open", side_effect=OSError("no /proc")):
+            assert src._is_mounted_at("/dev/sda1", "/tmp/decky-links-abc") is True
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_written_when_the_mount_has_gone(self, tmp_path):
+        src = _make_source()
+        src._our_mounts["/dev/sda1"] = str(tmp_path)
+        src._is_mounted_at = lambda devnode, mountpoint: False
+        with patch.object(src, "_remount", AsyncMock(return_value=True)) as remount:
+            ok, err = await src.write_uri("/dev/sda1", "steam://run/1")
+        assert ok is False
+        assert "not mounted" in err
+        assert not (tmp_path / "decky-links.json").exists()
+        # Not even made writable: there is nothing here worth remounting.
+        remount.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_erased_when_the_mount_has_gone(self, tmp_path):
+        """Erasing an unmounted path would delete a file from /tmp and report a
+        key as wiped while the medium still carries it."""
+        payload = tmp_path / "decky-links.json"
+        payload.write_text('{"version": 1, "uri": "decky-links://key/x"}')
+        src = _make_source()
+        src._our_mounts["/dev/sda1"] = str(tmp_path)
+        src._is_mounted_at = lambda devnode, mountpoint: False
+        ok, err = await src.erase("/dev/sda1")
+        assert ok is False
+        assert "not mounted" in err
+        assert payload.exists()
 
 
 # ── _is_removable() ───────────────────────────────────────────────────────────

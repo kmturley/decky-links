@@ -70,13 +70,15 @@ class SettingsManager:
                 },
                 "storage": {
                     "enabled": True,
-                    # Per-category switches, off unless the drive exists to be a
-                    # trigger. A floppy drive on a Steam Deck is there on
-                    # purpose; optical, USB and card readers are general storage
-                    # holding the user's own data. Must stay in step with
-                    # DEFAULT_DRIVE_KINDS in storage_source.py.
+                    # Per-category switches, all off: NFC is the recommended
+                    # trigger and the only one on out of the box, and every
+                    # drive here reads media the user already owns for something
+                    # else. The source itself stays enabled so a drive that is
+                    # plugged in is still reported as present — the panel shows
+                    # it switched off rather than not connected. Must stay in
+                    # step with DEFAULT_DRIVE_KINDS in storage_source.py.
                     "drive_kinds": {
-                        "floppy": True,
+                        "floppy": False,
                         "optical": False,
                         "usb": False,
                         "flash": False,

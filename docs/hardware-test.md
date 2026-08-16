@@ -65,9 +65,10 @@ pnpm logs > 01-clean.txt 2>&1
   ship disabled, and a retry loop against absent hardware is the C4 regression.
 - No `must be superuser to use mount`.
 
-**Panel:** Triggers list shows NFC and Floppy `ON`, everything else `OFF`.
-Enabled rows read `Not connected`. Optical is `OFF` by default now — if it is
-on, an old settings file survived; that is fine, note it.
+**Panel:** Triggers list shows NFC `ON` and everything else `OFF` — including
+Floppy, which is off by default now. The NFC row reads `Not connected` until the
+reader is in. If any storage category is on, an old settings file survived; that
+is fine, note it, and switch **Floppy ON** before the tests below that use it.
 
 ---
 

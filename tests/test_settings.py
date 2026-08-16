@@ -35,13 +35,20 @@ class TestDefaults:
         assert mgr.settings["auto_launch"] is True
         assert mgr.settings["auto_close"] is False
 
-    def test_only_floppy_is_a_trigger_by_default(self, tmp_path):
-        """A floppy drive on a Steam Deck is there on purpose. USB sticks and
-        cards usually hold the user's own data, so mounting them uninvited is
-        both a surprise and a delay."""
+    def test_no_drive_is_a_trigger_by_default(self, tmp_path):
+        """NFC is the recommended trigger and the only one on out of the box.
+        Every drive category reads media the user already owns for something
+        else, so mounting one uninvited is both a surprise and a delay."""
         kinds = _mgr(tmp_path).settings["sources"]["storage"]["drive_kinds"]
-        assert kinds["floppy"] is True
-        assert not any(v for k, v in kinds.items() if k != "floppy")
+        assert not any(kinds.values())
+
+    def test_nfc_is_the_only_source_on_by_default(self, tmp_path):
+        """The one trigger switched on out of the box. Storage stays enabled as
+        a source so a plugged-in drive is still reported as present, but with
+        every category off it mounts nothing."""
+        sources = _mgr(tmp_path).settings["sources"]
+        assert sources["nfc"]["enabled"] is True
+        assert not any(sources["storage"]["drive_kinds"].values())
 
     def test_network_and_camera_sources_are_opt_in(self, tmp_path):
         sources = _mgr(tmp_path).settings["sources"]
