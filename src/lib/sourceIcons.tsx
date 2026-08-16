@@ -35,16 +35,6 @@ export function presentMediaVerb(sourceType: string): string {
   }
 }
 
-/** Noun for a medium belonging to this source, for result messages. */
-export function mediumNoun(sourceType: string): string {
-  switch (sourceType) {
-    case SourceType.NFC: return "tag";
-    case SourceType.STORAGE: return "disk";
-    case SourceType.CAMERA: return "code";
-    default: return "media";
-  }
-}
-
 /** Human-readable device name for a source. */
 export function sourceLabel(sourceType: string): string {
   switch (sourceType) {
