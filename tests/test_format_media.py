@@ -297,6 +297,10 @@ class TestErase:
         src = _make_source()
         src._our_mounts[devnode] = str(tmp_path)
         src._remount = AsyncMock(return_value=True)
+        # tmp_path is a directory standing in for a mount point, and erase asks
+        # /proc/mounts whether it really is one before touching anything. The
+        # guard has its own tests in test_storage_source.py.
+        src._is_mounted_at = lambda devnode, mountpoint: True
         return src
 
     @pytest.mark.asyncio

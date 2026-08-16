@@ -977,6 +977,16 @@ class Plugin:
         "flash":   "memory card",
     }
 
+    def _drive_kind(self, source_id: Optional[str]) -> Optional[str]:
+        """Which category of drive a storage medium is sitting in.
+
+        Sent with pairing results so the panel can name the trigger the way its
+        own row does — "USB Storage" rather than the device node the medium
+        happens to have this time round.
+        """
+        entry = self._registry.get(source_id) if source_id else None
+        return (entry or {}).get("drive_kind")
+
     def _medium_label(self, source, source_id: Optional[str]) -> str:
         if source is None:
             return "medium"
@@ -1118,6 +1128,7 @@ class Plugin:
                 "uid":     media_id,
                 "error":   error_msg,
                 "source_type": source.source_type.value,
+                "drive_kind": self._drive_kind(source_id),
             })
         except Exception as e:
             decky.logger.error(f"Critical error in pairing handler: {e}")

@@ -13,6 +13,7 @@ import {
 } from "../shared";
 import { isSameLaunchTarget } from "./steamIds";
 import { launchTargetName } from "./appNames";
+import { sourceLabel } from "./sourceIcons";
 
 /** One row in the Triggers list.
  *
@@ -74,6 +75,23 @@ export const TRIGGER_ROWS: TriggerRow[] = [
   { key: "file",    label: "File",        sourceType: SourceType.FILE_WATCH, icon: "📁", noun: "file" },
 ];
 
+/** The trigger's name as the user sees it everywhere else — "USB Storage".
+ *
+ * Pairing messages used to name the medium and its id: "Paired to disk sda1",
+ * which is a device node, changes between plugs, and matches nothing on screen.
+ * The row label is what the toggle above says and what the modal was pressed
+ * on, so it is the one name the message can use that the user can point at.
+ *
+ * `driveKind` picks between the four storage rows. Without one — an older
+ * event, or a source with no categories — the source's own name stands in.
+ */
+export function triggerLabel(sourceType: string, driveKind?: string | null): string {
+  const row = TRIGGER_ROWS.find(
+    (r) => r.sourceType === sourceType && (!r.driveKind || r.driveKind === driveKind),
+  );
+  return row?.label ?? sourceLabel(sourceType);
+}
+
 export function statusFor(row: TriggerRow, statuses: SourceStatus[]) {
   return statuses.find((s) => s.source_type === row.sourceType);
 }
@@ -93,6 +111,21 @@ export function isRowConnected(row: TriggerRow, status?: SourceStatus): boolean 
   if (!status?.active) return false;
   if (row.driveKind) return status.drive_kinds?.[row.driveKind]?.present ?? false;
   return true;
+}
+
+/** Does the medium on this row already carry the game being paired?
+ *
+ * The one question behind both "no Pair button" answers: the panel's row drops
+ * its button because there is nothing to do, and the modal's row drops it for
+ * the same reason. The modal used to ask a different question — it offers Pair
+ * on any connected row, because presenting the tag afterwards is the normal
+ * flow there — and so it kept offering to write a disk the game was already on.
+ */
+export function holdsTarget(
+  medium: ActiveMedium | undefined,
+  target: { uri: string } | null,
+): boolean {
+  return !!(medium?.uri && target && isSameLaunchTarget(medium.uri, target.uri));
 }
 
 /** The medium sitting on this row's hardware, if any. */
@@ -241,7 +274,9 @@ export function mediaStateFor(
   if (!medium.uri) {
     return { text: `Empty ${row.noun}`, action: target ? "Pair" : null, dim: false };
   }
-  if (target && isSameLaunchTarget(medium.uri, target.uri)) {
+  // `target &&` is redundant against holdsTarget, and is what tells the
+  // compiler target.label below is not on a null.
+  if (target && holdsTarget(medium, target)) {
     // No button and no tick: the absent button already says "nothing to do
     // here", and the row names the game it is paired to.
     return { text: target.label, action: null, dim: false };

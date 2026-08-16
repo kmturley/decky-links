@@ -12,7 +12,7 @@ import {
   useSharedState,
 } from "./shared";
 import { useViewedApp } from "./hooks/useAppId";
-import { mediumNoun } from "./lib/sourceIcons";
+import { triggerLabel } from "./lib/triggerRows";
 import PairModal, { type PairTarget } from "./PairModal";
 
 const RETRY_DELAY_MS = 500;
@@ -203,13 +203,15 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   // like the insert was simply not noticed.
   useEffect(() => {
     if (!modalVisible) return;
-    const listener = addEventListener<[data: { uid: string; source_type?: string }]>(
+    const listener = addEventListener<
+      [data: { uid: string; source_type?: string; drive_kind?: string | null }]
+    >(
       "media_detected",
       (data) => {
         if (!data?.uid) return;
-        const noun = mediumNoun(data.source_type ?? "nfc");
-        const label = data.uid.replace(/^\/dev\//, "");
-        setStatusMessage(`Writing to ${noun} ${label}…`);
+        setStatusMessage(
+          `Writing to ${triggerLabel(data.source_type ?? "nfc", data.drive_kind)}…`,
+        );
       }
     );
     return () => removeEventListener("media_detected", listener);
@@ -223,16 +225,21 @@ const GamePagePairer: FC<GamePagePairerProps> = ({ embedded = false }) => {
   // sharedState.pairing is cleared by the background manager, which is what
   // releases the armed row in the list.
   useEffect(() => {
-    const listener = addEventListener<[data: { success: boolean; uid: string; error?: string; source_type?: string }]>(
+    const listener = addEventListener<
+      [data: {
+        success: boolean; uid: string; error?: string;
+        source_type?: string; drive_kind?: string | null;
+      }]
+    >(
       "pairing_result",
       (data) => {
         if (!modalVisible) return;
-        const noun = mediumNoun(data.source_type ?? "nfc");
-        // A storage media_id is a device node; "/dev/" is noise in a message.
-        const label = data.uid?.replace(/^\/dev\//, "") ?? "";
+        // The trigger by the name on its row, not the medium and its id: a
+        // storage media_id is a device node, so this said "Paired to disk
+        // sda1" for the row the user had just pressed "USB Storage" on.
         setStatusMessage(
           data.success
-            ? `Paired to ${noun} ${label}`
+            ? `Paired to ${triggerLabel(data.source_type ?? "nfc", data.drive_kind)}`
             : `Pairing failed: ${data.error || "unknown"}`
         );
       }

@@ -1078,6 +1078,42 @@ class TestPairing:
         storage.write_uri.assert_awaited_once_with("/dev/sda", "steam://rungameid/400", "")
 
     @pytest.mark.asyncio
+    async def test_pairing_result_carries_the_drive_category(self, plugin, mock_decky):
+        """Which of the four storage rows this was. Without it the modal can
+        only say "storage", and it used to fall back to the device node —
+        "Paired to disk sda1" for a row labelled USB Storage."""
+        from sources.base import SourceType
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+
+        storage = MagicMock()
+        storage.source_id = "storage:udev"
+        storage.source_type = SourceType.STORAGE
+        storage.can_write.return_value = True
+        storage.write_uri = AsyncMock(return_value=(True, None))
+        plugin.source_manager.replace(storage)
+        plugin._registry.put("storage:udev", {"drive_kind": "usb"})
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing("/dev/sda1", source_id="storage:udev")
+
+        payload = mock_decky.emit.call_args_list[-1].args[1]
+        assert payload["drive_kind"] == "usb"
+
+    @pytest.mark.asyncio
+    async def test_pairing_result_for_a_tag_has_no_drive_category(self, plugin, mock_decky):
+        """Nothing to disambiguate — NFC is one row."""
+        plugin.is_pairing  = True
+        plugin.pairing_uri = "steam://rungameid/400"
+        uid                = _make_uid()
+
+        with patch.object(plugin.nfc_source, "write_ndef_uri", return_value=(True, None)), \
+             patch.object(plugin, "_play_sound"):
+            await plugin._handle_pairing(uid.hex().upper(), source_id="nfc:/dev/ttyUSB0")
+
+        assert mock_decky.emit.call_args_list[-1].args[1]["drive_kind"] is None
+
+    @pytest.mark.asyncio
     async def test_pairing_does_not_launch_game_after_write(self, plugin, mock_decky):
         plugin.is_pairing  = True
         plugin.pairing_uri = "steam://rungameid/400"

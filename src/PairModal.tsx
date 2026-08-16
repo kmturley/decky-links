@@ -10,6 +10,7 @@ import {
 } from "./shared";
 import {
   TRIGGER_ROWS,
+  holdsTarget,
   isRowConnected,
   isRowEnabled,
   mediaStateFor,
@@ -46,16 +47,23 @@ const TriggerLine: FC<{
   const medium = mediumFor(row, media);
   const state = mediaStateFor(row, connected, medium, target, armed);
 
-  // Unlike the Quick Access panel, a connected row is always pairable here:
-  // the modal is where you tap a tag you have not presented yet, so waiting
-  // for a medium is the normal flow rather than an error. Generated triggers
-  // are the exception — there is nothing to write to a camera.
+  // Unlike the Quick Access panel, a connected row is normally pairable here
+  // even with nothing on it: the modal is where you tap a tag you have not
+  // presented yet, so waiting for a medium is the flow rather than an error.
+  // Three exceptions, and all three are cases where the press could only be a
+  // mistake:
   //
-  // And the key: writing a game over it would destroy the only thing that can
-  // unlock the device, so the backend refuses it. Offering the button anyway
-  // made a press that could only ever fail.
+  // Generated triggers — there is nothing to write to a camera.
+  //
+  // The key: writing a game over it would destroy the only thing that can
+  // unlock the device, so the backend refuses it, and offering the button made
+  // a press that could only ever fail.
+  //
+  // And a medium that already carries this game. The row says so — it shows
+  // the game's name — and the panel drops its button for the same reason.
   const holdsKey = !!(medium?.key && medium.authorized !== false);
-  const canPair = connected && !armed && !state.busy && !row.generated && !holdsKey;
+  const canPair = connected && !armed && !state.busy && !row.generated
+    && !holdsKey && !holdsTarget(medium, target);
 
   return (
     <div style={{

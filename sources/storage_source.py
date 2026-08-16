@@ -11,6 +11,7 @@ is not available — ``start()`` returns False and the source stays inactive.
 """
 
 import asyncio
+import errno
 import json
 import os
 import stat
@@ -93,12 +94,14 @@ class DriveKind:
     USB = "usb"
 
 
-# Off by default unless the drive exists to be a trigger. A floppy drive on a
-# Steam Deck is there on purpose; optical, USB and card readers are general
-# storage holding the user's own data, and mounting those uninvited is both a
-# surprise and a delay. Every category is one toggle away in the panel.
+# All off by default. NFC is the trigger this plugin recommends and the only
+# one switched on out of the box; every drive here reads media the user already
+# owns for something else, and mounting one uninvited is both a surprise and a
+# delay. A floppy drive is attached on purpose, but a fresh install still has
+# no business claiming it before being asked — and a drive that is plugged in
+# shows up in the panel as present-but-off, which is one toggle from working.
 DEFAULT_DRIVE_KINDS = {
-    DriveKind.FLOPPY: True,
+    DriveKind.FLOPPY: False,
     DriveKind.OPTICAL: False,
     DriveKind.USB: False,
     DriveKind.FLASH: False,
@@ -525,7 +528,11 @@ class StorageSource(MediaSource):
     async def _handle_device_added(self, devnode: str) -> Optional[MediaEvent]:
         """Find or create a mount, read payload, return LOAD event or None."""
         mountpoint = self._find_mount_point(devnode)
-        mounted_by_us = False
+
+        if mountpoint:
+            # One of ours from a previous run counts as ours again — otherwise
+            # it is never remounted for a pair and never unmounted on stop.
+            self._adopt_mount(devnode, mountpoint)
 
         if not mountpoint:
             if not self._is_removable(devnode):
@@ -545,7 +552,6 @@ class StorageSource(MediaSource):
                 return None
             mountpoint = await self._mount_device(devnode)
             if mountpoint:
-                mounted_by_us = True
                 self._our_mounts[devnode] = mountpoint
 
         if not mountpoint:
@@ -661,10 +667,22 @@ class StorageSource(MediaSource):
         read-write and puts it back afterwards regardless of outcome.
         """
         devnode = media_id
-        ours = self._our_mounts.get(devnode)
-        mountpoint = ours or self._find_mount_point(devnode)
+        mountpoint = self._our_mounts.get(devnode) or self._find_mount_point(devnode)
         if not mountpoint:
             return False, f"{devnode} is not mounted"
+        ours = self._adopt_mount(devnode, mountpoint)
+
+        # Nothing is written unless this really is a mount of this device. The
+        # payload belongs on the medium, and the path it goes to is inside a
+        # mount point under /tmp — so a mount that has gone away turns the same
+        # write into a file on the Deck's own filesystem. See _is_mounted_at.
+        if not self._is_mounted_at(devnode, mountpoint):
+            if self._logger:
+                self._logger.error(
+                    f"StorageSource: refusing to write — {mountpoint} is not a "
+                    f"mount of {devnode}"
+                )
+            return False, f"{devnode} is not mounted at {mountpoint}"
 
         # Only remount a mount we made. A system mount (udisks in desktop mode,
         # say) is already writable and belongs to whoever created it — flipping
@@ -690,6 +708,13 @@ class StorageSource(MediaSource):
         except OSError as e:
             if self._logger:
                 self._logger.error(f"StorageSource: failed writing {devnode}: {e}")
+            # `[Errno 30] Read-only file system: '/tmp/decky-links-…/…'` is what
+            # the user saw when this went wrong, and it reads as though the
+            # plugin were writing somewhere it should not be. Every remaining
+            # way to reach it is the medium's own doing — a write-protect tab,
+            # or a mount somebody else made read-only — so the message says so.
+            if e.errno == errno.EROFS:
+                return False, "the disk is read-only — check its write-protect tab"
             return False, str(e)
         finally:
             if remounted:
@@ -713,10 +738,21 @@ class StorageSource(MediaSource):
         itself, and a missing file counts as success.
         """
         devnode = media_id
-        ours = self._our_mounts.get(devnode)
-        mountpoint = ours or self._find_mount_point(devnode)
+        mountpoint = self._our_mounts.get(devnode) or self._find_mount_point(devnode)
         if not mountpoint:
             return False, f"{devnode} is not mounted"
+        ours = self._adopt_mount(devnode, mountpoint)
+
+        # Same guard as write_uri, for the same reason and one more: with the
+        # mount gone this would delete a file from /tmp, and report the medium
+        # as wiped while it still carries the key.
+        if not self._is_mounted_at(devnode, mountpoint):
+            if self._logger:
+                self._logger.error(
+                    f"StorageSource: refusing to erase — {mountpoint} is not a "
+                    f"mount of {devnode}"
+                )
+            return False, f"{devnode} is not mounted at {mountpoint}"
 
         remounted = False
         if ours:
@@ -908,6 +944,63 @@ class StorageSource(MediaSource):
 
     # ── Mount helpers ──────────────────────────────────────────────────
 
+    def _adopt_mount(self, devnode: str, mountpoint: str) -> bool:
+        """Is this mount ours to remount and to clean up?
+
+        True for one we made, and for any mount under our own tempdir prefix —
+        nothing else on the system mounts there, so a `/tmp/decky-links-*` that
+        is missing from ``_our_mounts`` is one a previous run of this plugin
+        left behind. An unclean reload leaves the mount in the kernel's table
+        and takes the bookkeeping with it, and ``_reap_stale_mounts`` cannot
+        always clear it: an unmount of a busy mount fails, and the mount stays.
+
+        Adopting it is what stops pairing failing with "read-only file system".
+        Media is mounted read-only, and pairing remounts read-write only for a
+        mount it owns — so before this, an unadopted mount was treated as
+        somebody else's, never remounted, and the write hit a read-only
+        filesystem. Reported on a USB stick after a plugin reload.
+
+        It also puts the mount back under ``stop()``'s cleanup, which is where
+        the leaked mount that pins a device node comes from.
+        """
+        if devnode in self._our_mounts:
+            return True
+        if not mountpoint.startswith(_MOUNT_PREFIX):
+            return False
+        self._our_mounts[devnode] = mountpoint
+        if self._logger:
+            self._logger.info(
+                f"StorageSource: adopting {mountpoint} for {devnode} — our own "
+                f"mount left by a previous run"
+            )
+        return True
+
+    def _is_mounted_at(self, devnode: str, mountpoint: str) -> bool:
+        """Is ``mountpoint`` right now a mount of ``devnode``?
+
+        The guard on every write. Everything this plugin writes goes inside a
+        mount point, and its own mounts live under ``/tmp`` — so if the mount
+        has gone, the identical write lands on the Deck's own filesystem
+        instead of on the medium. That leaves a stray file in ``/tmp`` and,
+        worse, reports a pairing that paired nothing: the disk goes away
+        carrying no payload while the panel says it has one.
+
+        Unverifiable is not a refusal. ``/proc/mounts`` exists on every system
+        this runs on, and refusing to pair because it could not be read would
+        fail more often, and more confusingly, than the case being guarded
+        against.
+        """
+        try:
+            with open("/proc/mounts", "r") as f:
+                lines = f.readlines()
+        except OSError:
+            return True
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == devnode and parts[1] == mountpoint:
+                return True
+        return False
+
     def _find_mount_point(self, devnode: str) -> Optional[str]:
         """Return the existing mount point for devnode from /proc/mounts, or None."""
         try:
@@ -1075,6 +1168,10 @@ class StorageSource(MediaSource):
             if not self._is_relevant_device(devnode):
                 continue
             seen.add(devnode)
+            # A mount under our own prefix that survived a reload _reap_stale_mounts
+            # could not clear — usually because it was busy. Taking it back means
+            # pairing can remount it, and stop() will unmount it.
+            self._adopt_mount(devnode, mountpoint)
 
             payload = self._read_payload(os.path.join(mountpoint, PAYLOAD_FILENAME))
             if payload is None:
