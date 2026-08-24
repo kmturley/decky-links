@@ -330,6 +330,13 @@ there. It also copies `sources/`, `nfc/`, `cards/` and `assets/` into
 `py_modules/` — the packaging CLI zips a fixed allowlist that does not include
 them, so anything left at the top level never reaches the device.
 
+Every Python dependency the plugin needs — including NFC libraries like
+`pyserial`, `adafruit-circuitpython-pn532` and `ndeflib` — is vendored this way.
+There is nothing to `pip install` on the Deck and nothing to copy into the
+plugin folder by hand; doing so replaces a correctly-built Linux x86_64 wheel
+with one built for whatever machine ran the command, which is the packaging
+failure described in the Troubleshooting section below.
+
 > [!IMPORTANT]
 > **`DECK_PYTHON` must match the interpreter Decky Loader runs plugins with, not
 > the one SteamOS ships.** The loader is a frozen binary carrying its own Python
@@ -405,7 +412,11 @@ or a leaked mount makes every later result meaningless.
 | Panel shows nothing / stale state | `pnpm logs` — the plugin emits status on change and on a 2s tick |
 | `must be superuser to use mount` | The loader did not restart; `pnpm deck:status` shows the process user |
 | Camera never connects | `pnpm deck:status` import check, and the `Python runtime` note above |
-| Reader not detected | Auto-detection only matches known USB-serial vendor IDs; set the device path in settings |
+| Reader not detected | Auto-detection only matches known USB-serial vendor IDs; set `device_path`, `baudrate` and `reader_type` in the plugin's settings if yours isn't found automatically. No udev rules needed — the plugin runs with Decky's `root` permission, so it already has direct access to the device |
+| `PN532UARTReader unavailable` / `nfc.reader failed to import` | A packaging problem, not missing hardware — see the `Python runtime` note above. Do not `pip install` NFC packages or copy them into the plugin folder by hand: `pyserial`, `adafruit-circuitpython-pn532`, `ndeflib` and everything else are already vendored as Linux x86_64 wheels under `py_modules/` by `build.sh`, and replacing them with host-machine builds (e.g. from macOS) is what breaks this import chain |
+| Tag reads inconsistently, or an "RF Transmission Error" | Hold it roughly 0.5–1 cm above the reader's coil rather than flat against it, and keep it still during the scan |
+| Tag never pairs — reported as an unsupported tag | Encrypted or custom-keyed Mifare Classic tags (non-default keys) can't be authenticated. Use NTAG213/215/216 or an unlocked Ultralight tag |
+| Row shows "Blocked by allowlist" | The URI stored on the medium isn't `steam://run/*`, `steam://rungameid/*` or `https://`. This is a fixed trust boundary with no setting to turn it off (see [Security](#security)) — re-pair the medium from a game page to overwrite it with a valid URI. `pnpm logs` has the specific rejection reason |
 | Drive letter drifts `sda`→`sdb` | A leaked mount is pinning the node — `grep decky-links /proc/mounts` |
 | A theme does not appear in the picker | The folder name is not a valid id, or it has no `theme.html` |
 
