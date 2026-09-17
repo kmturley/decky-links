@@ -34,7 +34,7 @@ There is no store release yet, so the plugin is built and installed from this
 repository:
 
 ```bash
-./.vscode/build.sh    # produces out/decky-links.zip
+./.vscode/build.sh    # produces "out/Decky Links.zip"
 ```
 
 Then install that zip through Decky Loader — its settings carry a developer

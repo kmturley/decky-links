@@ -71,8 +71,17 @@ jobs:
       - name: Name artifact with version, OS and arch
         id: artifact
         run: |
+          # Named from plugin.json's "name" ("Decky Links"), not a fixed
+          # "decky-links.zip" — glob for whatever the CLI actually produced
+          # rather than hardcoding a filename that drifted from reality.
+          shopt -s nullglob
+          built=(out/*.zip)
+          if [[ ${#built[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one zip in out/, found: ${built[*]}"
+            exit 1
+          fi
           name="decky-links-${{ steps.version.outputs.version }}-${TARGET_OS}-${TARGET_ARCH}.zip"
-          mv out/decky-links.zip "out/$name"
+          mv "${built[0]}" "out/$name"
           echo "path=out/$name" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
