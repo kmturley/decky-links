@@ -43,10 +43,19 @@ touch py_modules/.keep
 
 docker run --rm \
     --platform linux/amd64 \
+    -u "$(id -u):$(id -g)" \
     -v "$(pwd)":/plugin \
     -w /plugin \
     "python:${DECK_PYTHON}-slim" \
     pip install -r requirements.txt --target=./py_modules --upgrade
+
+# -u above makes pip write py_modules/ as the calling user instead of root.
+# Docker Desktop on macOS hides root-owned bind-mount writes by remapping them
+# back to the host user, but native Linux Docker (e.g. GitHub Actions runners)
+# does not — root-owned files there make the `rm -rf py_modules/nfc ...` below
+# fail with "Permission denied", because pip installing `nfcpy` (a dependency)
+# creates a py_modules/nfc/ that collides with and must be clearable to make
+# way for the project's own nfc/ package of the same import name.
 
 # Guard: fail loudly rather than shipping macOS binaries to the Deck again.
 if find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) | grep -q .; then
