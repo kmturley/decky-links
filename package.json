@@ -1,6 +1,6 @@
 {
   "name": "decky-links",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "Decky Links enables launching games and other URIs on SteamOS by tapping NFC cards",
   "type": "module",
   "scripts": {
