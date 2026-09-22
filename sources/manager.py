@@ -207,7 +207,17 @@ class SourceManager:
                 started = time.monotonic()
                 event = await source.poll()
                 if event is not None:
-                    await self._queue.put(event)
+                    # A poll may report more than one thing. Swapping one NFC
+                    # tag for another between polls produces the outgoing
+                    # tag's UNLOAD and the incoming tag's LOAD in the same
+                    # cycle, and dropping either one leaves the registry
+                    # describing a reader that no longer holds what it says.
+                    if isinstance(event, (list, tuple)):
+                        for item in event:
+                            if item is not None:
+                                await self._queue.put(item)
+                    else:
+                        await self._queue.put(event)
 
             except asyncio.CancelledError:
                 # Task is being stopped — exit cleanly

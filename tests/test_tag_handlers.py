@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import MagicMock, call
-from nfc.tag_handlers import (
+from nfc_core.tag_handlers import (
     NTAGHandler,
     MifareClassicHandler,
     UltralightHandler,
@@ -12,7 +12,7 @@ from nfc.tag_handlers import (
     DESFireHandler,
     get_handler,
 )
-from nfc.key_manager import KeyManager
+from nfc_core.key_manager import KeyManager
 
 
 class TestNTAGHandler:
@@ -25,9 +25,9 @@ class TestNTAGHandler:
         
         reader = MagicMock()
         reader.ntag2xx_read_block.side_effect = [
-            b"\x03\x10\xD1\x01",
-            b"\x0C\x55\x65\x78",
-            b"\x61\x6D\xFE\x00",
+            b"\x03\x06\xD1\x01",
+            b"\x02\x55\x00\x65",
+            b"\xFE\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -90,14 +90,31 @@ class TestNTAGHandler:
         assert success is False
         assert "failed" in error.lower()
 
-    def test_ntag_capacity(self):
-        """NTAG capacity should be ~520 bytes."""
+    def test_ntag_capacity_defaults_to_ntag215_user_memory(self):
+        """Default geometry is NTAG215 user memory: pages 4-129, 504 bytes.
+
+        The old default ran to page 133, four pages past the end of user
+        memory and into the dynamic lock and configuration pages — writing
+        there can permanently change a tag's access settings.
+        """
         uid = b"\xAA\xBB\xCC\xDD"
         handler = NTAGHandler(uid)
-        
-        capacity = handler.get_capacity()
-        
-        assert capacity == 130 * 4
+
+        assert handler.get_capacity() == 126 * 4
+        assert handler.user_pages[0] == 4
+        assert handler.user_pages[-1] == 129
+
+    def test_ntag_capacity_follows_reported_geometry(self):
+        """A tag that reports its own size is sized to it, not to the default."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        assert NTAGHandler(uid, user_pages=36).get_capacity() == 144   # NTAG213
+        assert NTAGHandler(uid, user_pages=126).get_capacity() == 504  # NTAG215
+        assert NTAGHandler(uid, user_pages=222).get_capacity() == 888  # NTAG216
+
+    def test_ntag_capacity_is_clamped_to_the_family_maximum(self):
+        """A misreported size cannot push writes past the largest real tag."""
+        uid = b"\xAA\xBB\xCC\xDD"
+        assert NTAGHandler(uid, user_pages=9999).get_capacity() == 222 * 4
 
 
 class TestMifareClassicHandler:
@@ -110,8 +127,8 @@ class TestMifareClassicHandler:
         
         reader = MagicMock()
         reader.mifare_classic_read_block.side_effect = [
-            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
-            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x10\xD1\x01\x0C\x55\x00\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63",
+            b"\x6F\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -191,9 +208,9 @@ class TestUltralightHandler:
         
         reader = MagicMock()
         reader.ntag2xx_read_block.side_effect = [
-            b"\x03\x10\xD1\x01",
-            b"\x0C\x55\x65\x78",
-            b"\x61\x6D\xFE\x00",
+            b"\x03\x06\xD1\x01",
+            b"\x02\x55\x00\x65",
+            b"\xFE\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -235,9 +252,9 @@ class TestISO14443BHandler:
         
         reader = MagicMock()
         reader.transceive.side_effect = [
-            b"\x03\x10\xD1\x01",
-            b"\x0C\x55\x65\x78",
-            b"\x61\x6D\xFE\x00",
+            b"\x03\x06\xD1\x01",
+            b"\x02\x55\x00\x65",
+            b"\xFE\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -374,8 +391,8 @@ class TestFeliCaHandler:
         
         reader = MagicMock()
         reader.transceive.side_effect = [
-            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
-            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x10\xD1\x01\x0C\x55\x00\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63",
+            b"\x6F\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -444,8 +461,8 @@ class TestDESFireHandler:
         reader = MagicMock()
         reader.transceive.side_effect = [
             b"\x00",  # Select file response
-            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
-            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x10\xD1\x01\x0C\x55\x00\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63",
+            b"\x6F\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -714,9 +731,9 @@ class TestPerformanceOptimization:
         reader = MagicMock()
         # Mock batch read method
         reader.ntag2xx_read_blocks.return_value = [
-            b"\x03\x10\xD1\x01",
-            b"\x0C\x55\x65\x78",
-            b"\x61\x6D\xFE\x00",
+            b"\x03\x06\xD1\x01",
+            b"\x02\x55\x00\x65",
+            b"\xFE\x00\x00\x00",
             b"\x00\x00\x00\x00",
         ]
         
@@ -735,9 +752,9 @@ class TestPerformanceOptimization:
         # No batch read method
         del reader.ntag2xx_read_blocks
         reader.ntag2xx_read_block.side_effect = [
-            b"\x03\x10\xD1\x01",
-            b"\x0C\x55\x65\x78",
-            b"\x61\x6D\xFE\x00",
+            b"\x03\x06\xD1\x01",
+            b"\x02\x55\x00\x65",
+            b"\xFE\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -754,8 +771,8 @@ class TestPerformanceOptimization:
         reader = MagicMock()
         # Mock batch read method
         reader.mifare_classic_read_blocks.return_value = [
-            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
-            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x10\xD1\x01\x0C\x55\x00\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63",
+            b"\x6F\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
             b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ]
         
@@ -774,8 +791,8 @@ class TestPerformanceOptimization:
         # No batch read method
         del reader.mifare_classic_read_blocks
         reader.mifare_classic_read_block.side_effect = [
-            b"\x03\x10\xD1\x01\x0C\x55\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63\x6F",
-            b"\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            b"\x03\x10\xD1\x01\x0C\x55\x00\x65\x78\x61\x6D\x70\x6C\x65\x2E\x63",
+            b"\x6F\x6D\xFE\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
         ]
         
         data = handler.read_ndef(reader)
@@ -805,7 +822,7 @@ class TestSectorLockDetection:
 
     def test_get_sector_info_all_unlocked(self):
         """Should detect all sectors as unlocked when authentication succeeds."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -824,7 +841,7 @@ class TestSectorLockDetection:
 
     def test_get_sector_info_some_locked(self):
         """Should detect locked sectors when authentication fails."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -849,7 +866,7 @@ class TestSectorLockDetection:
 
     def test_get_sector_info_read_only(self):
         """Should detect read-only sectors when write fails."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -868,7 +885,7 @@ class TestSectorLockDetection:
 
     def test_get_sector_info_structure(self):
         """Should return correct sector structure."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -897,7 +914,7 @@ class TestSectorLocking:
 
     def test_lock_sector_success(self):
         """Should successfully lock a sector."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -918,7 +935,7 @@ class TestSectorLocking:
 
     def test_lock_sector_invalid_sector(self):
         """Should reject invalid sector numbers."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -937,7 +954,7 @@ class TestSectorLocking:
 
     def test_lock_sector_auth_failure(self):
         """Should fail when authentication fails."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -955,7 +972,7 @@ class TestSectorLocking:
 
     def test_lock_sector_read_failure(self):
         """Should fail when trailer read fails."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -974,7 +991,7 @@ class TestSectorLocking:
 
     def test_lock_sector_write_failure(self):
         """Should fail when trailer write fails."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\\xAA\\xBB\\xCC\\xDD"
         handler = MifareClassicHandler(uid)
@@ -994,7 +1011,7 @@ class TestSectorLocking:
 
     def test_lock_sector_trailer_structure(self):
         """Should write correct trailer structure."""
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         
         uid = b"\xAA\xBB\xCC\xDD"
         handler = MifareClassicHandler(uid)

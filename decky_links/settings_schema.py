@@ -105,6 +105,13 @@ SOURCE_RULES: Dict[str, Dict[str, Rule]] = {
         "device_path": Rule((str,), _is_dev_path, "a path under /dev/"),
         "baudrate": Rule((int,), _in_range(1200, 1_000_000), "1200-1000000"),
         "polling_interval": Rule((int, float), _in_range(0.1, 10.0), "0.1-10.0 seconds"),
+        # How long a tag must be continuously absent before removal is
+        # reported. A duration rather than a count of missed polls: a count is
+        # silently re-scaled by every change to polling_interval, so the same
+        # number meant a different delay depending on an unrelated setting.
+        "removal_grace_seconds": Rule(
+            (int, float), _in_range(0.1, 10.0), "0.1-10.0 seconds"
+        ),
         "reader_type": Rule(
             (str,), lambda v: v in READER_TYPES, f"one of {', '.join(READER_TYPES)}"
         ),

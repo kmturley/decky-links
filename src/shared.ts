@@ -19,6 +19,10 @@ export interface Settings {
             device_path: string;
             baudrate: number;
             polling_interval: number;
+            /** Seconds a tag must be continuously absent before it counts as
+             *  removed. A duration, not a count of missed polls, so changing
+             *  polling_interval does not silently change removal timing. */
+            removal_grace_seconds?: number;
             reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
         };
         storage?: { enabled: boolean; drive_kinds?: Record<string, boolean> };
@@ -210,6 +214,7 @@ export type SettingKey =
   | "device_path"
   | "baudrate"
   | "polling_interval"
+  | "removal_grace_seconds"
   | "reader_type";
 
 export const sharedState: SharedState = {

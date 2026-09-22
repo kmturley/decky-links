@@ -66,6 +66,7 @@ class SettingsManager:
                     "device_path": self._get_default_device_path(),
                     "baudrate": 115200,
                     "polling_interval": 0.5,
+                    "removal_grace_seconds": 0.6,
                     "reader_type": "pn532_uart",
                 },
                 "storage": {

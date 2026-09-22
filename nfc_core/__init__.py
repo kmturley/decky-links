@@ -4,8 +4,8 @@ This module provides NFC reader abstractions and tag handlers for the
 Decky Links plugin.
 """
 
-from nfc.reader import Reader, PN532UARTReader
-from nfc.key_manager import KeyManager
+from nfc_core.reader import Reader, PN532UARTReader
+from nfc_core.key_manager import KeyManager
 
 __all__ = [
     'Reader',

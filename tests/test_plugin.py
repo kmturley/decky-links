@@ -421,6 +421,16 @@ class TestFindSerialPort:
 
 class TestReaderInit:
 
+    # Classification reads ATQA/SAK from ISO 14443-3 anticollision, which every
+    # Type A tag announces before a single command is sent to it. The old
+    # approach — trying a Mifare authentication and inferring the family from
+    # whether it worked — destroyed the session it was probing, so only the
+    # first key in a list could ever succeed and an NTAG came back as DESFire.
+
+    def _target(self, uid, sak=None, atqa=None, protocol="106A"):
+        from nfc_core.reader import TargetInfo
+        return TargetInfo(uid=uid, sak=sak, atqa=atqa, protocol=protocol)
+
     def test_classify_tag_reports_types(self, plugin, uid_bytes):
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
         plugin.nfc_source._reader.mifare_classic_read_block.return_value = b"\x00"
@@ -429,43 +439,124 @@ class TestReaderInit:
         assert meta["type"] == "ntag21x"
         assert meta["capacity_bytes"] > 0
 
-    def test_classify_felica_by_length(self, plugin):
+    def test_classify_mifare_classic_1k_from_sak(self, plugin):
+        uid = b"\xDE\xAD\xBE\xEF"
+        meta = plugin.nfc_source._classify_tag(
+            uid, self._target(uid, sak=0x08, atqa=0x0004)
+        )
+        assert meta["type"] == "mifare-classic"
+        assert meta["capacity_bytes"] > 0
+        assert meta["ndef_capable"] is True
+
+    def test_classify_mifare_classic_4k_from_sak(self, plugin):
+        uid = b"\xDE\xAD\xBE\xEE"
+        meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x18))
+        assert meta["type"] == "mifare-classic"
+        assert "4K" in meta["label"]
+
+    def test_classify_desfire_from_sak_and_atqa(self, plugin):
+        """SAK 0x20 is any ISO 14443-4 card; ATQA 0x0344 pins it to DESFire."""
+        uid = b"\x04\x02\x03\x04\x05\x06\x07"
+        meta = plugin.nfc_source._classify_tag(
+            uid, self._target(uid, sak=0x20, atqa=0x0344)
+        )
+        assert meta["type"] == "desfire"
+        # Nothing this plugin can store a link on, and it must say so rather
+        # than letting the tag be reported as blank and pairable.
+        assert meta["ndef_capable"] is False
+
+    def test_classify_ntag_uses_get_version_for_the_exact_model(self, plugin):
+        """SAK 0x00 covers NTAG and Ultralight alike; GET_VERSION separates them."""
+        uid = b"\x04\x02\x03\x04\x05\x06\x07"
+        plugin.nfc_source._reader.get_version.return_value = bytes(
+            [0x00, 0x04, 0x04, 0x02, 0x01, 0x00, 0x11, 0x03]   # NTAG215
+        )
+        meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x00))
+        assert meta["type"] == "ntag21x"
+        assert meta["label"] == "NTAG215"
+        assert meta["capacity_bytes"] == 504
+
+    def test_classify_ntag213_and_216_by_storage_size(self, plugin):
+        for storage, model, size in (
+            (0x0F, "NTAG213", 144),
+            (0x13, "NTAG216", 888),
+        ):
+            uid = bytes([0x04, 0x02, 0x03, 0x04, 0x05, 0x06, storage])
+            plugin.nfc_source._reader.get_version.return_value = bytes(
+                [0x00, 0x04, 0x04, 0x02, 0x01, 0x00, storage, 0x03]
+            )
+            meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x00))
+            assert meta["label"] == model
+            assert meta["capacity_bytes"] == size
+
+    def test_classify_ultralight_ev1_from_get_version(self, plugin):
+        uid = b"\x04\x0A\x03\x04\x05\x06\x07"
+        plugin.nfc_source._reader.get_version.return_value = bytes(
+            [0x00, 0x04, 0x03, 0x01, 0x01, 0x00, 0x0B, 0x03]   # MF0UL11
+        )
+        meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x00))
+        assert meta["type"] == "ultralight"
+        assert meta["capacity_bytes"] == 48
+
+    def test_classify_falls_back_to_capability_container(self, plugin):
+        """An original Ultralight NAKs GET_VERSION; the CC still gives a size."""
+        uid = b"\x04\x0B\x03\x04\x05\x06\x07"
+        plugin.nfc_source._reader.get_version.return_value = None
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = bytes(
+            [0xE1, 0x10, 0x12, 0x00]
+        )
+        meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x00))
+        assert meta["capacity_bytes"] == 144
+
+    def test_classify_iso14443b_from_protocol(self, plugin):
+        uid = b"\x01\x02\x03\x04"
+        meta = plugin.nfc_source._classify_tag(
+            uid, self._target(uid, protocol="106B")
+        )
+        assert meta["type"] == "iso14443b"
+
+    def test_classify_felica_from_protocol(self, plugin):
         uid = b"\x01\x02\x03\x04\x05\x06\x07\x08"
-        meta = plugin.nfc_source._classify_tag(uid)
+        meta = plugin.nfc_source._classify_tag(
+            uid, self._target(uid, protocol="212F")
+        )
         assert meta["type"] == "felica"
         assert meta["capacity_bytes"] == 0
 
-    def test_classify_iso15693_by_uid_prefix(self, plugin):
-        uid = b"\xE0\x01\x02\x03\x04\x05\x06\x07"
-        meta = plugin.nfc_source._classify_tag(uid)
-        assert meta["type"] == "iso15693"
+    def test_classify_flags_a_random_uid(self, plugin):
+        """A UID beginning 0x08 is regenerated every tap, so it cannot pair."""
+        uid = b"\x08\x11\x22\x33"
+        meta = plugin.nfc_source._classify_tag(uid, self._target(uid, sak=0x20))
+        assert meta["random_uid"] is True
 
-    def test_classify_iso14443b_by_length(self, plugin):
-        uid = b"\x01\x02\x03\x04"
-        plugin.nfc_source._reader.read_uid_iso14443b = MagicMock(return_value=uid)
-        meta = plugin.nfc_source._classify_tag(uid)
-        assert meta["type"] == "iso14443b"
+    def test_classify_stable_uid_is_not_flagged_random(self, plugin, uid_bytes):
+        meta = plugin.nfc_source._classify_tag(
+            uid_bytes, self._target(uid_bytes, sak=0x08)
+        )
+        assert meta["random_uid"] is False
 
-    def test_classify_ultralight_by_uid_length(self, plugin):
-        uid = b"\x01\x02\x03\x04\x05\x06\x07"
-        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
-        plugin.nfc_source._reader.mifare_classic_read_block.return_value = b"\x00"
-        meta = plugin.nfc_source._classify_tag(uid)
-        assert meta["type"] == "ultralight"
+    def test_classify_without_sak_probes_non_destructively(self, plugin):
+        """A backend that cannot report SAK reads the CC before trying a key.
 
-    def test_classify_mifare_classic_authenticated(self, plugin):
-        uid = b"\xDE\xAD\xBE\xEF"
+        Page 3 of a Mifare Classic is a sector trailer and refuses an
+        unauthenticated read, so the CC probe is safe to run first and the
+        authentication probe only happens when it says nothing.
+        """
+        uid = b"\x04\x0C\x03\x04\x05\x06\x07"
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = bytes(
+            [0xE1, 0x10, 0x3E, 0x00]
+        )
+        meta = plugin.nfc_source._classify_tag(uid)
+        assert meta["type"] == "ntag21x"
+        plugin.nfc_source._reader.mifare_classic_authenticate_block.assert_not_called()
+
+    def test_classify_without_sak_falls_through_to_classic(self, plugin):
+        uid = b"\xDE\xAD\xBE\xED"
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = None
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = True
         meta = plugin.nfc_source._classify_tag(uid)
         assert meta["type"] == "mifare-classic"
         assert meta["capacity_bytes"] > 0
-
-    def test_classify_desfire_fallback(self, plugin):
-        uid = b"\x01\x02\x03\x04\x05\x06\x07"
-        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
-        plugin.nfc_source._reader.mifare_classic_read_block.side_effect = Exception("No page 4")
-        meta = plugin.nfc_source._classify_tag(uid)
-        assert meta["type"] == "desfire"
 
     @pytest.mark.asyncio
     async def test_nfc_source_start_success(self, mock_decky, tmp_path):
@@ -661,13 +752,16 @@ class TestReaderInit:
         ])
 
     def test_classify_tag_protected_flag(self, plugin, uid_bytes):
+        """Neither the CC nor any known key opens it: protected, not blank."""
         def boom(*args, **kwargs):
             raise RuntimeError("locked")
+        plugin.nfc_source._reader.ntag2xx_read_block.side_effect = boom
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
         plugin.nfc_source._reader.mifare_classic_read_block.side_effect = boom
         meta = plugin.nfc_source._classify_tag(uid_bytes)
         assert meta.get("capacity_bytes") == 0
         assert meta.get("protected") is True
+        assert meta.get("ndef_capable") is False
 
     def test_read_ndef_uri_on_ntag_detects_and_parses(self, plugin, uid_bytes):
         plugin.nfc_source._reader.read_uid.return_value = uid_bytes
@@ -1183,17 +1277,24 @@ class TestNTAGCapacityDetection:
     def test_ntag216(self, plugin):
         assert len(self._cc(plugin, bytes([0xE1, 0x10, 0x6D, 0x00]))) * 4 == 872
 
-    def test_unreadable_cc_falls_back_to_the_old_assumption(self, plugin):
+    def test_unreadable_cc_falls_back_to_ntag215_user_memory(self, plugin):
         """Wrong only for tags that already could not tell us anything, and
-        refusing to write at all would be worse."""
-        assert len(self._cc(plugin, None)) == 130
+        refusing to write at all would be worse.
+
+        126 pages, not the 130 this used to assume: user memory on an NTAG215
+        ends at page 129, and pages 130-133 are the dynamic lock bytes and
+        configuration pages, where a write can permanently change how the tag
+        can be accessed."""
+        pages = self._cc(plugin, None)
+        assert len(pages) == 126
+        assert pages[-1] == 129
 
     def test_non_ndef_magic_falls_back(self, plugin):
-        assert len(self._cc(plugin, bytes([0x00, 0x00, 0x12, 0x00]))) == 130
+        assert len(self._cc(plugin, bytes([0x00, 0x00, 0x12, 0x00]))) == 126
 
     def test_implausible_size_falls_back(self, plugin):
         """A misread claiming a tag bigger than any NTAG is a misread."""
-        assert len(self._cc(plugin, bytes([0xE1, 0x10, 0xFF, 0x00]))) == 130
+        assert len(self._cc(plugin, bytes([0xE1, 0x10, 0xFF, 0x00]))) == 126
 
     def test_capability_container_is_read_once_per_tag(self, plugin):
         """Classification and the NDEF read both need the page range. Without a
@@ -1250,6 +1351,11 @@ class TestNTAGCapacity:
     def test_write_skips_mifare_trailer_blocks(self, plugin):
         uid = _make_uid()
         uri = "https://" + "x" * 72
+        # A real Classic refuses an unauthenticated read of page 3 (a sector
+        # trailer), which is how the capability-container probe tells a
+        # Classic from an NTAG without authenticating anything first.
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = None
+        plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = True
         plugin.nfc_source._reader.mifare_classic_write_block.reset_mock()
 
         success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
@@ -1311,6 +1417,7 @@ class TestNTAG21xSupport:
 
     def test_classic_capacity_detection_blocks(self, plugin):
         uid = _make_uid()
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = None
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = True
         with patch.object(plugin.nfc_source, "_iter_mifare_data_blocks", return_value=[4, 5]):
             long_uri = "https://" + "x" * 100
@@ -1320,6 +1427,7 @@ class TestNTAG21xSupport:
 
     def test_classic_capacity_allows_small_write(self, plugin):
         uid = _make_uid()
+        plugin.nfc_source._reader.ntag2xx_read_block.return_value = None
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = True
         with patch.object(plugin.nfc_source, "_iter_mifare_data_blocks", return_value=[4, 5, 6]):
             uri = "https://ok"
@@ -1331,7 +1439,9 @@ class TestNTAG21xSupport:
         uid = _make_uid()
         plugin.nfc_source._reader.mifare_classic_authenticate_block.return_value = False
         with patch.object(plugin.nfc_source, "_iter_ntag_pages", return_value=[4, 5]):
-            uri = "https://"
+            # Two pages is 8 bytes, which is exactly what a bare "https://"
+            # needs once prefix-abbreviated, so use something that overflows.
+            uri = "https://example.com/a/longer/path"
             success, err = plugin.nfc_source.write_ndef_uri(uid, uri)
         assert success is False
         assert "tag too small" in (err or "").lower()
@@ -1450,7 +1560,7 @@ class TestKeyManagement:
 
     @pytest.mark.asyncio
     async def test_key_manager_persistence(self, plugin, tmp_path):
-        from nfc.key_manager import KeyManager
+        from nfc_core.key_manager import KeyManager
         keys_path = tmp_path / "keys.json"
         km1 = KeyManager(str(keys_path))
         km1.set_key("DEADBEEFCAFE", "FFFFFFFFFFFF", "D3F7D3F7D3F7")
@@ -1460,7 +1570,7 @@ class TestKeyManagement:
 
     @pytest.mark.asyncio
     async def test_mifare_handler_uses_custom_keys(self, plugin):
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         uid     = b"\\xDEADBEEFCAFE"
         uid_hex = uid.hex().upper()
         plugin.key_manager.set_key(uid_hex, "A0A1A2A3A4A5", "B0B1B2B3B4B5")
@@ -1472,7 +1582,7 @@ class TestKeyManagement:
 
     @pytest.mark.asyncio
     async def test_mifare_handler_without_custom_keys(self, plugin):
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         uid     = b"\\xDEADBEEFCAFE"
         handler = MifareClassicHandler(uid, plugin.key_manager)
         keys    = handler._get_keys_to_try()
@@ -1794,11 +1904,99 @@ class TestPerSourceMediaIsolation:
         assert by_type["storage"]["media_id"] == "/dev/sdb1"
 
     @pytest.mark.asyncio
-    async def test_manual_launch_is_not_attributed_to_any_medium(self, plugin, mock_decky):
-        """A game the user started by hand must not be quit by removing a tag."""
+    async def test_a_hand_started_game_is_adopted_by_a_medium_naming_it(self, plugin, mock_decky):
+        """Presenting a tag for the running game makes it that tag's game.
+
+        This used to be refused: a launch with no preceding claim was
+        attributed to nothing, so lifting the tag did nothing. But with
+        auto-launch off the plugin only opens the game's page and the user
+        presses Play, which produces exactly this shape — every launch that
+        way was unquittable. Filling a vacancy can never take a game from the
+        medium that really started it, only give an unowned one away.
+        """
         plugin.is_pairing = False
         await plugin.set_running_game(400)          # no preceding media load
+        assert plugin._registry.launch_origin is None
 
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        assert plugin._registry.launch_origin is not None
+        assert plugin._registry.launch_origin["media_id"] == "DEADBEEF"
+
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(_make_unload_event("DEADBEEF"))
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" in emitted
+
+    @pytest.mark.asyncio
+    async def test_a_medium_naming_a_different_game_does_not_adopt_it(self, plugin, mock_decky):
+        """Adoption matches on app id. A tag for another game is still a tag
+        for another game, and removing it must not quit what is running."""
+        plugin.is_pairing = False
+        await plugin.set_running_game(400)
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/999")
+            )
+        assert plugin._registry.launch_origin is None
+
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(_make_unload_event("DEADBEEF"))
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" not in emitted
+
+    @pytest.mark.asyncio
+    async def test_adoption_never_steals_from_the_medium_that_launched(self, plugin, mock_decky):
+        """Two media naming the same game: the one that launched it keeps it."""
+        plugin.is_pairing = False
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("AAAAAAAA", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+        assert plugin._registry.launch_origin["media_id"] == "AAAAAAAA"
+
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_storage_load_event("/dev/sdb1", uri="steam://rungameid/400")
+            )
+
+        assert plugin._registry.launch_origin["media_id"] == "AAAAAAAA"
+
+    @pytest.mark.asyncio
+    async def test_attribution_survives_a_reader_reconnect(self, plugin, mock_decky):
+        """A reader that drops and returns must not disable auto-close.
+
+        DISCONNECTED cannot tell a real unplug from a momentary glitch, and
+        dropping the claim there meant one hiccup after launch silently
+        disabled auto-close for the rest of the session — the tag came back,
+        but a claim is only made while no game is running.
+        """
+        from sources.base import SourceEvent, SourceEventKind, SourceType
+
+        plugin.is_pairing = False
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+        assert plugin._registry.launch_origin["media_id"] == "DEADBEEF"
+
+        await plugin._handle_source_event(SourceEvent(
+            kind=SourceEventKind.DISCONNECTED,
+            source_type=SourceType.NFC,
+            source_id="nfc:/dev/ttyUSB0",
+        ))
+        assert plugin._registry.launch_origin is not None, (
+            "a transient disconnect must not destroy attribution"
+        )
+
+        # Reader returns, same tag, then the user lifts it.
         with patch.object(plugin, "_play_sound"):
             await plugin._handle_media_load(
                 _make_load_event("DEADBEEF", uri="steam://rungameid/400")
@@ -1807,7 +2005,30 @@ class TestPerSourceMediaIsolation:
         await plugin._handle_media_unload(_make_unload_event("DEADBEEF"))
 
         emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
-        assert "card_removed_during_game" not in emitted
+        assert "card_removed_during_game" in emitted
+
+    @pytest.mark.asyncio
+    async def test_attribution_survives_a_flickering_app_id(self, plugin, mock_decky):
+        """A launcher or Proton prefix makes the running app id vanish and
+        come back. That used to clear the claim permanently."""
+        plugin.is_pairing = False
+        with patch.object(plugin, "_play_sound"):
+            await plugin._handle_media_load(
+                _make_load_event("DEADBEEF", uri="steam://rungameid/400")
+            )
+        await plugin.set_running_game(400)
+
+        await plugin.set_running_game(None)   # app id flickers away
+        await plugin.set_running_game(400)    # …and comes back
+
+        assert plugin._registry.launch_origin is not None
+        assert plugin._registry.launch_origin["media_id"] == "DEADBEEF"
+
+        mock_decky.emit.reset_mock()
+        await plugin._handle_media_unload(_make_unload_event("DEADBEEF"))
+
+        emitted = [c.args[0] for c in mock_decky.emit.call_args_list]
+        assert "card_removed_during_game" in emitted
 
     @pytest.mark.asyncio
     async def test_launch_origin_survives_frontend_reporting_first(self, plugin, mock_decky):

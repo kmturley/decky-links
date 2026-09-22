@@ -88,7 +88,7 @@ def plugin(tmp_path):
     """
     # Import after mocks are in place
     from main import Plugin, PluginState, SettingsManager
-    from nfc.key_manager import KeyManager
+    from nfc_core.key_manager import KeyManager
 
     p = Plugin()
 

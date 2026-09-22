@@ -95,6 +95,27 @@ class MediaRegistry:
         elif appid != previous_appid:
             self._launch_origin = None
 
+    def adopt_launch(self, source_id: str, media_id: str) -> bool:
+        """Attribute the running game to this medium, but only if nothing owns it.
+
+        Attribution is otherwise write-once per launch, and it is lost by
+        events that have nothing to do with the user: a reader that drops and
+        reconnects, or a running app id that flickers to nothing and back —
+        which is what a game with a launcher or a Proton prefix looks like
+        from the frontend's poll. Once lost it could never be regained,
+        because a claim is only made when no game is running. The medium then
+        sat on the reader owning nothing, and lifting it did nothing, for the
+        rest of the session.
+
+        Filling a vacancy is safe in a way that reassignment would not be:
+        this can never take a game away from the medium that really started
+        it, only give an unowned game to a medium that names it.
+        """
+        if self._launch_origin is not None:
+            return False
+        self._launch_origin = {"source_id": source_id, "media_id": media_id}
+        return True
+
     def clear_launch(self) -> None:
         self._launch_origin = None
         self._pending_launch_origin = None

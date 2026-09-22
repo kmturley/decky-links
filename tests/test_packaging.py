@@ -76,7 +76,7 @@ def test_vendored_packages_all_exist():
         )
 
 
-@pytest.mark.parametrize("name", ["sources", "nfc", "cards", "decky_links"])
+@pytest.mark.parametrize("name", ["sources", "nfc_core", "cards", "decky_links"])
 def test_known_local_packages_are_vendored(name):
     """Pinned explicitly so removing a cp line is a test failure, not a silent
     change that only shows up on a device."""
