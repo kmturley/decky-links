@@ -5,9 +5,10 @@ point of most of these is not that the code does something but that it stops
 doing something it used to.
 """
 
+import asyncio
 import time
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from nfc_core import ndef_codec, tag_identity
 from nfc_core.reader import (
@@ -1093,3 +1094,116 @@ class TestAutopollTimeoutAndFallback:
         reader.read_target(timeout=0.2)
         assert reader._autopoll_failures == 0
         assert reader._autopoll_unsupported is False
+
+
+# ── Faults reach the panel, not just the log ─────────────────────────────
+
+
+def _run(coro):
+    """Drive a coroutine without disturbing the loop.
+
+    Not ``asyncio.run``: it closes the loop it made and leaves no current one,
+    and on Python 3.9 — which is what the Deck ships — ``asyncio.Queue()``
+    binds to ``get_event_loop()`` at construction. One ``asyncio.run`` here
+    made every later fixture in the suite fail to build its queue.
+    """
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+class TestFaultsAreReported:
+    """``start()`` returns a bare bool, so every reason a source failed to come
+    up was discarded at the point it was known. The panel drew "Not connected"
+    for all of them alike — a port held by a stale backend, a reader unplugged,
+    a reader in the wrong mode — and the only description of what had actually
+    happened was a line in a log file on the Deck. Only one of those three is
+    fixed by plugging the reader back in.
+    """
+
+    def test_a_busy_port_names_itself(self, tmp_path):
+        import os
+        path = tmp_path / "ttyFAKE"
+        first_fd = os.open(str(path), os.O_CREAT | os.O_RDWR)
+
+        first = make_reader()
+        first.uart = os.fdopen(first_fd, "r+b", buffering=0)
+        assert first._lock_port() is True
+
+        second = make_reader()
+        second_fd = os.open(str(path), os.O_RDWR)
+        second.uart = os.fdopen(second_fd, "r+b", buffering=0)
+        try:
+            assert second._lock_port() is False
+            assert second.last_error is not None
+            assert second.last_error["code"] == "port_busy"
+            # The message has to say what to *do*. "Resource temporarily
+            # unavailable" — which is what pyserial's own exclusive=True
+            # produced here — tells the user nothing they can act on.
+            assert "restart the plugin loader" in second.last_error["message"].lower()
+        finally:
+            first.uart.close()
+            try:
+                second.uart.close()
+            except Exception:
+                pass
+
+    def test_pyserial_does_not_take_the_lock_first(self):
+        """``exclusive=True`` makes pyserial's constructor take the same flock
+        and raise before ``_lock_port`` runs, so the busy case can never be
+        named — the user gets "Resource temporarily unavailable" and no
+        indication of who holds the port. TIOCEXCL exempts root and this plugin
+        runs as root, so it was never what held the port anyway."""
+        import serial
+        reader = PN532UARTReader("/dev/ttyFAKE", 115200, logger=MagicMock())
+        with patch.object(serial, "Serial", MagicMock()) as opened:
+            reader._connect_blocking()
+        assert opened.call_args is not None, "the port was never opened"
+        assert "exclusive" not in opened.call_args.kwargs, (
+            "pyserial must not take the lock — _lock_port does, so that a busy "
+            "port can be reported as one"
+        )
+
+    def test_a_connect_failure_reaches_the_source(self):
+        source = make_source()
+        reader = MagicMock()
+        reader.connect = AsyncMock(return_value=False)
+        reader.last_error = {"code": "port_busy", "message": "Held by something else."}
+
+        with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
+             patch("os.path.exists", return_value=True):
+            assert _run(source.start()) is False
+
+        assert source.last_error() == {
+            "code": "port_busy",
+            "message": "Held by something else.",
+        }
+
+    def test_a_reader_reporting_nothing_still_gets_a_message(self):
+        source = make_source()
+        reader = MagicMock()
+        reader.connect = AsyncMock(return_value=False)
+        reader.last_error = None
+
+        with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
+             patch("os.path.exists", return_value=True):
+            assert _run(source.start()) is False
+
+        assert source.last_error()["code"] == "connect_failed"
+        assert source.last_error()["message"]
+
+    def test_success_clears_a_previous_fault(self):
+        source = make_source()
+        source.set_error("port_busy", "stale")
+
+        reader = MagicMock()
+        reader.connect = AsyncMock(return_value=True)
+
+        with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
+             patch("os.path.exists", return_value=True):
+            assert _run(source.start()) is True
+
+        assert source.last_error() is None, (
+            "a fault must not outlive the condition that caused it"
+        )
+
+    def test_a_healthy_source_reports_no_fault(self):
+        assert make_source().last_error() is None

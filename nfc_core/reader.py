@@ -346,6 +346,12 @@ class PN532UARTReader(Reader):
         # Consecutive InAutoPoll failures on this connection.
         self._autopoll_failures = 0
         self._last_target: Optional[TargetInfo] = None
+        # Why the last connect() failed, as {"code", "message"}, for the source
+        # to hand to the panel. connect() returns a bare bool, and "the port is
+        # held by another copy of this plugin" needs a different response from
+        # the user than "no reader is plugged in" — so the reason has to
+        # survive the call rather than only reaching the log.
+        self.last_error: Optional[dict] = None
 
     # ── Connection lifecycle ────────────────────────────────────────────
 
@@ -379,16 +385,24 @@ class PN532UARTReader(Reader):
             self.close()  # closing the port causes in_waiting/write to raise
 
         timer = threading.Timer(5.0, _on_timeout)
+        # Cleared per attempt, so a reason recorded by a previous failure can
+        # never be reported for this one.
+        self.last_error = None
         try:
             self.uart = serial.Serial(
                 self.device_path,
                 baudrate=self.baudrate,
                 timeout=0.1,
                 write_timeout=0.5,
-                # TIOCEXCL. Worth setting, but not sufficient on its own: the
-                # plugin runs as root, and root is exempt. The flock below is
-                # what actually holds the line.
-                exclusive=True,
+                # Deliberately *not* exclusive=True. That sets TIOCEXCL and
+                # additionally takes pyserial's own flock — which meant
+                # pyserial raised first and _lock_port() below never ran, so a
+                # port held by a stale backend surfaced as the constructor's
+                # "Could not exclusively lock port" with no indication of who
+                # was holding it or what to do about it. TIOCEXCL exempts
+                # root, and this plugin runs as root, so it was never the
+                # thing protecting the port anyway: the flock is. Taking it
+                # ourselves is what lets the failure be named.
             )
             if not self._lock_port():
                 return False
@@ -398,6 +412,16 @@ class PN532UARTReader(Reader):
             timer.start()
             self._reader = PN532_UART(self.uart, debug=False)
             if timed_out[0]:
+                # The port opened but nothing answered the PN532 handshake.
+                # Almost always the wrong port — a USB-serial adapter that is
+                # not a reader enumerates identically.
+                self.last_error = {
+                    "code": "no_response",
+                    "message": (
+                        f"No NFC reader answered on {self.device_path}. Check "
+                        f"the reader is plugged in and set to UART mode."
+                    ),
+                }
                 return False
 
             timer.cancel()
@@ -414,6 +438,14 @@ class PN532UARTReader(Reader):
         except Exception as e:
             if self.logger:
                 self.logger.error(f"PN532UARTReader.connect failed: {e}")
+            # Only if _lock_port() has not already said something more
+            # specific — "the port is busy" outranks the generic open failure
+            # it would otherwise be reported as.
+            if self.last_error is None:
+                self.last_error = {
+                    "code": "open_failed",
+                    "message": f"Could not open {self.device_path}: {e}",
+                }
             self.close()
             return False
         finally:
@@ -463,6 +495,14 @@ class PN532UARTReader(Reader):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except OSError:
+            self.last_error = {
+                "code": "port_busy",
+                "message": (
+                    f"{self.device_path} is already in use by another copy of "
+                    f"this plugin. Restart the plugin loader from Decky's "
+                    f"settings to clear it."
+                ),
+            }
             if self.logger:
                 self.logger.error(
                     f"{self.device_path} is already in use by another instance "

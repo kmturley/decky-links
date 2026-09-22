@@ -1773,6 +1773,12 @@ class Plugin:
                 # instead of asking specifically about the NFC reader.
                 "can_pair": source.can_write(),
                 "enabled": source.is_enabled(),
+                # Why the hardware is not working, when it is not. The panel
+                # drew "Not connected" for every cause alike, so a reader whose
+                # port was held by a stale backend was indistinguishable from
+                # one that had been unplugged — and only one of those is fixed
+                # by plugging it back in. None when the source is healthy.
+                "error": source.last_error(),
             }
             # Storage is one source covering several kinds of drive, and the
             # panel shows a row per kind — so it needs presence per kind, not

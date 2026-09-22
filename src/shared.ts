@@ -91,6 +91,15 @@ export interface DriveKindStatus {
     enabled: boolean;
 }
 
+/** A named reason a source is down. */
+export interface SourceError {
+    /** Stable identifier: "port_busy", "no_device", "no_response",
+     *  "open_failed", "unsupported_reader", "connect_failed". */
+    code: string;
+    /** One sentence for the user, naming what to do rather than what failed. */
+    message: string;
+}
+
 export interface SourceStatus {
     source_id: string;
     source_type: SourceType;
@@ -107,6 +116,12 @@ export interface SourceStatus {
     /** Storage only: one source covers several kinds of drive, and the panel
      *  shows a row per kind. */
     drive_kinds?: Record<string, DriveKindStatus>;
+    /** Why the hardware is not working, when the backend knows. Absent or null
+     *  when it is fine. The row shows `message` in place of "Not connected",
+     *  because that phrase described a stale serial port, an unplugged reader
+     *  and a reader in the wrong mode identically — and the user's next move
+     *  is different for each one. `code` is stable and safe to branch on. */
+    error?: SourceError | null;
 }
 
 export interface ReaderStatus {

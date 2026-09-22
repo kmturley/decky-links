@@ -9,6 +9,7 @@ import {
   setSourceSetting,
   formatMedia,
   type ActiveMedium,
+  type SourceError,
   type SourceStatus,
 } from "../shared";
 import { isSameLaunchTarget } from "./steamIds";
@@ -190,6 +191,11 @@ export interface MediaState {
   /** The action erases the medium, so the row asks before doing it. Only ever
    *  set for a disk the backend flagged as carrying no filesystem. */
   destructive?: boolean;
+  /** A second line under `text`, explaining a state that needs more than a
+   *  label. Used for a named hardware fault: the message ends in the thing to
+   *  do about it, which is the part worth showing, and it is far too long to
+   *  sit on the one line `text` gets. */
+  detail?: string;
 }
 
 /** Reduce a trigger's hardware + medium into the one line the UI shows.
@@ -204,8 +210,15 @@ export function mediaStateFor(
   medium: ActiveMedium | undefined,
   target: { uri: string; label: string } | null,
   armed = false,
+  error?: SourceError | null,
 ): MediaState {
-  if (!connected) return { text: "Not connected", action: null, dim: true };
+  // A named fault outranks "Not connected", which is true of every one of them
+  // and useful for none: a port held by a stale backend, a reader unplugged and
+  // a reader in the wrong mode all reached the panel as that one phrase, so the
+  // only way to tell them apart was to read the plugin log on the Deck.
+  if (!connected) {
+    return { text: "Not connected", detail: error?.message, action: null, dim: true };
+  }
 
   if (!medium) {
     if (armed) {

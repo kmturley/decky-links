@@ -161,6 +161,39 @@ class MediaSource(ABC):
         """
         return self.is_active()
 
+    # ── Fault reporting ────────────────────────────────────────────────
+    #
+    # ``start()`` returns a bare bool, so every reason a source failed to come
+    # up was discarded at the point it was known. The manager retried on a
+    # timer, the panel drew "Not connected", and the only description of what
+    # had actually gone wrong was a line in a log file on the Deck. A reader
+    # whose port is held by a stale backend and a reader that is unplugged look
+    # identical there, and only one of them is fixed by plugging it back in.
+    #
+    # ``code`` is for the UI to branch on and must stay stable; ``message`` is
+    # one sentence shown to the user, so it names the thing to do rather than
+    # the call that failed.
+
+    def last_error(self) -> Optional[Dict[str, str]]:
+        """Why this source is not working, or ``None`` if it is."""
+        return getattr(self, "_source_error", None)
+
+    def set_error(self, code: str, message: str) -> None:
+        """Record why the source is down. Cleared by :meth:`clear_error`."""
+        self._source_error: Optional[Dict[str, str]] = {
+            "code": code,
+            "message": message,
+        }
+
+    def clear_error(self) -> None:
+        """Forget any recorded fault.
+
+        Called on every successful start, not only where one was set, so a
+        fault cannot outlive the condition that caused it and leave the panel
+        reporting a reader that is now working.
+        """
+        self._source_error = None
+
     def sub_devices(self) -> Dict[str, Dict[str, bool]]:
         """Per-category presence and enablement, for sources covering several.
 

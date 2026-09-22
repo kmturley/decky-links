@@ -45,7 +45,7 @@ const TriggerLine: FC<{
   const status = statusFor(row, statuses);
   const connected = isRowConnected(row, status);
   const medium = mediumFor(row, media);
-  const state = mediaStateFor(row, connected, medium, target, armed);
+  const state = mediaStateFor(row, connected, medium, target, armed, status?.error);
 
   // Unlike the Quick Access panel, a connected row is normally pairable here
   // even with nothing on it: the modal is where you tap a tag you have not

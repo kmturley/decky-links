@@ -282,6 +282,12 @@ class NfcSource(MediaSource):
                 f"(configured {self._settings.get('device_path')!r} not present; "
                 f"ports seen: {seen})",
             )
+            self.set_error(
+                "no_device",
+                f"No NFC reader found. Plug one in, or set the port in "
+                f"Settings (looked for "
+                f"{self._settings.get('device_path') or 'a USB serial port'}).",
+            )
             return None
 
         chosen = candidates[0]
@@ -313,17 +319,28 @@ class NfcSource(MediaSource):
                 # device to reappear instead of jumping to a different port
                 # (which could be a completely different device, e.g. ttyACM0).
                 if not os.path.exists(self._last_good_path):
+                    self.set_error(
+                        "no_device",
+                        f"The NFC reader at {self._last_good_path} was "
+                        f"unplugged. Reconnect it to carry on.",
+                    )
                     return False
                 path = self._last_good_path
             else:
                 path = self._find_serial_port() or ""
         if not path:
+            # _find_serial_port has already named the reason.
             return False
         self._effective_path = path
 
         reader = await self._create_reader()
         if not reader:
             self._reader = None
+            self.set_error(
+                "unsupported_reader",
+                f"Reader type {self._settings.get('reader_type')!r} could not "
+                f"be initialised. Its Python support may not be installed.",
+            )
             return False
 
         connected = await reader.connect()
@@ -333,6 +350,21 @@ class NfcSource(MediaSource):
                 f"NfcSource: reader init failed on {path}: unable to connect",
             )
             self._reader = None
+            # The reader knows which of several quite different things went
+            # wrong — a busy port, a silent device, a failed open — and the
+            # user's next move differs for each. Fall back to the generic
+            # message only for a backend that reports nothing.
+            detail = getattr(reader, "last_error", None)
+            if isinstance(detail, dict) and detail.get("message"):
+                self.set_error(
+                    str(detail.get("code") or "connect_failed"),
+                    str(detail["message"]),
+                )
+            else:
+                self.set_error(
+                    "connect_failed",
+                    f"Could not start the NFC reader on {path}.",
+                )
             return False
 
         if self._logger:
@@ -342,6 +374,7 @@ class NfcSource(MediaSource):
             )
         # Let the next failure speak up, however many times we retried to get here.
         self._last_log_key = None
+        self.clear_error()
         self._reader = reader
         self._last_good_path = self._effective_path
         self._protocol_errors = 0
