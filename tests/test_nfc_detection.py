@@ -994,11 +994,11 @@ class TestSerialPortExclusivity:
 
 
 class TestStopReleasesThePollThread:
-    def test_stop_sets_the_flag_before_touching_the_reader(self):
+    @pytest.mark.asyncio
+    async def test_stop_sets_the_flag_before_touching_the_reader(self):
         reader = MagicMock(spec=["read_target", "supports_target_info", "read_uid", "close"])
         source = make_source(reader)
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(source.stop())
+        await source.stop()
         assert source._stopping is True
 
     def test_a_poll_in_flight_gives_up_once_stopping(self):
@@ -1099,17 +1099,6 @@ class TestAutopollTimeoutAndFallback:
 # ── Faults reach the panel, not just the log ─────────────────────────────
 
 
-def _run(coro):
-    """Drive a coroutine without disturbing the loop.
-
-    Not ``asyncio.run``: it closes the loop it made and leaves no current one,
-    and on Python 3.9 — which is what the Deck ships — ``asyncio.Queue()``
-    binds to ``get_event_loop()`` at construction. One ``asyncio.run`` here
-    made every later fixture in the suite fail to build its queue.
-    """
-    return asyncio.get_event_loop().run_until_complete(coro)
-
-
 class TestFaultsAreReported:
     """``start()`` returns a bare bool, so every reason a source failed to come
     up was discarded at the point it was known. The panel drew "Not connected"
@@ -1162,7 +1151,8 @@ class TestFaultsAreReported:
             "port can be reported as one"
         )
 
-    def test_a_connect_failure_reaches_the_source(self):
+    @pytest.mark.asyncio
+    async def test_a_connect_failure_reaches_the_source(self):
         source = make_source()
         reader = MagicMock()
         reader.connect = AsyncMock(return_value=False)
@@ -1170,14 +1160,15 @@ class TestFaultsAreReported:
 
         with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
              patch("os.path.exists", return_value=True):
-            assert _run(source.start()) is False
+            assert await source.start() is False
 
         assert source.last_error() == {
             "code": "port_busy",
             "message": "Held by something else.",
         }
 
-    def test_a_reader_reporting_nothing_still_gets_a_message(self):
+    @pytest.mark.asyncio
+    async def test_a_reader_reporting_nothing_still_gets_a_message(self):
         source = make_source()
         reader = MagicMock()
         reader.connect = AsyncMock(return_value=False)
@@ -1185,12 +1176,13 @@ class TestFaultsAreReported:
 
         with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
              patch("os.path.exists", return_value=True):
-            assert _run(source.start()) is False
+            assert await source.start() is False
 
         assert source.last_error()["code"] == "connect_failed"
         assert source.last_error()["message"]
 
-    def test_success_clears_a_previous_fault(self):
+    @pytest.mark.asyncio
+    async def test_success_clears_a_previous_fault(self):
         source = make_source()
         source.set_error("port_busy", "stale")
 
@@ -1199,7 +1191,7 @@ class TestFaultsAreReported:
 
         with patch.object(source, "_create_reader", AsyncMock(return_value=reader)), \
              patch("os.path.exists", return_value=True):
-            assert _run(source.start()) is True
+            assert await source.start() is True
 
         assert source.last_error() is None, (
             "a fault must not outlive the condition that caused it"
