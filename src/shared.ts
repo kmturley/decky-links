@@ -19,6 +19,10 @@ export interface Settings {
             device_path: string;
             baudrate: number;
             polling_interval: number;
+            /** Seconds a tag must be continuously absent before it counts as
+             *  removed. A duration, not a count of missed polls, so changing
+             *  polling_interval does not silently change removal timing. */
+            removal_grace_seconds?: number;
             reader_type: "pn532_uart" | "acr122u" | "proxmark" | "nfcpy";
         };
         storage?: { enabled: boolean; drive_kinds?: Record<string, boolean> };
@@ -87,6 +91,15 @@ export interface DriveKindStatus {
     enabled: boolean;
 }
 
+/** A named reason a source is down. */
+export interface SourceError {
+    /** Stable identifier: "port_busy", "no_device", "no_response",
+     *  "open_failed", "unsupported_reader", "connect_failed". */
+    code: string;
+    /** One sentence for the user, naming what to do rather than what failed. */
+    message: string;
+}
+
 export interface SourceStatus {
     source_id: string;
     source_type: SourceType;
@@ -103,6 +116,12 @@ export interface SourceStatus {
     /** Storage only: one source covers several kinds of drive, and the panel
      *  shows a row per kind. */
     drive_kinds?: Record<string, DriveKindStatus>;
+    /** Why the hardware is not working, when the backend knows. Absent or null
+     *  when it is fine. The row shows `message` in place of "Not connected",
+     *  because that phrase described a stale serial port, an unplugged reader
+     *  and a reader in the wrong mode identically — and the user's next move
+     *  is different for each one. `code` is stable and safe to branch on. */
+    error?: SourceError | null;
 }
 
 export interface ReaderStatus {
@@ -210,6 +229,7 @@ export type SettingKey =
   | "device_path"
   | "baudrate"
   | "polling_interval"
+  | "removal_grace_seconds"
   | "reader_type";
 
 export const sharedState: SharedState = {

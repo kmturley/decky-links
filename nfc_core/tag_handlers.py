@@ -3,11 +3,24 @@
 This module provides a unified interface for reading and writing NDEF data
 to different NFC tag families. Each handler encapsulates the protocol-specific
 logic for its tag type.
+
+Two rules apply throughout, both learned from bugs:
+
+* **Reads stop on TLV structure, not on a byte value.**  Scanning for ``0xFE``
+  anywhere in a block ends the read in the middle of any payload that happens
+  to contain that byte, which is why longer URIs came back truncated.
+  :mod:`nfc.ndef_codec` is the arbiter of where the data ends.
+* **MIFARE Classic authenticates per sector, every sector.**  Authentication
+  covers one sector and is lost the moment the tag is re-selected.  Reading
+  without it returns nothing, and reading across a sector boundary without
+  re-authenticating returns nothing past the boundary.
 """
 
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List
 import time
+
+from nfc_core import ndef_codec
 
 
 class TagHandler(ABC):
@@ -26,19 +39,52 @@ class TagHandler(ABC):
         """Return usable capacity in bytes for NDEF payload."""
 
 
-class NTAGHandler(TagHandler):
-    """Handler for NTAG21x family (NTAG213, NTAG215, NTAG216, etc.)."""
+# NTAG215 geometry, used only when a tag will not say how big it is.
+NTAG_FALLBACK_USER_PAGES = 126
+# NTAG216 is the largest of the family at 888 bytes of user memory. A tag
+# claiming more than that has misreported, and writing to the pages beyond
+# would fail silently one page at a time.
+NTAG_MAX_USER_PAGES = 222
+# User memory starts at page 4 on every member of the family.
+NTAG_FIRST_USER_PAGE = 4
 
-    def __init__(self, uid: bytes):
+
+class NTAGHandler(TagHandler):
+    """Handler for NTAG21x family (NTAG213, NTAG215, NTAG216, etc.).
+
+    ``user_pages`` is supplied by the caller, which learns it from
+    GET_VERSION or from the tag's capability container.  It used to be
+    hardcoded to the NTAG215 layout, so a long URI written to an NTAG213 ran
+    off the end of the tag — every page write past the boundary was refused,
+    one at a time, while the write as a whole reported success.
+    """
+
+    def __init__(
+        self,
+        uid: bytes,
+        user_pages: Optional[int] = None,
+        pages: Optional[List[int]] = None,
+    ):
         self.uid = uid
-        self.user_pages = list(range(4, 134))
+        if pages is not None:
+            # Caller supplied the exact page list. The source owns tag
+            # geometry (it is what reads the capability container), the
+            # handler owns the protocol; keeping one authority for each stops
+            # the two disagreeing about how big a tag is.
+            self.user_pages = list(pages)
+        else:
+            count = user_pages if user_pages else NTAG_FALLBACK_USER_PAGES
+            count = max(1, min(int(count), NTAG_MAX_USER_PAGES))
+            self.user_pages = list(
+                range(NTAG_FIRST_USER_PAGE, NTAG_FIRST_USER_PAGE + count)
+            )
         self.batch_size = 4
 
     def read_ndef(self, reader) -> bytes:
-        """Read NDEF data from NTAG pages with batching."""
+        """Read NDEF data from NTAG pages, stopping at the TLV terminator."""
         data = bytearray()
         page_idx = 0
-        
+
         while page_idx < len(self.user_pages):
             try:
                 # Try batch read if explicitly available
@@ -49,21 +95,21 @@ class NTAGHandler(TagHandler):
                         if blocks is not None and len(blocks) > 0:
                             for block in blocks:
                                 data.extend(block)
-                                if 0xFE in block:
-                                    return bytes(data)
                             page_idx += len(batch_pages)
+                            if ndef_codec.is_terminated(data):
+                                return bytes(data)
                             continue
                     except (TypeError, AttributeError):
                         pass
-                
+
                 # Fallback to single-block read
                 page = self.user_pages[page_idx]
                 block = reader.ntag2xx_read_block(page)
                 if block:
                     data.extend(block)
-                    if 0xFE in block:
-                        break
                     page_idx += 1
+                    if ndef_codec.is_terminated(data):
+                        break
                 else:
                     break
             except (TimeoutError, IOError) as e:
@@ -98,7 +144,7 @@ class NTAGHandler(TagHandler):
             return False, str(e)
 
     def get_capacity(self) -> int:
-        """NTAG21x capacity: ~520 bytes usable."""
+        """Usable NDEF bytes, from the tag's own reported geometry."""
         return len(self.user_pages) * 4
 
 
@@ -114,26 +160,92 @@ class MifareClassicHandler(TagHandler):
         b'\xA0\xA1\xA2\xA3\xA4\xA5',
     ]
 
-    def __init__(self, uid: bytes, key_manager=None):
+    def __init__(self, uid: bytes, key_manager=None, blocks: Optional[List[int]] = None):
         self.uid = uid
         self.key_manager = key_manager
-        self.data_blocks = self._compute_data_blocks()
+        self.data_blocks = list(blocks) if blocks is not None else self._compute_data_blocks()
         self.batch_size = 3
+        # sector -> key that worked, so a multi-sector read authenticates
+        # each sector once rather than re-running the whole key list.
+        self._sector_keys = {}
 
     def _get_keys_to_try(self) -> list:
         """Get list of keys to try: custom keys first, then defaults."""
         keys = []
         if self.key_manager:
             uid_hex = self.uid.hex().upper()
-            custom = self.key_manager.get_keys(uid_hex)
+            try:
+                custom = self.key_manager.get_keys(uid_hex)
+            except Exception:
+                custom = None
             if custom:
-                try:
-                    keys.append(bytes.fromhex(custom[0]))
-                    keys.append(bytes.fromhex(custom[1]))
-                except (ValueError, IndexError):
-                    pass
-        keys.extend(self.DEFAULT_KEYS)
+                for entry in custom:
+                    try:
+                        key = bytes.fromhex(entry)
+                    except (ValueError, TypeError):
+                        continue
+                    if len(key) == 6 and key not in keys:
+                        keys.append(key)
+        for key in self.DEFAULT_KEYS:
+            if key not in keys:
+                keys.append(key)
         return keys
+
+    @staticmethod
+    def sector_of(block: int) -> int:
+        """Sector containing ``block``.
+
+        MIFARE Classic 1K and the first 2 KB of a 4K use four-block sectors;
+        above block 128 a 4K switches to sixteen-block sectors.
+        """
+        if block < 128:
+            return block // 4
+        return 32 + (block - 128) // 16
+
+    def _reselect(self, reader) -> None:
+        """Re-activate the tag after a failed authentication.
+
+        A failed MIFARE authentication leaves the PN532 with no selected
+        target, so every key after the first in a list was being tried
+        against a card that could not answer.  That is why an NDEF-formatted
+        Classic tag — whose data sectors use the second key in the list,
+        D3F7D3F7D3F7 — could never be authenticated at all.
+        """
+        selector = getattr(reader, "select_target", None)
+        if selector is None:
+            return
+        try:
+            selector()
+        except Exception:
+            pass
+
+    def authenticate_sector(self, reader, sector: int) -> bool:
+        """Authenticate ``sector``, trying known keys and re-selecting between.
+
+        Returns True when the sector is open for reading or writing.  The
+        successful key is remembered for the rest of this handler's life.
+        """
+        block = sector * 4 if sector < 32 else 128 + (sector - 32) * 16
+
+        remembered = self._sector_keys.get(sector)
+        keys = ([remembered] if remembered else []) + [
+            k for k in self._get_keys_to_try() if k != remembered
+        ]
+
+        for i, key in enumerate(keys):
+            try:
+                if reader.mifare_classic_authenticate_block(self.uid, block, 0x60, key):
+                    self._sector_keys[sector] = key
+                    return True
+            except Exception:
+                # A timeout or framing error is not evidence about the key.
+                pass
+            # The tag is deselected now, whatever the reason. Bring it back
+            # before trying the next key, or the next attempt tests nothing.
+            if i < len(keys) - 1:
+                self._reselect(reader)
+                time.sleep(0.01)
+        return False
 
     def _compute_data_blocks(self) -> List[int]:
         """Return list of writable data blocks (skip trailer blocks)."""
@@ -144,35 +256,55 @@ class MifareClassicHandler(TagHandler):
         return blocks
 
     def read_ndef(self, reader) -> bytes:
-        """Read NDEF data from Mifare Classic blocks with batching."""
+        """Read NDEF data from Mifare Classic blocks, authenticating per sector.
+
+        The previous version issued no authentication at all, so on a real
+        Classic tag every block read was refused and the tag always looked
+        blank.  Authentication is per sector and is renewed at each sector
+        boundary; without the renewal, reads stopped at block 6.
+        """
         data = bytearray()
         block_idx = 0
-        
+        current_sector = None
+
         while block_idx < len(self.data_blocks):
+            block = self.data_blocks[block_idx]
+            sector = self.sector_of(block)
+
+            if sector != current_sector:
+                if not self.authenticate_sector(reader, sector):
+                    # Locked or unknown-key sector. Whatever we have so far is
+                    # all this tag will give us.
+                    break
+                current_sector = sector
+
             try:
                 # Try batch read if explicitly available
                 if hasattr(reader, 'mifare_classic_read_blocks'):
                     try:
-                        batch_blocks = self.data_blocks[block_idx:block_idx + self.batch_size]
-                        blocks = reader.mifare_classic_read_blocks(batch_blocks)
-                        if blocks is not None and len(blocks) > 0:
-                            for block in blocks:
-                                data.extend(block)
-                                if 0xFE in block:
+                        batch_blocks = [
+                            b for b in self.data_blocks[block_idx:block_idx + self.batch_size]
+                            if self.sector_of(b) == sector
+                        ]
+                        if batch_blocks:
+                            blocks = reader.mifare_classic_read_blocks(batch_blocks)
+                            if blocks is not None and len(blocks) > 0:
+                                for block_data in blocks:
+                                    data.extend(block_data)
+                                block_idx += len(batch_blocks)
+                                if ndef_codec.is_terminated(data):
                                     return bytes(data)
-                            block_idx += len(batch_blocks)
-                            continue
+                                continue
                     except (TypeError, AttributeError):
                         pass
-                
+
                 # Fallback to single-block read
-                block = self.data_blocks[block_idx]
                 block_data = reader.mifare_classic_read_block(block)
                 if block_data:
                     data.extend(block_data)
-                    if 0xFE in block_data:
-                        break
                     block_idx += 1
+                    if ndef_codec.is_terminated(data):
+                        break
                 else:
                     break
             except Exception:
@@ -180,7 +312,7 @@ class MifareClassicHandler(TagHandler):
         return bytes(data)
 
     def write_ndef(self, reader, data: bytes) -> Tuple[bool, Optional[str]]:
-        """Write NDEF data to Mifare Classic blocks."""
+        """Write NDEF data to Mifare Classic blocks, authenticating per sector."""
         while len(data) % self.BLOCK_SIZE != 0:
             data = data + b"\x00"
 
@@ -188,9 +320,20 @@ class MifareClassicHandler(TagHandler):
         if required_blocks > len(self.data_blocks):
             return False, f"Data too large: needs {required_blocks} blocks, available {len(self.data_blocks)}"
 
+        current_sector = None
         try:
             for i in range(0, len(data), self.BLOCK_SIZE):
                 block_num = self.data_blocks[i // self.BLOCK_SIZE]
+                sector = self.sector_of(block_num)
+                if sector != current_sector:
+                    if not self.authenticate_sector(reader, sector):
+                        return False, (
+                            f"Authentication failed for sector {sector}. The tag "
+                            f"uses a key this plugin does not know — add it under "
+                            f"Mifare keys, or use an NTAG tag instead."
+                        )
+                    current_sector = sector
+
                 block_data = data[i : i + self.BLOCK_SIZE]
                 if not reader.mifare_classic_write_block(block_num, block_data):
                     return False, f"Write failed at block {block_num}"
@@ -221,35 +364,33 @@ class MifareClassicHandler(TagHandler):
                 "writable": False,
             }
             
-            # Try to authenticate and read trailer
-            keys = self._get_keys_to_try()
-            authenticated = False
-            
-            for key in keys:
+            # Authenticate through the shared helper, which re-selects the tag
+            # between key attempts. Trying keys without that only ever tested
+            # the first one — every later attempt spoke to a deselected card.
+            authenticated = self.authenticate_sector(reader, sector)
+
+            if authenticated:
                 try:
-                    if reader.mifare_classic_authenticate_block(self.uid, trailer_block, 0x60, key):
-                        authenticated = True
-                        # Read trailer block to check access bits
-                        trailer = reader.mifare_classic_read_block(trailer_block)
-                        if trailer and len(trailer) >= 16:
-                            # Access bits are in bytes 6-8
-                            # Simplified: if we can read, mark as readable
-                            sector_info["readable"] = True
-                            # Try to write to test block to check writability
-                            test_block = first_block if first_block != 0 else first_block + 1
-                            if test_block % 4 != 3:  # Skip trailer
-                                try:
-                                    original = reader.mifare_classic_read_block(test_block)
-                                    if original:
-                                        # Try writing same data back
-                                        if reader.mifare_classic_write_block(test_block, original):
-                                            sector_info["writable"] = True
-                                except Exception:
-                                    pass
-                        break
+                    # Read trailer block to check access bits
+                    trailer = reader.mifare_classic_read_block(trailer_block)
                 except Exception:
-                    continue
-            
+                    trailer = None
+                if trailer and len(trailer) >= 16:
+                    # Access bits are in bytes 6-8
+                    # Simplified: if we can read, mark as readable
+                    sector_info["readable"] = True
+                    # Try to write to test block to check writability
+                    test_block = first_block if first_block != 0 else first_block + 1
+                    if test_block % 4 != 3:  # Skip trailer
+                        try:
+                            original = reader.mifare_classic_read_block(test_block)
+                            if original:
+                                # Try writing same data back
+                                if reader.mifare_classic_write_block(test_block, original):
+                                    sector_info["writable"] = True
+                        except Exception:
+                            pass
+
             if not authenticated:
                 sector_info["locked"] = True
             
@@ -309,22 +450,41 @@ class MifareClassicHandler(TagHandler):
 
 
 class UltralightHandler(TagHandler):
-    """Handler for Mifare Ultralight / NTAG21x variants."""
+    """Handler for MIFARE Ultralight and Ultralight EV1.
 
-    def __init__(self, uid: bytes):
+    The original Ultralight (MF0ICU1) has 16 pages, of which 4-15 are user
+    memory — 48 bytes.  EV1 parts are larger and report their size through
+    GET_VERSION, which the caller passes in.
+    """
+
+    DEFAULT_USER_PAGES = 12  # pages 4-15 on an original Ultralight
+
+    def __init__(
+        self,
+        uid: bytes,
+        user_pages: Optional[int] = None,
+        pages: Optional[List[int]] = None,
+    ):
         self.uid = uid
-        self.user_pages = list(range(4, 16))
+        if pages is not None:
+            self.user_pages = list(pages)
+        else:
+            count = user_pages if user_pages else self.DEFAULT_USER_PAGES
+            count = max(1, min(int(count), NTAG_MAX_USER_PAGES))
+            self.user_pages = list(
+                range(NTAG_FIRST_USER_PAGE, NTAG_FIRST_USER_PAGE + count)
+            )
         self.batch_size = 4
 
     def read_ndef(self, reader) -> bytes:
-        """Read NDEF data from Ultralight pages."""
+        """Read NDEF data from Ultralight pages, stopping at the TLV terminator."""
         data = bytearray()
         for page in self.user_pages:
             try:
                 block = reader.ntag2xx_read_block(page)
                 if block:
                     data.extend(block)
-                    if 0xFE in block:
+                    if ndef_codec.is_terminated(data):
                         break
                 else:
                     break
@@ -574,20 +734,35 @@ class DESFireHandler(TagHandler):
         return self.max_blocks * self.block_size
 
 
-def get_handler(tag_type: str, uid: bytes, key_manager=None) -> Optional[TagHandler]:
+def get_handler(
+    tag_type: str,
+    uid: bytes,
+    key_manager=None,
+    user_pages: Optional[int] = None,
+    pages: Optional[List[int]] = None,
+    blocks: Optional[List[int]] = None,
+) -> Optional[TagHandler]:
     """Factory function to get the appropriate handler for a tag type.
-    
+
     Args:
         tag_type: Type of tag (e.g. 'mifare-classic', 'ntag21x')
         uid: Tag UID bytes
         key_manager: Optional KeyManager for Mifare Classic custom keys
+        user_pages: Page count read from the tag itself (GET_VERSION or the
+            capability container). Page-addressed handlers size themselves
+            from this rather than assuming one model's geometry.
+        pages: Explicit page list, overriding ``user_pages``.
+        blocks: Explicit data-block list for Mifare Classic.
     """
-    if tag_type == "mifare-classic":
-        return MifareClassicHandler(uid, key_manager)
-    
+    if tag_type in ("mifare-classic", "mifare-mini"):
+        return MifareClassicHandler(uid, key_manager, blocks=blocks)
+
+    if tag_type == "ntag21x":
+        return NTAGHandler(uid, user_pages=user_pages, pages=pages)
+    if tag_type == "ultralight":
+        return UltralightHandler(uid, user_pages=user_pages, pages=pages)
+
     handlers = {
-        "ntag21x": NTAGHandler,
-        "ultralight": UltralightHandler,
         "iso14443b": ISO14443BHandler,
         "iso15693": ISO15693Handler,
         "felica": FeliCaHandler,

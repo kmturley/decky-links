@@ -15,6 +15,7 @@ import {
   cancelPairing,
   toaster,
   type ActiveMedium,
+  type SourceError,
   type SourceStatus,
 } from "./shared";
 import {
@@ -67,10 +68,12 @@ const MediaRow: FC<{
    *  pairing a game to it. */
   registeringKey: boolean;
   sourceId?: string;
-}> = ({ row, medium, connected, writable, target, registeringKey, sourceId }) => {
+  /** Why the hardware is down, when the backend named a reason. */
+  error?: SourceError | null;
+}> = ({ row, medium, connected, writable, target, registeringKey, sourceId, error }) => {
   const state = registeringKey
     ? keyStateFor(row, connected, writable, medium)
-    : mediaStateFor(row, connected, medium, target);
+    : mediaStateFor(row, connected, medium, target, false, error);
   const [confirming, setConfirming] = useState(false);
 
   // Drop a pending confirm if the disk changes underneath it — ejected,
@@ -96,6 +99,7 @@ const MediaRow: FC<{
         <Field
           icon={icon}
           label={state.text}
+          description={state.detail}
           focusable={false}
           bottomSeparator="standard"
           highlightOnFocus={false}
@@ -308,6 +312,7 @@ export const TriggersPanel: FC<{
               target={target}
               registeringKey={registeringKey}
               sourceId={status?.source_id}
+              error={status?.error}
             />,
           );
           const secret = row.key === "mqtt"

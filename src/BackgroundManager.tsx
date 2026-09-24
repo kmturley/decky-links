@@ -642,7 +642,30 @@ export function startBackgroundManager(): () => void {
     // talking to an older backend that does not send the field.
     const action = data.action ?? (currentSettings?.auto_close ? "close" : "pause");
 
-    if (canSkipLaunch(currentAppId, uriAppId)) {
+    // Whether to act at all is also the backend's call. It only sends this
+    // event after checking that this exact medium launched this exact running
+    // game, so re-deriving that here from the URI second-guesses the one side
+    // that holds the attribution — and disagrees with it whenever Steam
+    // reports a different app id than the tag names, which is ordinary for a
+    // game behind a launcher or a Proton prefix. Then nothing happened and
+    // nothing said why.
+    //
+    // The app id comparison is kept only as a sanity check between two values
+    // that both came from this side: what Steam reports as running now, and
+    // what we last told the backend was running.
+    const backendAppId = data.appid != null ? String(data.appid) : null;
+    const shouldAct = !!currentAppId
+      && (backendAppId === null || String(currentAppId) === backendAppId);
+
+    if (!shouldAct) {
+      console.info(
+        `[ Decky Links ] Tag removed but the running game does not match what the `
+        + `backend attributed (running=${currentAppId}, backend=${backendAppId}, `
+        + `uri=${uriAppId}). Leaving it alone.`,
+      );
+    }
+
+    if (shouldAct) {
       if (action === "close") {
         console.info(`[ Decky Links ] Paired tag removed. Auto-closing game: ${currentAppId}`);
         void (async () => {
@@ -665,9 +688,8 @@ export function startBackgroundManager(): () => void {
         Navigation.CloseSideMenus();
         Navigation.OpenSideMenu(SideMenu.Main);
       }
-    } else {
-      console.info(`[ Decky Links ] Tag removed but game not running (currentAppId=${currentAppId}, uriAppId=${uriAppId}). Ignoring.`);
     }
+    // The declining case is logged above, where the reason is known.
   });
 
   // Backstop for the event stream above.

@@ -147,3 +147,41 @@ class TestReset:
         reg.reset()
         assert reg.all() == []
         assert reg.launch_origin is None
+
+
+class TestAdoptLaunch:
+    """Attribution is lost by events the user never caused — a reader that
+    reconnects, an app id that flickers — and a claim is only made while no
+    game is running, so nothing could ever re-establish it."""
+
+    def _reg(self):
+        from decky_links.media_registry import MediaRegistry
+        return MediaRegistry()
+
+    def test_adopts_when_nothing_owns_the_game(self):
+        reg = self._reg()
+        assert reg.adopt_launch("nfc:0", "DEADBEEF") is True
+        assert reg.launched_by("nfc:0", "DEADBEEF") is True
+
+    def test_never_steals_an_existing_claim(self):
+        reg = self._reg()
+        reg.claim_launch("nfc:0", "AAAA")
+        reg.confirm_launch(400, None)
+
+        assert reg.adopt_launch("storage:udev", "/dev/sdb1") is False
+        assert reg.launched_by("nfc:0", "AAAA") is True
+
+    def test_a_cleared_launch_can_be_adopted_again(self):
+        reg = self._reg()
+        reg.claim_launch("nfc:0", "AAAA")
+        reg.confirm_launch(400, None)
+        reg.clear_launch()
+
+        assert reg.adopt_launch("nfc:0", "AAAA") is True
+
+    def test_adoption_is_quittable_like_any_other_claim(self):
+        reg = self._reg()
+        reg.adopt_launch("nfc:0", "DEADBEEF")
+        assert reg.launched_by("nfc:0", "DEADBEEF") is True
+        assert reg.launched_by("nfc:0", "OTHER") is False
+        assert reg.launched_by("storage:udev", "DEADBEEF") is False

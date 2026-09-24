@@ -7,7 +7,7 @@ to the proxmark3 client binary.
 import subprocess
 import re
 from typing import Optional, Tuple
-from nfc.reader import Reader
+from nfc_core.reader import Reader
 
 
 class ProxmarkReader(Reader):

@@ -3,7 +3,7 @@ import sys
 import pytest
 from unittest.mock import MagicMock
 
-from nfc.reader import PN532UARTReader, Reader
+from nfc_core.reader import PN532UARTReader, Reader
 
 
 class DummySerial:

@@ -115,7 +115,7 @@ async def get_sector_info(decky, key_manager, nfc_source, uid: Optional[str] = N
             return []
 
         # Create handler and get sector info
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         handler = MifareClassicHandler(uid_bytes, key_manager)
 
         reader = nfc_source.reader if nfc_source else None
@@ -178,7 +178,7 @@ async def lock_sector(decky, key_manager, nfc_source, uid: str, sector: int, key
             return False
 
         # Create handler and lock sector
-        from nfc.tag_handlers import MifareClassicHandler
+        from nfc_core.tag_handlers import MifareClassicHandler
         handler = MifareClassicHandler(uid_bytes, key_manager)
 
         success, error = handler.lock_sector(reader, sector, key_a_bytes, key_b_bytes)

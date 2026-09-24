@@ -52,7 +52,7 @@ from decky_links import state
 ALLOWED_SOUNDS = frozenset({"scan", "success", "error", "lock", "unlock"})
 from decky_links.media_registry import MediaRegistry
 from decky_links.settings import SettingsManager
-from nfc.key_manager import KeyManager
+from nfc_core.key_manager import KeyManager
 
 
 # -----------------------------------------------------------------------
@@ -397,16 +397,29 @@ class Plugin:
             decky.logger.info(
                 f"Source disconnected: {event.source_type.value} ({event.source_id})"
             )
-            # Hardware that has gone away cannot still be holding media. Drop
-            # its registry entry, or the medium lingers as active forever and
-            # keeps a stale claim on the running game.
+            # Hardware that has gone away cannot still be holding media, so its
+            # registry entry goes — otherwise the medium lingers as active
+            # forever.
             had_media = self._registry.remove(event.source_id)
+
+            # The launch attribution, however, stays. A DISCONNECTED event does
+            # not distinguish a reader the user unplugged from one that dropped
+            # for a moment and came straight back, and the second is common.
+            # Dropping the claim here meant a single reader glitch after launch
+            # silently disabled auto-close for the rest of the session: the tag
+            # returned, but a claim is only made while no game is running, so
+            # nothing could ever re-establish it.
+            #
+            # Keeping it is safe, because quitting still requires an UNLOAD
+            # naming this exact source *and* media id. A different tag on the
+            # returning reader does not match, and a genuinely departed reader
+            # sends no UNLOAD at all. The claim is cleared where it should be —
+            # when the game exits, in set_running_game.
             if self._registry.launch_origin and self._registry.launch_origin.get("source_id") == event.source_id:
                 decky.logger.info(
                     f"Source {event.source_id} launched game {self.running_game_id} "
-                    f"but has disconnected; dropping its claim."
+                    f"and has disconnected; keeping its claim in case it returns."
                 )
-                self._registry.drop_origin_for_source(event.source_id)
 
             if is_nfc:
                 await decky.emit("source_connection", {
@@ -640,6 +653,13 @@ class Plugin:
         will_launch = bool(self.settings.get("auto_launch")) and not self.running_game_id
         if will_launch:
             self._registry.claim_launch(event.source_id, uid_hex)
+        else:
+            # A medium presented while its game is already running. It cannot
+            # claim a launch — there is nothing to launch — but if that game
+            # belongs to nobody it should belong to this. Covers the tag
+            # re-appearing after a reader reconnect, and a game the user
+            # started by hand before presenting its tag.
+            self._adopt_running_game(self.running_game_id)
 
         # Emit valid URI once — matches old code where uri_detected fired only with final URI
         await decky.emit("uri_detected", {"uri": uri, "uid": uid_hex})
@@ -887,6 +907,41 @@ class Plugin:
         payload = dict(self._restricted_state())
         payload["reason"] = reason
         await decky.emit("restricted_lock", payload)
+
+    def _adopt_running_game(self, appid) -> bool:
+        """Give an unowned running game to a presented medium that names it.
+
+        Auto-close only quits a game for the medium that started it, which is
+        right — ejecting a floppy must not close a game a tag launched. But
+        attribution is lost by things the user never did: a reader glitch
+        drops it, and a running app id that flickers to nothing and back
+        clears it. Nothing re-established it, because a launch claim is only
+        made while no game is running, so one hiccup after launch disabled
+        auto-close until the game exited by hand.
+
+        Run wherever attribution settles — when the frontend reports the
+        running game, and when a medium is presented — so the vacancy is
+        filled on the next event rather than persisting for the session.
+
+        This also means a game started by hand is adopted by a matching
+        medium presented afterwards. That is deliberate: with auto-launch off
+        the plugin only opens the game's page and the user presses Play, so
+        every launch that way produced no attribution at all and could never
+        be closed by lifting the tag that caused it.
+        """
+        if appid is None or self._registry.launch_origin is not None:
+            return False
+        target = str(appid)
+        for medium in self._registry.all():
+            if uri_rules.launch_appid(medium.get("uri")) != target:
+                continue
+            if self._registry.adopt_launch(medium["source_id"], medium["media_id"]):
+                decky.logger.info(
+                    f"Game {appid} was unattributed; adopted by "
+                    f"{medium['media_id']} on {medium['source_id']}."
+                )
+                return True
+        return False
 
     def _medium_authorizes(self, appid) -> bool:
         """Whether a presented medium vouches for this running game.
@@ -1535,6 +1590,13 @@ class Plugin:
             # attribution immediately after setting it. Auto-close then refused
             # to quit anything, because every game had been "launched by None".
             self._registry.confirm_launch(appid, prev)
+            # Attribution settles here, so this is where a vacancy has to be
+            # filled. Without it, an app id that flickers to nothing and back
+            # — an ordinary launcher or Proton prefix, seen from the
+            # frontend's poll — leaves the game owned by nobody for the rest
+            # of the session, and lifting the tag that started it does
+            # nothing.
+            self._adopt_running_game(appid)
             if self._registry.launch_origin:
                 decky.logger.info(
                     f"Game {appid} attributed to {self._registry.launch_origin}"
@@ -1711,6 +1773,12 @@ class Plugin:
                 # instead of asking specifically about the NFC reader.
                 "can_pair": source.can_write(),
                 "enabled": source.is_enabled(),
+                # Why the hardware is not working, when it is not. The panel
+                # drew "Not connected" for every cause alike, so a reader whose
+                # port was held by a stale backend was indistinguishable from
+                # one that had been unplugged — and only one of those is fixed
+                # by plugging it back in. None when the source is healthy.
+                "error": source.last_error(),
             }
             # Storage is one source covering several kinds of drive, and the
             # panel shows a row per kind — so it needs presence per kind, not

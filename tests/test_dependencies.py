@@ -101,7 +101,13 @@ def test_pillow_importable():
 
 
 def test_nfcpy_importable():
-    """nfcpy — optional alternative NFC reader backend (nfc/nfcpy_backend.py)."""
+    """nfcpy — optional alternative reader backend (nfc_core/nfcpy_backend.py).
+
+    This genuinely tests nfcpy now. While the project's own package was also
+    called `nfc`, importing `nfc` found that instead and the assertion passed
+    whether or not nfcpy was installed — which it was not, because the build
+    deleted it to make room for the project's package of the same name.
+    """
     assert _can_import("nfc"), (
         "nfcpy not installed. Run: pip install nfcpy"
     )

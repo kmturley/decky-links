@@ -52,10 +52,15 @@ docker run --rm \
 # -u above makes pip write py_modules/ as the calling user instead of root.
 # Docker Desktop on macOS hides root-owned bind-mount writes by remapping them
 # back to the host user, but native Linux Docker (e.g. GitHub Actions runners)
-# does not — root-owned files there make the `rm -rf py_modules/nfc ...` below
-# fail with "Permission denied", because pip installing `nfcpy` (a dependency)
-# creates a py_modules/nfc/ that collides with and must be clearable to make
-# way for the project's own nfc/ package of the same import name.
+# does not — root-owned files there make the `rm -rf py_modules/... ` below
+# fail with "Permission denied".
+#
+# The project's own NFC package is called nfc_core, not nfc, precisely so that
+# nfcpy — whose top-level package IS `nfc` — can be installed alongside it.
+# While both were called `nfc`, whichever landed second overwrote the first:
+# the build deleted nfcpy to make room, so the nfcpy reader backend could
+# never work, and if the order had ever flipped, `from nfc.reader import
+# PN532UARTReader` would have failed and taken the PN532 backend with it.
 
 # Guard: fail loudly rather than shipping macOS binaries to the Deck again.
 if find py_modules \( -name "*darwin*.so" -o -name "*.dylib" \) | grep -q .; then
@@ -105,9 +110,9 @@ GUARD
 #
 # `decky plugin build` zips a FIXED allowlist of paths — main.py, plugin.json,
 # package.json, dist/, py_modules/, LICENSE, README.md. Top-level sources/,
-# nfc/, cards/ and decky_links/ are NOT packaged even though the builder rsyncs
-# them into its staging dir, so they must be vendored into py_modules/ to reach
-# the device.
+# nfc_core/, cards/ and decky_links/ are NOT packaged even though the builder
+# rsyncs them into its staging dir, so they must be vendored into py_modules/
+# to reach the device.
 #
 # Anything new that main.py imports locally MUST be added here. It will import
 # fine in the repo and in tests and then fail on the device, which is why
@@ -118,16 +123,16 @@ GUARD
 # checked-out tree wins and these copies cannot shadow the files being edited.
 # ---------------------------------------------------------------------------
 echo "Copying local Python packages into py_modules/..."
-rm -rf py_modules/sources py_modules/nfc py_modules/assets py_modules/cards py_modules/decky_links
+rm -rf py_modules/sources py_modules/nfc_core py_modules/assets py_modules/cards py_modules/decky_links
 cp -r sources py_modules/sources
-cp -r nfc py_modules/nfc
+cp -r nfc_core py_modules/nfc_core
 cp -r cards py_modules/cards
 cp -r decky_links py_modules/decky_links
 # assets/ is not in the CLI's allowlist either, so the sounds ride along in
 # py_modules or they are simply absent from the installed plugin — which is
 # exactly what happened: every _play_sound call logged "Sound file not found".
 cp -r assets py_modules/assets
-find py_modules/sources py_modules/nfc py_modules/cards py_modules/decky_links -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find py_modules/sources py_modules/nfc_core py_modules/cards py_modules/decky_links -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # -t: the CLI's default staging dir (/tmp/decky) is not visible to Docker
 # Desktop on macOS; $HOME is shared by default.

@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 import pytest
-from nfc.key_manager import ENCRYPTION_AVAILABLE, KeyManager
+from nfc_core.key_manager import ENCRYPTION_AVAILABLE, KeyManager
 
 
 class TestKeyManager:

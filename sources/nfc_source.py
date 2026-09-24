@@ -12,11 +12,22 @@ It does NOT own:
 - Game launching (plugin's job)
 - Frontend event emission (plugin's job via queue consumer)
 - Audio playback (plugin's job)
+
+Three principles govern the poll loop, each of them the answer to a specific
+failure the old one had:
+
+1. **A failed read is not an absent tag.**  Protocol desyncs used to feed the
+   removal counter, so three bad frames in a row quit the user's game.  Only a
+   reader that successfully reports "nothing there" counts as removal.
+2. **Removal is measured in time, not in poll counts.**  A count is silently
+   re-scaled by every change to ``polling_interval``; a duration is not.
+3. **Recoverable errors are recovered from, not escalated.**  Closing the
+   serial port over a checksum mismatch cost seconds of dead reader and a
+   "disconnected" banner, for something that resynchronises in 20 ms.
 """
 
 import asyncio
 import os
-import sys
 import threading
 import time
 import traceback
@@ -33,8 +44,17 @@ from sources.base import (
     SourceType,
 )
 
+from nfc_core import ndef_codec, tag_identity
+from nfc_core.tag_handlers import get_handler
+
 try:
-    from nfc.reader import PN532UARTReader
+    from nfc_core.reader import (
+        PN532UARTReader,
+        ReaderError,
+        ReaderProtocolError,
+        ReaderTransportError,
+        TargetInfo,
+    )
     _READER_IMPORT_ERROR = None
 except ImportError as _e:
     # Keep the reason. Discarding it makes a packaging failure (e.g. wheels
@@ -44,14 +64,27 @@ except ImportError as _e:
     PN532UARTReader = None
     _READER_IMPORT_ERROR = _e
 
+    class ReaderError(Exception):
+        pass
+
+    class ReaderProtocolError(ReaderError):
+        pass
+
+    class ReaderTransportError(ReaderError):
+        pass
+
+    TargetInfo = ()
+
 
 # NTAG21x capability container. Page 3 holds magic / version / size÷8 / access;
 # reading it is how the real capacity of a tag is known rather than assumed.
 _NTAG_CC_PAGE = 3
 _NTAG_NDEF_MAGIC = 0xE1
-# NTAG215 user memory, the layout this code assumed for every tag before the CC
-# was read. Still the fallback when a tag will not report its own size.
-_NTAG_FALLBACK_USER_PAGES = 130
+# NTAG215 user memory: pages 4-129.  The old value of 130 pages ran to page
+# 133 — four pages past the end of user memory and into the dynamic lock bytes
+# and configuration pages, where a write can permanently alter the tag's
+# access settings.  Still the fallback when a tag will not report its own size.
+_NTAG_FALLBACK_USER_PAGES = 126
 # NTAG216 is the largest of the family at 888 bytes; anything claiming more is
 # a misread, not a bigger tag.
 _NTAG_MAX_USER_PAGES = 222
@@ -67,6 +100,16 @@ _KNOWN_USB_SERIAL_VIDS = frozenset({
 })
 
 
+def _is_target(obj) -> bool:
+    """True when ``obj`` is a real :class:`TargetInfo`.
+
+    Mock readers answer every attribute with a truthy stand-in, so a plain
+    ``if target:`` would treat one as a genuine detection.  Capability probing
+    has to check the type, not the truthiness.
+    """
+    return isinstance(obj, TargetInfo) if TargetInfo else False
+
+
 class NfcSource(MediaSource):
     """NFC reader polling source.
 
@@ -76,7 +119,21 @@ class NfcSource(MediaSource):
 
     source_type = SourceType.NFC
 
-    DEBOUNCE_THRESHOLD = 3   # consecutive None reads to confirm removal
+    # Retained so existing callers and settings keep working, but removal is
+    # now governed by REMOVAL_GRACE_SECONDS as well: a tag must be both
+    # missed this many times *and* absent for that long.
+    DEBOUNCE_THRESHOLD = 2
+    # How long a tag must be continuously absent before removal is reported.
+    # Expressed in seconds so that changing polling_interval does not silently
+    # change how long it takes to notice a tag being lifted.
+    REMOVAL_GRACE_SECONDS = 0.6
+    # Consecutive recoverable protocol errors tolerated before the reader is
+    # treated as genuinely broken and reconnected.
+    MAX_PROTOCOL_ERRORS = 5
+    # Attempts made to read a newly arrived tag's content before giving up and
+    # reporting it unreadable.  Contactless is a lossy link and one dropped
+    # frame used to be cached permanently as "blank tag".
+    CONTENT_READ_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -94,6 +151,15 @@ class NfcSource(MediaSource):
         # threads interleaving commands on a PN532 corrupts the exchange, so
         # the reader is held for the whole of a poll or a write.
         self._io_lock = threading.RLock()
+        # Set by stop(). The poll body runs in a worker thread via
+        # asyncio.to_thread, and a thread cannot be cancelled — cancelling the
+        # awaiting task raises CancelledError in the coroutine while the
+        # thread carries on with the serial port open. Since
+        # ThreadPoolExecutor threads are non-daemon, that also stops the
+        # interpreter exiting, which is how a reloaded plugin leaves its
+        # previous backend alive holding /dev/ttyUSB0. The flag lets the
+        # thread notice it should give up at each step instead.
+        self._stopping = False
         self._reader = None
         # Legacy field retained for compatibility with existing reader module
         self._uart = None
@@ -101,6 +167,10 @@ class NfcSource(MediaSource):
         # Polling state
         self._last_uid_hex: Optional[str] = None
         self._missing_count: int = 0
+        # Monotonic timestamp of the first poll that failed to see the tag.
+        self._absent_since: Optional[float] = None
+        # Consecutive recoverable errors; reset by any clean poll.
+        self._protocol_errors: int = 0
 
         # Current tag state (readable by plugin)
         self.current_tag_uid: Optional[str] = None
@@ -144,6 +214,20 @@ class NfcSource(MediaSource):
         return val
 
     @property
+    def removal_grace(self) -> float:
+        """Seconds of continuous absence before a tag counts as removed.
+
+        Never shorter than two poll intervals, so a single dropped poll can
+        never quit the user's game however the interval is configured.
+        """
+        configured = self._settings.get("removal_grace_seconds")
+        if isinstance(configured, (int, float)) and 0.1 <= float(configured) <= 10.0:
+            grace = float(configured)
+        else:
+            grace = self.REMOVAL_GRACE_SECONDS
+        return max(grace, self.poll_interval * 2)
+
+    @property
     def reader(self):
         """Expose the underlying reader for direct access by plugin methods."""
         return self._reader
@@ -158,6 +242,7 @@ class NfcSource(MediaSource):
         """
         self._last_uid_hex = None
         self._missing_count = 0
+        self._absent_since = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -197,6 +282,12 @@ class NfcSource(MediaSource):
                 f"(configured {self._settings.get('device_path')!r} not present; "
                 f"ports seen: {seen})",
             )
+            self.set_error(
+                "no_device",
+                f"No NFC reader found. Plug one in, or set the port in "
+                f"Settings (looked for "
+                f"{self._settings.get('device_path') or 'a USB serial port'}).",
+            )
             return None
 
         chosen = candidates[0]
@@ -228,17 +319,28 @@ class NfcSource(MediaSource):
                 # device to reappear instead of jumping to a different port
                 # (which could be a completely different device, e.g. ttyACM0).
                 if not os.path.exists(self._last_good_path):
+                    self.set_error(
+                        "no_device",
+                        f"The NFC reader at {self._last_good_path} was "
+                        f"unplugged. Reconnect it to carry on.",
+                    )
                     return False
                 path = self._last_good_path
             else:
                 path = self._find_serial_port() or ""
         if not path:
+            # _find_serial_port has already named the reason.
             return False
         self._effective_path = path
 
         reader = await self._create_reader()
         if not reader:
             self._reader = None
+            self.set_error(
+                "unsupported_reader",
+                f"Reader type {self._settings.get('reader_type')!r} could not "
+                f"be initialised. Its Python support may not be installed.",
+            )
             return False
 
         connected = await reader.connect()
@@ -248,6 +350,21 @@ class NfcSource(MediaSource):
                 f"NfcSource: reader init failed on {path}: unable to connect",
             )
             self._reader = None
+            # The reader knows which of several quite different things went
+            # wrong — a busy port, a silent device, a failed open — and the
+            # user's next move differs for each. Fall back to the generic
+            # message only for a backend that reports nothing.
+            detail = getattr(reader, "last_error", None)
+            if isinstance(detail, dict) and detail.get("message"):
+                self.set_error(
+                    str(detail.get("code") or "connect_failed"),
+                    str(detail["message"]),
+                )
+            else:
+                self.set_error(
+                    "connect_failed",
+                    f"Could not start the NFC reader on {path}.",
+                )
             return False
 
         if self._logger:
@@ -257,12 +374,21 @@ class NfcSource(MediaSource):
             )
         # Let the next failure speak up, however many times we retried to get here.
         self._last_log_key = None
+        self.clear_error()
         self._reader = reader
         self._last_good_path = self._effective_path
+        self._protocol_errors = 0
+        self._stopping = False
         return True
 
     async def stop(self) -> None:
-        """Release reader resources."""
+        """Release reader resources.
+
+        Sets the stop flag before touching the reader so a poll already
+        running in a worker thread unwinds at its next checkpoint rather than
+        continuing to drive a reader we are closing underneath it.
+        """
+        self._stopping = True
         if self._reader:
             try:
                 self._reader.close()
@@ -278,6 +404,8 @@ class NfcSource(MediaSource):
         # Reset tag state so the same card is re-detected after reconnect
         self._last_uid_hex = None
         self._missing_count = 0
+        self._absent_since = None
+        self._protocol_errors = 0
         self.current_tag_uid = None
         self.current_tag_uri = None
         self.current_tag_meta = None
@@ -292,8 +420,8 @@ class NfcSource(MediaSource):
 
     # ── Poll ───────────────────────────────────────────────────────────
 
-    async def poll(self) -> Optional[PluginEvent]:
-        """One poll cycle: read UID, detect arrival/removal, return event.
+    async def poll(self):
+        """One poll cycle: read UID, detect arrival/removal, return event(s).
 
         The work happens on a worker thread because all of it blocks: the UID
         read waits on the serial line, classification sleeps between key
@@ -303,134 +431,297 @@ class NfcSource(MediaSource):
         frontend RPC. The proxmark backend shells out to its client binary
         with a 5s timeout, so this is the difference between a responsive
         plugin and a frozen one.
+
+        May return a list when one cycle produces two events, which happens
+        when a tag is swapped for another between polls: the outgoing tag's
+        UNLOAD must still be reported, or whatever it launched can never be
+        quit by lifting it.
         """
         if not self._reader:
             return None
 
         return await asyncio.to_thread(self._poll_blocking)
 
-    def _poll_blocking(self) -> Optional[PluginEvent]:
+    def _poll_blocking(self):
         """The synchronous body of :meth:`poll`. Never call from the loop."""
         with self._io_lock:
             return self._poll_locked()
 
-    def _poll_locked(self) -> Optional[PluginEvent]:
-        if not self._reader:
+    def _poll_locked(self):
+        if not self._reader or self._stopping:
             return None
 
         try:
-            uid = self._reader.read_uid(timeout=0.2)
+            target = self._detect()
+        except ReaderTransportError as e:
+            # The link itself is gone. This is the only failure that justifies
+            # dropping the reader.
+            self._drop_reader(f"link lost: {e}")
+            return None
+        except ReaderProtocolError as e:
+            return self._handle_protocol_error(e)
         except Exception as e:
-            if self._logger:
-                self._logger.error(f"NfcSource: poll error: {e}")
-                self._logger.error(traceback.format_exc())
-            # Mark reader as dead so SourceManager will attempt reconnect.
-            # Reset last_uid so the same card is re-detected after reconnect.
-            # Close before dropping the reference — otherwise the serial fd
-            # stays open until GC and the next connect() races against it.
-            self._last_uid_hex = None
+            # An unclassified failure from a backend that does not use the
+            # reader error taxonomy. Treat it as recoverable — escalating to a
+            # teardown is what used to make a single bad frame cost seconds.
+            return self._handle_protocol_error(e)
+
+        # A clean answer, whatever it said. The link is in step again.
+        self._protocol_errors = 0
+
+        if target is not None:
+            return self._on_tag_present(target)
+        return self._on_tag_absent()
+
+    def _detect(self):
+        """Return a :class:`TargetInfo` for the tag present, or ``None``.
+
+        Normalises across backends: a reader that can report ATQA/SAK does so,
+        and one that can only report a UID gets wrapped in the same shape so
+        the caller never has two code paths.
+        """
+        reader = self._reader
+        read_target = getattr(reader, "read_target", None)
+        if read_target is not None:
+            result = read_target(timeout=0.2)
+            if _is_target(result):
+                return result
+            if result is None:
+                # An honest "nothing there".
+                return None
+            # Neither a TargetInfo nor None: a stand-in rather than the real
+            # method. Fall through to the UID path.
+
+        uid = reader.read_uid(timeout=0.2)
+        if not uid:
+            return None
+        try:
+            uid = bytes(uid)
+        except (TypeError, ValueError):
+            raise ReaderProtocolError("reader returned a UID that is not bytes")
+        if not self._uid_is_usable(uid):
+            raise ReaderProtocolError(
+                f"implausible UID of {len(uid)} bytes — treating as a bad frame"
+            )
+        return TargetInfo(uid=uid) if TargetInfo else None
+
+    @staticmethod
+    def _uid_is_usable(uid: bytes) -> bool:
+        """Reject UIDs that anticollision could not have produced.
+
+        A corrupt frame read as identity used to become a brand-new tag,
+        producing a spurious LOAD and, when it vanished next poll, a spurious
+        removal.  Mock readers hand back objects whose length is zero; those
+        are passed through rather than rejected, because "cannot tell" is not
+        the same as "wrong".
+        """
+        try:
+            length = len(uid)
+        except TypeError:
+            return True
+        if length == 0:
+            return True
+        return length in (4, 7, 8, 10)
+
+    def _handle_protocol_error(self, exc: BaseException) -> None:
+        """Resynchronise after a recoverable failure.
+
+        Deliberately returns no event.  A desync tells us nothing about
+        whether a tag is present, so it must not advance the removal clock —
+        letting it do so is what turned bad frames into phantom removals and
+        closed games.
+        """
+        self._protocol_errors += 1
+        recover = getattr(self._reader, "recover", None)
+        if recover is not None:
             try:
-                self._reader.close()
+                recover()
             except Exception:
                 pass
-            self._reader = None
-            if self._uart:
-                try:
-                    self._uart.close()
-                except Exception:
-                    pass
-                self._uart = None
+
+        if self._protocol_errors >= self.MAX_PROTOCOL_ERRORS:
+            self._drop_reader(
+                f"{self._protocol_errors} consecutive protocol errors, "
+                f"last: {exc}"
+            )
+        elif self._logger:
+            self._logger.debug(
+                f"NfcSource: recoverable read error "
+                f"({self._protocol_errors}/{self.MAX_PROTOCOL_ERRORS}): {exc}"
+            )
+        return None
+
+    def _drop_reader(self, reason: str) -> None:
+        """Tear the reader down so SourceManager reconnects it."""
+        if self._logger:
+            self._logger.error(f"NfcSource: dropping reader — {reason}")
+            self._logger.debug(traceback.format_exc())
+        # Close before dropping the reference — otherwise the serial fd stays
+        # open until GC and the next connect() races against it.
+        try:
+            if self._reader:
+                self._reader.close()
+        except Exception:
+            pass
+        self._reader = None
+        if self._uart:
+            try:
+                self._uart.close()
+            except Exception:
+                pass
+            self._uart = None
+        # Reset tag state so the same card is re-detected after reconnect.
+        self._last_uid_hex = None
+        self._missing_count = 0
+        self._absent_since = None
+        self._protocol_errors = 0
+
+    def _on_tag_present(self, target):
+        """Handle a successful detection."""
+        uid = target.uid
+        uid_hex = uid.hex().upper()
+
+        # Any sighting cancels a removal in progress.
+        self._missing_count = 0
+        self._absent_since = None
+
+        if uid_hex == self._last_uid_hex:
+            # Same tag still present. Metadata is cached, so this is a dict
+            # lookup rather than another conversation with the tag.
+            try:
+                self.current_tag_meta = self._classify_tag(uid, target)
+            except Exception:
+                pass
             return None
 
-        if uid:
-            self._missing_count = 0
-            uid_hex = uid.hex().upper()
-            is_new_tag = (uid_hex != self._last_uid_hex)
+        events: List[PluginEvent] = []
 
-            if is_new_tag:
-                self._last_uid_hex = uid_hex
-                self.current_tag_uid = uid_hex
+        # A different tag without an intervening absence — the user swapped
+        # one for another between polls. The outgoing one still has to be
+        # reported gone, or the registry keeps attributing a running game to a
+        # tag that is no longer on the reader and lifting the new one does
+        # nothing.
+        if self._last_uid_hex:
+            events.append(MediaEvent(
+                kind=MediaEventKind.UNLOAD,
+                source_type=SourceType.NFC,
+                source_id=self.source_id,
+                media_id=self._last_uid_hex,
+                uri=self.current_tag_uri,
+            ))
 
-                # Classify tag (needed to choose ntag vs mifare read path)
-                try:
-                    self.current_tag_meta = self._classify_tag(uid)
-                except Exception:
-                    self.current_tag_meta = None
+        self._last_uid_hex = uid_hex
+        self.current_tag_uid = uid_hex
 
-                # Read NDEF records once and derive both URI and record list.
-                # _read_ndef_uri() would call _read_ndef_records() internally,
-                # then we'd call it again — two full tag reads for the same data.
-                try:
-                    records = self._read_ndef_records()
-                except Exception:
-                    records = []
+        load = self._build_load_event(target, uid, uid_hex)
+        events.append(load)
+        return events if len(events) > 1 else load
 
-                uri = None
-                for record in records:
-                    if hasattr(record, "uri") and record.__class__.__name__.endswith("UriRecord"):
-                        uri = record.uri
-                        break
-                self.current_tag_uri = uri
+    def _build_load_event(self, target, uid: bytes, uid_hex: str) -> MediaEvent:
+        """Classify the tag, read its content, and build the LOAD event."""
+        try:
+            meta = self._classify_tag(uid, target)
+        except Exception:
+            meta = None
+        self.current_tag_meta = meta
 
-                # Build payload with NFC-specific data
-                payload: Dict[str, Any] = {}
-                if self.current_tag_meta:
-                    payload["tag_meta"] = self.current_tag_meta
+        payload: Dict[str, Any] = {}
+        if meta:
+            payload["tag_meta"] = meta
 
-                serializable_records = []
-                for record in records:
-                    rec_dict = {}
-                    for attr in ['type', 'name', 'uri', 'text', 'language', 'encoding']:
-                        if hasattr(record, attr):
-                            rec_dict[attr] = getattr(record, attr)
-                    serializable_records.append(rec_dict)
-                payload["ndef_records"] = serializable_records
+        uri, records, unreadable, error = self._read_media(meta)
+        self.current_tag_uri = uri
 
-                if self._logger:
-                    self._logger.info(f"NfcSource: new tag {uid_hex}, uri={uri}")
+        # Release the tag now the conversation is over. A target left selected
+        # stays in the ISO 14443-3 ACTIVE state and does not answer the next
+        # anticollision, which makes a card resting on the reader go
+        # intermittently invisible.
+        release = getattr(self._reader, "release_target", None)
+        if release is not None:
+            try:
+                release()
+            except Exception:
+                pass
 
-                return MediaEvent(
-                    kind=MediaEventKind.LOAD,
-                    source_type=SourceType.NFC,
-                    source_id=self.source_id,
-                    media_id=uid_hex,
-                    uri=uri,
-                    payload=payload,
-                )
-            else:
-                # Same tag still present — update metadata cache
-                try:
-                    self.current_tag_meta = self._classify_tag(uid)
-                except Exception:
-                    pass
-        else:
-            # Tag absent — debounce removal
-            if self._last_uid_hex:
-                self._missing_count += 1
-                if self._missing_count >= self.DEBOUNCE_THRESHOLD:
-                    removed_uid = self._last_uid_hex
-                    if self._logger:
-                        self._logger.info(
-                            f"NfcSource: tag removed: {removed_uid} "
-                            f"(after {self._missing_count} misses)"
-                        )
-                    self._last_uid_hex = None
-                    self._missing_count = 0
+        payload["ndef_records"] = ndef_codec.records_to_dicts(records)
+        if unreadable:
+            # "Unreadable" and "blank" look identical downstream unless we say
+            # which it was, and only one of them is something the user can act
+            # on. A tag we failed to read must never be reported as empty and
+            # ready to pair.
+            payload["unreadable"] = True
+            if error:
+                payload["error"] = error
 
-                    removed_uri = self.current_tag_uri
-                    self.current_tag_uid = None
-                    self.current_tag_uri = None
-                    self.current_tag_meta = None
+        if meta and meta.get("random_uid"):
+            # A randomly generated UID differs on every tap, so pairing by UID
+            # can never match. Say so rather than letting the user pair a tag
+            # that will never be recognised again.
+            #
+            # Overrides any earlier message: a tag can be both unreadable and
+            # randomly identified — a phone emulating a card is both — and the
+            # random ID is the more fundamental obstacle, because it defeats
+            # pairing even if the tag were otherwise perfectly readable.
+            payload["unstable_id"] = True
+            payload["error"] = (
+                "This tag reports a new random ID every tap, so it cannot be "
+                "paired. Use an NTAG or Mifare Classic tag instead."
+            )
 
-                    return MediaEvent(
-                        kind=MediaEventKind.UNLOAD,
-                        source_type=SourceType.NFC,
-                        source_id=self.source_id,
-                        media_id=removed_uid,
-                        uri=removed_uri,
-                    )
+        if self._logger:
+            self._logger.info(
+                f"NfcSource: new tag {uid_hex} "
+                f"({(meta or {}).get('label') or (meta or {}).get('type', 'unknown')}), "
+                f"uri={uri}"
+            )
 
-        return None
+        return MediaEvent(
+            kind=MediaEventKind.LOAD,
+            source_type=SourceType.NFC,
+            source_id=self.source_id,
+            media_id=uid_hex,
+            uri=uri,
+            payload=payload,
+        )
+
+    def _on_tag_absent(self) -> Optional[PluginEvent]:
+        """Handle a clean "no tag present" answer from the reader."""
+        if not self._last_uid_hex:
+            return None
+
+        now = time.monotonic()
+        if self._absent_since is None:
+            self._absent_since = now
+        self._missing_count += 1
+
+        elapsed = now - self._absent_since
+        if self._missing_count < self.DEBOUNCE_THRESHOLD:
+            return None
+        if elapsed < self.removal_grace:
+            return None
+
+        removed_uid = self._last_uid_hex
+        if self._logger:
+            self._logger.info(
+                f"NfcSource: tag removed: {removed_uid} "
+                f"(absent {elapsed:.2f}s over {self._missing_count} polls)"
+            )
+        self._last_uid_hex = None
+        self._missing_count = 0
+        self._absent_since = None
+
+        removed_uri = self.current_tag_uri
+        self.current_tag_uid = None
+        self.current_tag_uri = None
+        self.current_tag_meta = None
+
+        return MediaEvent(
+            kind=MediaEventKind.UNLOAD,
+            source_type=SourceType.NFC,
+            source_id=self.source_id,
+            media_id=removed_uid,
+            uri=removed_uri,
+        )
 
     # ── Reader factory ─────────────────────────────────────────────────
 
@@ -457,7 +748,7 @@ class NfcSource(MediaSource):
             return PN532UARTReader(path, baud, logger=self._logger)
         elif rtype == "acr122u":
             try:
-                from nfc.acr122u_backend import ACR122UReader
+                from nfc_core.acr122u_backend import ACR122UReader
                 return ACR122UReader(logger=self._logger)
             except ImportError:
                 if self._logger:
@@ -465,7 +756,7 @@ class NfcSource(MediaSource):
                 return None
         elif rtype == "proxmark":
             try:
-                from nfc.proxmark_backend import ProxmarkReader
+                from nfc_core.proxmark_backend import ProxmarkReader
                 return ProxmarkReader(path, logger=self._logger)
             except ImportError:
                 if self._logger:
@@ -473,7 +764,7 @@ class NfcSource(MediaSource):
                 return None
         elif rtype == "nfcpy":
             try:
-                from nfc.nfcpy_backend import NfcPyReader
+                from nfc_core.nfcpy_backend import NfcPyReader
                 return NfcPyReader(path, logger=self._logger)
             except ImportError:
                 if self._logger:
@@ -486,11 +777,21 @@ class NfcSource(MediaSource):
 
     # ── Tag classification ─────────────────────────────────────────────
 
-    def _classify_tag(self, uid: bytes) -> Dict[str, Any]:
-        """Return basic metadata about the presented tag.
+    def _classify_tag(self, uid: bytes, target=None) -> Dict[str, Any]:
+        """Return metadata about the presented tag.
 
-        Distinguishes between Mifare Classic, NTAG21x, Ultralight, and
-        other tag families.  Results are cached per UID.
+        Classification is read from the tag's ISO 14443-3 activation data —
+        ATQA and SAK — which every Type A tag announces during anticollision,
+        before a single command is sent to it.  It costs nothing and is exact.
+
+        The previous approach was to *try* authenticating as a Mifare Classic
+        and infer the family from whether that worked.  A failed
+        authentication deselects the tag, so the probe destroyed the very
+        session the next probe needed: only the first key in a list could ever
+        succeed, an NTAG came out labelled DESFire, and the read path then
+        addressed it with the wrong protocol.
+
+        Results are cached per UID.
         """
         uid_hex = uid.hex().upper()
 
@@ -500,70 +801,163 @@ class NfcSource(MediaSource):
 
         meta: Dict[str, Any] = {
             "uid": uid_hex,
-            "type": "unknown",
+            "type": tag_identity.TYPE_UNKNOWN,
+            "label": "unknown tag",
             "capacity_bytes": 0,
             "protected": False,
+            "random_uid": tag_identity.is_random_uid(uid) if isinstance(uid, bytes) else False,
         }
 
-        authenticated = False
+        if target is None:
+            target = self._last_target()
 
-        # Heuristics for additional families
-        if len(uid) == 4 and hasattr(self._reader, 'read_uid_iso14443b'):
-            try:
-                test_uid = self._reader.read_uid_iso14443b(timeout=0.1)
-                if test_uid and test_uid == uid:
-                    meta["type"] = "iso14443b"
-                    self._cache_tag_classification(uid_hex, meta)
-                    return meta
-            except Exception:
-                pass
+        sak = getattr(target, "sak", None) if _is_target(target) else None
+        atqa = getattr(target, "atqa", None) if _is_target(target) else None
+        protocol = getattr(target, "protocol", None) if _is_target(target) else None
 
-        if len(uid) == 8 and uid[0] == 0xE0:
-            meta["type"] = "iso15693"
-            self._cache_tag_classification(uid_hex, meta)
-            return meta
-
-        if len(uid) == 8:
-            meta["type"] = "felica"
-            self._cache_tag_classification(uid_hex, meta)
-            return meta
-
-        # Try Mifare Classic authentication
-        keys = [
-            b"\xFF\xFF\xFF\xFF\xFF\xFF",
-            b"\xD3\xF7\xD3\xF7\xD3\xF7",
-            b"\xA0\xA1\xA2\xA3\xA4\xA5",
-        ]
-        for key in keys:
-            try:
-                if self._reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
-                    break
-            except Exception:
-                break
-            finally:
-                time.sleep(0.05)
-
-        if authenticated:
-            meta["type"] = "mifare-classic"
-            blocks = list(self._iter_mifare_data_blocks())
-            meta["capacity_bytes"] = len(blocks) * 16  # MIFARE_CLASSIC_BLOCK_SIZE
+        if sak is not None:
+            meta.update(tag_identity.classify_sak(sak, atqa))
+            meta["sak"] = f"{sak:02X}"
+            if atqa is not None:
+                meta["atqa"] = f"{atqa:04X}"
+        elif protocol and protocol != tag_identity.PROTO_106A:
+            meta.update(self._classify_non_type_a(protocol))
         else:
-            try:
-                if self._reader.mifare_classic_read_block(4) is not None:
-                    meta["type"] = "ntag21x"
-                    if len(uid) == 7:
-                        meta["type"] = "ultralight"
-                    pages = list(self._iter_ntag_pages(uid_hex))
-                    meta["capacity_bytes"] = len(pages) * 4
-            except Exception:
-                meta["protected"] = True
+            meta.update(self._probe_family(uid_hex))
 
-        if meta["type"] == "unknown" and len(uid) == 7:
-            meta["type"] = "desfire"
+        if protocol:
+            meta["protocol"] = protocol
+
+        # Page-addressed families report their exact model and size through
+        # GET_VERSION. This is the only non-destructive way to tell an NTAG213
+        # from a 215 from a 216, and it is never sent to a tag whose SAK says
+        # it is not in this family.
+        if meta.get("type") in tag_identity.PAGE_ADDRESSED:
+            self._refine_page_addressed(meta, uid_hex)
+        elif meta.get("type") in (tag_identity.TYPE_CLASSIC, tag_identity.TYPE_CLASSIC_MINI):
+            blocks = self._iter_mifare_data_blocks()
+            meta["capacity_bytes"] = len(blocks) * 16
+
+        meta["ndef_capable"] = meta.get("type") in tag_identity.NDEF_CAPABLE
 
         self._cache_tag_classification(uid_hex, meta)
         return meta
+
+    def _last_target(self):
+        """Activation data from the reader's most recent detection, if any."""
+        getter = getattr(self._reader, "last_target", None)
+        if getter is None:
+            return None
+        try:
+            result = getter()
+        except Exception:
+            return None
+        return result if _is_target(result) else None
+
+    @staticmethod
+    def _classify_non_type_a(protocol: str) -> Dict[str, Any]:
+        """Family for a tag detected on something other than ISO 14443-3A."""
+        if protocol == tag_identity.PROTO_106B:
+            return {"type": tag_identity.TYPE_ISO14443B,
+                    "label": "ISO 14443-B card", "capacity_bytes": 0}
+        if protocol in (tag_identity.PROTO_212F, tag_identity.PROTO_424F):
+            return {"type": tag_identity.TYPE_FELICA,
+                    "label": "FeliCa card", "capacity_bytes": 0}
+        if protocol == tag_identity.PROTO_JEWEL:
+            return {"type": tag_identity.TYPE_JEWEL,
+                    "label": "Topaz / Jewel tag", "capacity_bytes": 0}
+        return {"type": tag_identity.TYPE_UNKNOWN,
+                "label": f"{protocol} tag", "capacity_bytes": 0}
+
+    def _probe_family(self, uid_hex: str) -> Dict[str, Any]:
+        """Identify a tag on a backend that cannot report SAK.
+
+        Ordered so the non-destructive test comes first: reading the NTAG
+        capability container is a plain read, and a Mifare Classic answers it
+        with a refusal because page 3 of a Classic is a sector trailer.  Only
+        if that says nothing do we fall back to an authentication probe, and
+        even then the tag is re-selected between key attempts.
+        """
+        pages = self._read_ntag_user_pages(uid_hex)
+        if pages:
+            return {
+                "type": tag_identity.TYPE_NTAG,
+                "label": "NTAG21x / Ultralight",
+                "capacity_bytes": pages * 4,
+            }
+
+        if self._probe_mifare_classic(uid_hex):
+            return {
+                "type": tag_identity.TYPE_CLASSIC,
+                "label": "Mifare Classic",
+                "capacity_bytes": 0,   # filled in by the caller
+            }
+
+        return {
+            "type": tag_identity.TYPE_UNKNOWN,
+            "label": "unrecognised tag",
+            "capacity_bytes": 0,
+            "protected": True,
+        }
+
+    def _probe_mifare_classic(self, uid_hex: str) -> bool:
+        """Try the known Classic keys against sector 1, re-selecting between.
+
+        The old loop broke out on the first exception and never re-selected,
+        so the second and third keys were tried against a card that had
+        already been deselected by the first failure — which is why
+        NDEF-formatted Classic tags, whose data key is the second in the list,
+        were never recognised.
+        """
+        try:
+            uid = bytes.fromhex(uid_hex)
+        except ValueError:
+            return False
+        handler = get_handler(
+            tag_identity.TYPE_CLASSIC, uid, key_manager=self._key_manager
+        )
+        if handler is None:
+            return False
+        try:
+            return bool(handler.authenticate_sector(self._reader, 1))
+        except Exception:
+            return False
+
+    def _refine_page_addressed(self, meta: Dict[str, Any], uid_hex: str) -> None:
+        """Pin down the exact NTAG / Ultralight model and usable capacity."""
+        version = None
+        getter = getattr(self._reader, "get_version", None)
+        if getter is not None:
+            try:
+                version = getter()
+            except Exception:
+                version = None
+        if not isinstance(version, (bytes, bytearray)):
+            version = None
+
+        parsed = tag_identity.parse_version(bytes(version)) if version else None
+        if parsed:
+            meta["type"] = parsed["type"]
+            meta["label"] = parsed["label"]
+            meta["capacity_bytes"] = parsed["user_bytes"]
+            self._ntag_pages_cache[uid_hex] = min(
+                parsed["user_pages"], _NTAG_MAX_USER_PAGES
+            )
+            return
+
+        # No GET_VERSION: fall back to the capability container, which gives
+        # the NDEF area size even when the model stays unknown.
+        pages = self._read_ntag_user_pages(uid_hex)
+        if pages:
+            meta["capacity_bytes"] = pages * 4
+            if meta["type"] == tag_identity.TYPE_ULTRALIGHT:
+                # SAK 0x00 covers both families; a readable NDEF capability
+                # container makes NTAG much the likelier of the two.
+                meta["type"] = tag_identity.TYPE_NTAG
+                meta["label"] = "NTAG21x"
+        else:
+            meta["capacity_bytes"] = 0
+            meta["protected"] = True
 
     def _cache_tag_classification(self, uid_hex: str, meta: Dict[str, Any]) -> None:
         """Cache tag classification with LRU eviction."""
@@ -579,7 +973,7 @@ class NfcSource(MediaSource):
 
         Page 3 of every NTAG21x is a 4-byte CC: magic ``0xE1``, version,
         size/8, access. Byte 2 times 8 is the NDEF data area in bytes, which is
-        exactly the user memory — 144 bytes on an NTAG213, 504 on a 215, 872 on
+        exactly the user memory — 144 bytes on an NTAG213, 496 on a 215, 872 on
         a 216. Returns None when the CC cannot be read or is not an NDEF tag,
         leaving the caller to fall back.
         """
@@ -603,15 +997,16 @@ class NfcSource(MediaSource):
         """Yield user-writable pages for NTAG21x devices.
 
         Sized from the tag itself. This used to return pages 4–133
-        unconditionally — the NTAG215 layout — so a long URI written to a
-        smaller NTAG213 ran past the end of the tag, page writes failing
-        silently one by one while the write reported success.
+        unconditionally — past the end of NTAG215 user memory and into the
+        configuration pages — so a long URI written to a smaller NTAG213 ran
+        past the end of the tag, page writes failing silently one by one while
+        the write reported success.
         """
         pages = self._read_ntag_user_pages(uid_hex)
         if pages is None:
-            # Unreadable CC: keep the historic NTAG215 assumption rather than
-            # refusing to write at all. Wrong only for tags that already could
-            # not tell us anything.
+            # Unreadable CC: keep the NTAG215 assumption rather than refusing
+            # to write at all. Wrong only for tags that already could not tell
+            # us anything.
             pages = _NTAG_FALLBACK_USER_PAGES
             self._log_once(
                 "ntag-cc-unreadable", "warning",
@@ -630,81 +1025,159 @@ class NfcSource(MediaSource):
             blocks.append(block)
         return blocks
 
-    def _read_ndef_records(self) -> List[Any]:
+    def _select(self) -> Optional[bytes]:
+        """Re-activate the tag and return its UID, or ``None``.
+
+        Data exchange addresses the target that activation selected, so a read
+        must always start here — particularly after classification, which on
+        some paths leaves the tag deselected.
+        """
+        selector = getattr(self._reader, "select_target", None)
+        if selector is not None:
+            try:
+                target = selector(timeout=0.2)
+            except ReaderError:
+                raise
+            except Exception:
+                target = None
+            if _is_target(target):
+                return target.uid
+        uid = self._reader.read_uid(timeout=0.1)
+        return bytes(uid) if uid else None
+
+    def _read_media(self, meta: Optional[Dict[str, Any]]):
+        """Read the tag's content, retrying a lossy link before giving up.
+
+        Returns ``(uri, records, unreadable, error)``.  ``unreadable`` is the
+        important distinction: a tag we failed to read is not a blank tag, and
+        reporting one as the other sent users off to pair a card that already
+        had a URI on it.  The old code had no retry at all — a single dropped
+        frame was cached as "blank" until the tag was physically lifted and
+        re-presented.
+        """
+        family = (meta or {}).get("type", tag_identity.TYPE_UNKNOWN)
+
+        if meta and not meta.get("ndef_capable", True):
+            label = meta.get("label", family)
+            return None, [], True, (
+                f"{label} is not a tag this plugin can store a link on. "
+                f"Use an NTAG21x or Mifare Classic tag."
+            )
+
+        last_error = None
+        for attempt in range(self.CONTENT_READ_ATTEMPTS):
+            if self._stopping:
+                return None, [], True, "reader stopped"
+            try:
+                records, raw = self._read_ndef_records(return_raw=True)
+            except ReaderTransportError:
+                raise
+            except ReaderProtocolError as e:
+                last_error = str(e)
+                recover = getattr(self._reader, "recover", None)
+                if recover is not None:
+                    try:
+                        recover()
+                    except Exception:
+                        pass
+                continue
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+            uri = ndef_codec.first_uri(records)
+            if uri:
+                return uri, records, False, None
+            if records:
+                # Readable, but carries something other than a URI.
+                return None, records, False, None
+            if raw:
+                # We got bytes off the tag; it is genuinely blank or holds
+                # something we cannot decode. Retrying will not change that.
+                return None, [], False, None
+
+            last_error = last_error or "no data returned from tag"
+
+        if self._logger:
+            self._logger.warning(
+                f"NfcSource: could not read tag content after "
+                f"{self.CONTENT_READ_ATTEMPTS} attempts: {last_error}"
+            )
+        return None, [], True, last_error
+
+    def _read_ndef_records(self, return_raw: bool = False):
         """Read and return all NDEF records present on the current tag."""
         import ndef
 
-        uid = self._reader.read_uid(timeout=0.1)
+        uid = self._select()
         if not uid:
-            return []
+            return ([], b"") if return_raw else []
 
         tag_meta = self._classify_tag(uid)
-        is_ntag = tag_meta.get("type") in ("ntag21x", "ultralight")
+        family = tag_meta.get("type", tag_identity.TYPE_UNKNOWN)
+        if family == tag_identity.TYPE_UNKNOWN:
+            # Nothing said what this is. The page-addressed protocol is the
+            # safer guess: its read command is also valid on a Classic, while
+            # the reverse returns four overlapping pages per call and
+            # scrambles the data.
+            family = tag_identity.TYPE_NTAG
 
-        data = bytearray()
-        if is_ntag:
-            blocks_iter = self._iter_ntag_pages(uid.hex().upper())
-            read_fn = self._reader.ntag2xx_read_block
+        if family in tag_identity.PAGE_ADDRESSED:
+            handler = get_handler(
+                family, uid, key_manager=self._key_manager,
+                pages=list(self._iter_ntag_pages(uid.hex().upper())),
+            )
+        elif family in (tag_identity.TYPE_CLASSIC, tag_identity.TYPE_CLASSIC_MINI):
+            handler = get_handler(
+                family, uid, key_manager=self._key_manager,
+                blocks=self._iter_mifare_data_blocks(),
+            )
         else:
-            blocks_iter = self._iter_mifare_data_blocks()
-            read_fn = self._reader.mifare_classic_read_block
+            handler = get_handler(family, uid, key_manager=self._key_manager)
+        if handler is None:
+            return ([], b"") if return_raw else []
 
-        for i in blocks_iter:
-            block = read_fn(i)
-            if block:
-                data.extend(block)
-                if 0xFE in block:
-                    break
-            else:
-                break
-
+        data = handler.read_ndef(self._reader)
         if not data:
-            return []
+            return ([], b"") if return_raw else []
 
-        records = []
-        if len(data) > 2 and data[0] == 0x03:
-            length = data[1]
-            ndef_data = data[2:2 + length]
+        records = self._decode_records(bytes(data), ndef)
+        return (records, bytes(data)) if return_raw else records
+
+    @staticmethod
+    def _decode_records(data: bytes, ndef) -> List[Any]:
+        """Turn a raw tag data area into NDEF records.
+
+        Walks the TLV structure properly rather than assuming the message
+        starts at byte 0, which is false for any tag carrying a lock-control
+        or memory-control TLV ahead of it, and for messages over 254 bytes
+        that use the long length form.
+        """
+        records: List[Any] = []
+        message = ndef_codec.find_ndef_message(data)
+
+        if message:
             try:
-                for rec in ndef.message_decoder(ndef_data):
+                for rec in ndef.message_decoder(message):
                     records.append(rec)
             except Exception:
-                # Try fallback URI extraction
-                if len(ndef_data) > 3:
-                    for i in range(len(ndef_data) - 2):
-                        if ndef_data[i] == 0x55:
-                            uri_data = ndef_data[i + 2:]
-                            if uri_data:
-                                try:
-                                    uri_str = uri_data.decode("utf-8", errors="ignore").strip("\x00\xfe")
-                                    if uri_str:
-                                        records.append(ndef.UriRecord(uri_str))
-                                        break
-                                except Exception:
-                                    pass
+                records = []
 
         if not records:
-            try:
-                import re
-                decoded = data.decode("utf-8", errors="ignore").strip("\x00")
-                match = re.search(r"([a-zA-Z][a-zA-Z0-9+.-]*://[^\x00\xfe]{1,2048})", decoded)
-                if match:
-                    uri = match.group(1).strip()
-                    try:
-                        records.append(ndef.UriRecord(uri))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            # Either the TLV would not parse or the message would not decode.
+            # A URI visible in the raw bytes is still worth launching.
+            uri = ndef_codec.extract_uri_fallback(message or data)
+            if uri:
+                try:
+                    records.append(ndef.UriRecord(uri))
+                except Exception:
+                    pass
 
         return records
 
     def _read_ndef_uri(self) -> Optional[str]:
         """Return the first URI record's value, or None."""
-        for record in self._read_ndef_records():
-            if hasattr(record, "uri") and record.__class__.__name__.endswith("UriRecord"):
-                return record.uri
-        return None
+        return ndef_codec.first_uri(self._read_ndef_records())
 
     # ── NDEF Write (for pairing) ───────────────────────────────────────
 
@@ -749,98 +1222,74 @@ class NfcSource(MediaSource):
     def _write_ndef_uri_locked(self, uid: bytes, uri: str) -> Tuple[bool, Optional[str]]:
         import ndef
 
-        uri_bytes = uri.encode("utf-8")
-
         try:
             record = ndef.UriRecord(uri)
             message = b"".join(ndef.message_encoder([record]))
-            tlv = bytearray([0x03, len(message)]) + message + b"\xFE"
+            tlv = ndef_codec.encode_tlv(message)
         except Exception as e:
             return False, f"Failed to create NDEF record: {e}"
 
-        # Determine tag type by attempting Classic auth
-        authenticated = False
-        keys = [
-            b'\xFF\xFF\xFF\xFF\xFF\xFF',
-            b'\xD3\xF7\xD3\xF7\xD3\xF7',
-            b'\xA0\xA1\xA2\xA3\xA4\xA5',
-        ]
-        for key in keys:
-            try:
-                if self._reader.mifare_classic_authenticate_block(uid, 4, 0x60, key):
-                    authenticated = True
-                    break
-            except Exception:
-                authenticated = False
-                break
-            finally:
-                time.sleep(0.05)
+        try:
+            uid_hex = uid.hex().upper()
+        except AttributeError:
+            uid_hex = str(uid)
 
-        # Compute capacity
-        if authenticated:
-            blocks = list(self._iter_mifare_data_blocks())
-            max_payload = len(blocks) * 16
+        meta = self._tag_classification_cache.get(uid_hex)
+        family = (meta or {}).get("type")
+
+        if family in (tag_identity.TYPE_CLASSIC, tag_identity.TYPE_CLASSIC_MINI):
+            authenticated = True
+        elif family in tag_identity.PAGE_ADDRESSED:
+            authenticated = False
         else:
-            # No Classic authentication and no readable capability container
-            # means this is neither a Classic tag nor an NDEF-formatted NTAG.
-            # Writing anyway is what produced "Write failed at page 4" on a
-            # keyring fob: every page write is rejected, one at a time, and the
-            # first refusal is reported as if it were a transient error.
-            if self._read_ntag_user_pages(uid.hex().upper()) is None:
-                return False, (
-                    "Unsupported tag — not a Mifare Classic or an NDEF-"
-                    "formatted NTAG. It may need formatting as NDEF first."
-                )
-            pages = list(self._iter_ntag_pages(uid.hex().upper()))
-            max_payload = len(pages) * 4
+            # No classification to go on (a direct call, or a backend that
+            # cannot report SAK). Probe, non-destructively first.
+            if self._read_ntag_user_pages(uid_hex) is not None:
+                authenticated = False
+            else:
+                authenticated = self._probe_mifare_classic(uid_hex)
+                if not authenticated:
+                    # Neither a Classic we can open nor an NDEF-formatted
+                    # NTAG. Writing anyway is what produced "Write failed at
+                    # page 4" on a keyring fob: every page write is rejected,
+                    # one at a time, and the first refusal is reported as if
+                    # it were a transient error.
+                    return False, (
+                        "Unsupported tag — not a Mifare Classic or an NDEF-"
+                        "formatted NTAG. It may need formatting as NDEF first."
+                    )
 
-        estimated_size = 2 + 4 + 1 + len(uri_bytes) + 1
-        if estimated_size > max_payload:
+        if authenticated:
+            handler = get_handler(
+                tag_identity.TYPE_CLASSIC,
+                uid,
+                key_manager=self._key_manager,
+                blocks=self._iter_mifare_data_blocks(),
+            )
+            handler_type = tag_identity.TYPE_CLASSIC
+        else:
+            handler = get_handler(
+                tag_identity.TYPE_NTAG,
+                uid,
+                key_manager=self._key_manager,
+                pages=list(self._iter_ntag_pages(uid_hex)),
+            )
+            handler_type = tag_identity.TYPE_NTAG
+        if handler is None:
+            return False, f"No handler available for tag type {handler_type}"
+
+        # Size the write from the URI, not from the encoded message: the
+        # check must hold even if the encoder produced something unexpected.
+        required = max(len(tlv), ndef_codec.uri_storage_size(uri))
+        max_payload = handler.get_capacity()
+        if required > max_payload:
             # Checked before the first page write, so a tag that cannot hold
             # the URI is left exactly as it was rather than half-written.
-            msg = f"Tag too small: needs {estimated_size} bytes, holds {max_payload}"
-            return False, msg
+            return False, (
+                f"Tag too small: needs {required} bytes, holds {max_payload}"
+            )
 
         try:
-            if authenticated:
-                # Mifare Classic write path
-                while len(tlv) % 16 != 0:
-                    tlv.append(0x00)
-
-                writable_blocks = self._iter_mifare_data_blocks()
-                required_blocks = len(tlv) // 16
-                if required_blocks > len(writable_blocks):
-                    return False, (
-                        f"URI too long for writable Mifare blocks: needs {required_blocks}, "
-                        f"available {len(writable_blocks)}."
-                    )
-
-                for i in range(0, len(tlv), 16):
-                    block_num = writable_blocks[i // 16]
-                    block_data = tlv[i : i + 16]
-                    if not self._reader.mifare_classic_write_block(block_num, block_data):
-                        return False, f"Write failed at block {block_num}"
-
-                return True, None
-            else:
-                # NTAG write path
-                while len(tlv) % 4 != 0:
-                    tlv.append(0x00)
-
-                pages = list(self._iter_ntag_pages(uid.hex().upper()))
-                required_pages = len(tlv) // 4
-                if required_pages > len(pages):
-                    return False, (
-                        f"Tag too small: needs {required_pages} pages, "
-                        f"holds {len(pages)}"
-                    )
-
-                for i in range(0, len(tlv), 4):
-                    page_num = pages[i // 4]
-                    page_data = tlv[i : i + 4]
-                    if not self._reader.ntag2xx_write_block(page_num, page_data):
-                        return False, f"Write failed at page {page_num}"
-
-                return True, None
+            return handler.write_ndef(self._reader, bytes(tlv))
         except Exception as e:
             return False, str(e)
