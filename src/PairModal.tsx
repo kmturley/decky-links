@@ -1,9 +1,8 @@
-import { FC, useEffect, useState } from "react";
+import { FC, useEffect, useMemo, useState } from "react";
 import { DialogButton, Spinner } from "@decky/ui";
-import { FaLink, FaTimes } from "react-icons/fa";
+import { FaExternalLinkAlt, FaLink, FaTimes } from "react-icons/fa";
 import {
   getQrPreview,
-  saveGameCard,
   useSharedState,
   type SourceStatus,
   type ActiveMedium,
@@ -24,6 +23,30 @@ import {
  *  number of pixels per module — the same no-resampling rule as print, because
  *  a soft QR photographs badly and photographing this is the point. */
 const PREVIEW_MODULE_PX = 5;
+
+/** CoverForge (https://github.com/kmturley/cover-forge) generates printable
+ *  covers and cards for a game across every physical format this plugin (and
+ *  a few it doesn't) supports — dvd, bluray, vhs, cd, cassette, floppy, and
+ *  three NFC layouts. Rendering that on the Deck would mean carrying its whole
+ *  template set and a full layout engine in Python for a feature used rarely
+ *  and never urgently; CoverForge already exists, is kept current
+ *  independently of this plugin's release cycle, and runs wherever the QR
+ *  code ends up — a phone is a better device for trimming and printing a card
+ *  than a Deck is anyway.
+ *
+ *  `app` and `template` are read once on load and stripped from the address
+ *  bar, so opening this twice for two different games never leaves stale
+ *  params behind for the second to inherit. */
+const COVERFORGE_URL = "https://kmturley.github.io/cover-forge";
+const COVERFORGE_DEFAULT_TEMPLATE = "nfc-card";
+
+function coverForgeUrl(appid: string): string {
+  const params = new URLSearchParams({
+    template: COVERFORGE_DEFAULT_TEMPLATE,
+    app: appid,
+  });
+  return `${COVERFORGE_URL}?${params.toString()}`;
+}
 
 export interface PairTarget {
   uri: string;
@@ -112,33 +135,36 @@ const TriggerLine: FC<{
 const CardPanel: FC<{ target: PairTarget }> = ({ target }) => {
   const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+
+  // Pure string construction, not a source of truth from the backend — so
+  // unlike the reader/writer flows above, there is nothing here that can
+  // fail independently of the QR render itself.
+  const url = useMemo(() => coverForgeUrl(target.appid), [target.appid]);
 
   useEffect(() => {
     let cancelled = false;
     setPreview(null);
     setError(null);
-    setSaved(null);
     (async () => {
-      const result = await getQrPreview(target.uri, PREVIEW_MODULE_PX);
+      // Unlike the steam:// URI this used to encode, this QR is meant to be
+      // scanned and opened — a normal https:// link a phone's camera already
+      // knows what to do with.
+      const result = await getQrPreview(url, PREVIEW_MODULE_PX);
       if (cancelled) return;
       if (result?.ok && result.data_uri) setPreview(result.data_uri);
       else setError(result?.error || "Could not generate a code");
     })();
     return () => { cancelled = true; };
-  }, [target.uri]);
+  }, [url]);
 
-  const onSave = async () => {
-    setSaving(true);
-    try {
-      const result = await saveGameCard(target.uri, target.label, target.appid);
-      setSaved(result?.ok ? (result.dir ?? "saved") : null);
-      if (!result?.ok) setError(result?.error || "Could not save the card");
-    } finally {
-      setSaving(false);
-    }
-  };
+  // Only whether the call exists is captured here — never the function
+  // itself. SteamClient's methods are proxy stubs bound to their parent
+  // namespace object; detaching one into a standalone reference (as
+  // `const f = window.SteamClient.System.OpenInSystemBrowser`) loses that
+  // binding, and the stub then throws "Unknown method" when called — a real
+  // bug caught live on a Deck, not a hypothetical. Below, the call stays
+  // attached to `SteamClient.System` at the point it is made.
+  const canOpenInSystemBrowser = !!window.SteamClient?.System?.OpenInSystemBrowser;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
@@ -158,25 +184,26 @@ const CardPanel: FC<{ target: PairTarget }> = ({ target }) => {
             : <Spinner />}
       </div>
 
-      {/* Deliberately not "scan this". A phone that scans it gets a steam://
-          URI it cannot open, which reads as a broken feature. The code is
-          something to show to the camera, not something to open. */}
       <div style={{ fontSize: "0.75em", opacity: 0.75, textAlign: "center", maxWidth: 220 }}>
-        Present this QR code either printed or on a screen to a connected camera.
+        Scan the QR code with your phone camera to design and print cover art
+        using CoverForge.
       </div>
 
-      <DialogButton
-        onClick={() => void onSave()}
-        disabled={saving || !preview}
-        style={{ minWidth: 0, width: "fit-content", padding: "8px 16px" }}
-      >
-        {saving ? "Saving…" : "Save printable card"}
-      </DialogButton>
-
-      {saved && (
-        <div style={{ fontSize: "0.7em", opacity: 0.7, textAlign: "center", wordBreak: "break-all" }}>
-          Saved to {saved}
-        </div>
+      {canOpenInSystemBrowser && (
+        <DialogButton
+          onClick={() => window.SteamClient.System.OpenInSystemBrowser(url)}
+          style={{
+            minWidth: 0,
+            width: "fit-content",
+            padding: "8px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <FaExternalLinkAlt size={11} />
+          Open in CoverForge
+        </DialogButton>
       )}
     </div>
   );
